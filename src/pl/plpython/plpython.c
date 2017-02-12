@@ -346,7 +346,7 @@ static char *PLy_procedure_name(PLyProcedure *);
 static void
 PLy_elog(int, const char *,...)
 __attribute__((format(printf, 2, 3)));
-static void PLy_get_spi_error_data(PyObject *exc, char **detail, char **hint, char **query, int *position);
+static void PLy_get_spi_error_data(PyObject *exc, int *sqlerrcode, char **detail, char **hint, char **query, int *position);
 static void PLy_traceback(char **, char **, int *);
 
 static void *PLy_malloc(size_t);
@@ -2166,7 +2166,6 @@ PLy_input_tuple_funcs(PLyTypeInfo *arg, TupleDesc desc)
 
 	if (arg->is_rowtype == 0)
 		elog(ERROR, "PLyTypeInfo struct is initialized for a Datum");
-
 	arg->is_rowtype = 1;
 
 	if (arg->in.r.natts != desc->natts)
@@ -2557,6 +2556,9 @@ PLyList_FromArray(PLyDatumToOb *arg, Datum d)
 	int			length;
 	int			lbound;
 	int			i;
+	char		*dataptr;
+	bits8		*bitmap;
+	int			bitmask;
 
 	if (ARR_NDIM(array) == 0)
 		return PyList_New(0);
@@ -2571,23 +2573,38 @@ PLyList_FromArray(PLyDatumToOb *arg, Datum d)
 	lbound = ARR_LBOUND(array)[0];
 	list = PyList_New(length);
 
+	dataptr = ARR_DATA_PTR(array);
+	bitmap = ARR_NULLBITMAP(array);
+	bitmask = 1;
+
 	for (i = 0; i < length; i++)
 	{
-		Datum		elem;
-		bool		isnull;
-		int			offset;
-
-		offset = lbound + i;
-		elem = array_ref(array, 1, &offset, arg->typlen,
-						 elm->typlen, elm->typbyval, elm->typalign,
-						 &isnull);
-		if (isnull)
+		/* Get source element, checking for NULL */
+		if (bitmap && (*bitmap & bitmask) == 0)
 		{
 			Py_INCREF(Py_None);
 			PyList_SET_ITEM(list, i, Py_None);
 		}
 		else
-			PyList_SET_ITEM(list, i, elm->func(elm, elem));
+		{
+			Datum		itemvalue;
+
+			itemvalue = fetch_att(dataptr, elm->typbyval, elm->typlen);
+			PyList_SET_ITEM(list, i, elm->func(elm, itemvalue));
+			dataptr = att_addlength_pointer(dataptr, elm->typlen, dataptr);
+			dataptr = (char *) att_align_nominal(dataptr, elm->typalign);
+		}
+
+		/* advance bitmap pointer if any */
+		if (bitmap)
+		{
+			bitmask <<= 1;
+			if (bitmask == 0x100 /* (1<<8) */)
+			{
+				bitmap++;
+				bitmask = 1;
+			}
+		}
 	}
 
 	return list;
@@ -4621,7 +4638,7 @@ PLy_spi_exception_set(PyObject *excclass, ErrorData *edata)
 	if (!spierror)
 		goto failure;
 
-	spidata = Py_BuildValue("(zzzi)", edata->detail, edata->hint,
+	spidata = Py_BuildValue("(izzzi)", edata->sqlerrcode, edata->detail, edata->hint,
 							edata->internalquery, edata->internalpos);
 	if (!spidata)
 		goto failure;
@@ -4661,6 +4678,7 @@ PLy_elog(int elevel, const char *fmt,...)
 			   *val,
 			   *tb;
 	const char *primary = NULL;
+	int        sqlerrcode = 0;
 	char	   *detail = NULL;
 	char	   *hint = NULL;
 	char	   *query = NULL;
@@ -4670,7 +4688,7 @@ PLy_elog(int elevel, const char *fmt,...)
 	if (exc != NULL)
 	{
 		if (PyErr_GivenExceptionMatches(val, PLy_exc_spi_error))
-			PLy_get_spi_error_data(val, &detail, &hint, &query, &position);
+			PLy_get_spi_error_data(val, &sqlerrcode, &detail, &hint, &query, &position);
 		else if (PyErr_GivenExceptionMatches(val, PLy_exc_fatal))
 			elevel = FATAL;
 	}
@@ -4711,7 +4729,8 @@ PLy_elog(int elevel, const char *fmt,...)
 	PG_TRY();
 	{
 		ereport(elevel,
-				(errmsg("%s", primary ? primary : "no exception data"),
+				(errcode(sqlerrcode ? sqlerrcode : ERRCODE_INTERNAL_ERROR),
+				 errmsg("%s", primary ? primary : "no exception data"),
 				 (detail) ? errdetail("%s", detail) : 0,
 				 (tb_depth > 0 && tbmsg) ? errcontext("%s", tbmsg) : 0,
 				 (hint) ? errhint("%s", hint) : 0,
@@ -4742,7 +4761,7 @@ PLy_elog(int elevel, const char *fmt,...)
  * Extract the error data from a SPIError
  */
 static void
-PLy_get_spi_error_data(PyObject *exc, char **detail, char **hint, char **query, int *position)
+PLy_get_spi_error_data(PyObject *exc, int* sqlerrcode, char **detail, char **hint, char **query, int *position)
 {
 	PyObject   *spidata = NULL;
 
@@ -4750,7 +4769,7 @@ PLy_get_spi_error_data(PyObject *exc, char **detail, char **hint, char **query, 
 	if (!spidata)
 		goto cleanup;
 
-	if (!PyArg_ParseTuple(spidata, "zzzi", detail, hint, query, position))
+	if (!PyArg_ParseTuple(spidata, "izzzi", sqlerrcode, detail, hint, query, position))
 		goto cleanup;
 
 cleanup:

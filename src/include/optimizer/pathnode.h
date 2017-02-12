@@ -8,7 +8,7 @@
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- * $PostgreSQL: pgsql/src/include/optimizer/pathnode.h,v 1.76 2007/01/20 20:45:40 tgl Exp $
+ * $PostgreSQL: pgsql/src/include/optimizer/pathnode.h,v 1.77 2008/01/01 19:45:58 momjian Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -75,13 +75,13 @@ extern Path *create_valuesscan_path(PlannerInfo *root, RelOptInfo *rel, RangeTbl
 extern Path *create_ctescan_path(PlannerInfo *root, RelOptInfo *rel, List *pathkeys);
 
 extern NestPath *create_nestloop_path(PlannerInfo *root,
-									  RelOptInfo *joinrel,
-									  JoinType jointype,
-									  Path *outer_path,
-									  Path *inner_path,
-									  List *restrict_clauses,
-									  List *mergeclause_list,    /*CDB*/
-									  List *pathkeys);
+					 RelOptInfo *joinrel,
+					 JoinType jointype,
+					 Path *outer_path,
+					 Path *inner_path,
+					 List *restrict_clauses,
+					 List *mergeclause_list,    /*CDB*/
+					 List *pathkeys);
 
 extern MergePath *create_mergejoin_path(PlannerInfo *root,
 					  RelOptInfo *joinrel,
@@ -117,25 +117,20 @@ extern RelOptInfo *build_join_rel(PlannerInfo *root,
 			   RelOptInfo *inner_rel,
 			   JoinType jointype,
 			   List **restrictlist_ptr);
-void
-build_joinrel_tlist(PlannerInfo *root, RelOptInfo *joinrel, List *input_tlist);
+extern void build_joinrel_tlist(PlannerInfo *root, RelOptInfo *joinrel, List *input_tlist);
 
 extern List *build_relation_tlist(RelOptInfo *rel);
 
-Var *
-cdb_define_pseudo_column(PlannerInfo   *root,
+extern Var *cdb_define_pseudo_column(PlannerInfo   *root,
                          RelOptInfo    *rel,
                          const char    *colname,
                          Expr          *defexpr,
                          int32          width);
 
-CdbRelColumnInfo *
-cdb_find_pseudo_column(PlannerInfo *root, Var *var);
+extern CdbRelColumnInfo *cdb_find_pseudo_column(PlannerInfo *root, Var *var);
 
-CdbRelColumnInfo *
-cdb_rte_find_pseudo_column(RangeTblEntry *rte, AttrNumber attno);
+extern CdbRelColumnInfo *cdb_rte_find_pseudo_column(RangeTblEntry *rte, AttrNumber attno);
 
-CdbRelDedupInfo *
-cdb_make_rel_dedup_info(PlannerInfo *root, RelOptInfo *rel);
+extern CdbRelDedupInfo *cdb_make_rel_dedup_info(PlannerInfo *root, RelOptInfo *rel);
 
 #endif   /* PATHNODE_H */

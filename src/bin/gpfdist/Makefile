@@ -6,7 +6,8 @@ ifeq ($(PORTNAME),win32)
   include $(top_builddir)/gpAux/Makefile.windows
 endif
 
-override CPPFLAGS := -I. $(CPPFLAGS)
+override CPPFLAGS := -I. $(CPPFLAGS) $(apr_includes) $(apr_cppflags)
+override CFLAGS := $(CFLAGS) $(apr_cflags)
 
 OBJS = gpfdist.o gpfdist_helper.o fstream.o gfile.o
 # configure should have been run by this point.
@@ -28,7 +29,7 @@ ifeq ($(PORTNAME),win32)
   OBJS += $(top_builddir)/src/port/glob.o
 endif
 
-LDLIBS += $(LIBS) $(GPFDIST_LIBS) $(shell $(APR_1_CONFIG) --link-ld --libs)
+LDLIBS += $(LIBS) $(GPFDIST_LIBS) $(apr_link_ld_libs)
 
 all: gpfdist$(EXE_EXT)
 
@@ -39,10 +40,10 @@ gfile.c: $(top_builddir)/src/backend/utils/misc/fstream/gfile.c
 	ln -s $< $@
 
 gpfdist$(EXE_EXT): $(OBJS)
-	$(CC) $(LDFLAGS) $(OBJS) $(LDLIBS) -o $@
+	$(CC) $(LDFLAGS) $(CFLAGS) $(OBJS) $(LDLIBS) -o $@
 
 install: all
-	$(INSTALL) gpfdist$(EXE_EXT) $(prefix)/bin
+	$(INSTALL) gpfdist$(EXE_EXT) $(DESTDIR)$(prefix)/bin
 
 installcheck:
 	$(MAKE) -C regress installcheck

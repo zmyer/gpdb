@@ -103,6 +103,10 @@
 		appendBinaryStringInfo(str, (const char *)&slen, sizeof(int)); \
 		if (slen>0) appendBinaryStringInfo(str, node->fldname, strlen(node->fldname));}
 
+/* Write a parse location field (actually same as INT case) */
+#define WRITE_LOCATION_FIELD(fldname) \
+	{ appendBinaryStringInfo(str, (const char *)&node->fldname, sizeof(int)); }
+
 /* Write a Node field */
 #define WRITE_NODE_FIELD(fldname) \
 	(_outNode(str, node->fldname))
@@ -169,12 +173,6 @@
 	}
 
 static void _outNode(StringInfo str, void *obj);
-
-/* When serializing a plan for workfile caching, we want to leave out
- * all variable fields by setting this to false */
-static bool print_variable_fields = true;
-/* rtable needed when serializing for workfile caching */
-static List *range_table = NULL;
 
 static void
 _outList(StringInfo str, List *node)
@@ -276,16 +274,13 @@ _outDatum(StringInfo str, Datum value, int typlen, bool typbyval)
 static void
 _outPlanInfo(StringInfo str, Plan *node)
 {
-	if (print_variable_fields)
-	{
-		WRITE_INT_FIELD(plan_node_id);
-		WRITE_INT_FIELD(plan_parent_node_id);
+	WRITE_INT_FIELD(plan_node_id);
+	WRITE_INT_FIELD(plan_parent_node_id);
 
-		WRITE_FLOAT_FIELD(startup_cost, "%.2f");
-		WRITE_FLOAT_FIELD(total_cost, "%.2f");
-		WRITE_FLOAT_FIELD(plan_rows, "%.0f");
-		WRITE_INT_FIELD(plan_width);
-	}
+	WRITE_FLOAT_FIELD(startup_cost, "%.2f");
+	WRITE_FLOAT_FIELD(total_cost, "%.2f");
+	WRITE_FLOAT_FIELD(plan_rows, "%.0f");
+	WRITE_INT_FIELD(plan_width);
 
 	WRITE_NODE_FIELD(targetlist);
 	WRITE_NODE_FIELD(qual);
@@ -293,29 +288,21 @@ _outPlanInfo(StringInfo str, Plan *node)
 	WRITE_BITMAPSET_FIELD(extParam);
 	WRITE_BITMAPSET_FIELD(allParam);
 
-	WRITE_INT_FIELD(nParamExec);
+	WRITE_NODE_FIELD(flow);
+	WRITE_INT_FIELD(dispatch);
+	WRITE_BOOL_FIELD(directDispatch.isDirectDispatch);
+	WRITE_NODE_FIELD(directDispatch.contentIds);
 
-	if (print_variable_fields)
-	{
-		WRITE_NODE_FIELD(flow);
-		WRITE_INT_FIELD(dispatch);
-		WRITE_BOOL_FIELD(directDispatch.isDirectDispatch);
-		WRITE_NODE_FIELD(directDispatch.contentIds);
+	WRITE_INT_FIELD(nMotionNodes);
+	WRITE_INT_FIELD(nInitPlans);
 
-		WRITE_INT_FIELD(nMotionNodes);
-		WRITE_INT_FIELD(nInitPlans);
-
-		WRITE_NODE_FIELD(sliceTable);
-	}
+	WRITE_NODE_FIELD(sliceTable);
 
     WRITE_NODE_FIELD(lefttree);
     WRITE_NODE_FIELD(righttree);
     WRITE_NODE_FIELD(initPlan);
 
-	if (print_variable_fields)
-	{
-		WRITE_UINT64_FIELD(operatorMemKB);
-	}
+	WRITE_UINT64_FIELD(operatorMemKB);
 }
 
 static void
@@ -336,7 +323,7 @@ _outPlannedStmt(StringInfo str, PlannedStmt *node)
 	WRITE_NODE_FIELD(utilityStmt);
 	WRITE_NODE_FIELD(intoClause);
 	WRITE_NODE_FIELD(subplans);
-	WRITE_NODE_FIELD(rewindPlanIDs);
+	WRITE_BITMAPSET_FIELD(rewindPlanIDs);
 	WRITE_NODE_FIELD(returningLists);
 
 	WRITE_NODE_FIELD(result_partitions);
@@ -346,16 +333,17 @@ _outPlannedStmt(StringInfo str, PlannedStmt *node)
 	WRITE_NODE_FIELD(numSelectorsPerScanId);
 	WRITE_NODE_FIELD(rowMarks);
 	WRITE_NODE_FIELD(relationOids);
-	WRITE_NODE_FIELD(invalItems);
-	WRITE_INT_FIELD(nCrossLevelParams);
+	/*
+	 * Don't serialize invalItems. The TIDs of the invalidated items wouldn't
+	 * make sense in segments.
+	 */
+	WRITE_INT_FIELD(nParamExec);
 	WRITE_INT_FIELD(nMotionNodes);
 	WRITE_INT_FIELD(nInitPlans);
 
 	/* Don't serialize policy */
-	WRITE_NODE_FIELD(sliceTable);
 
 	WRITE_UINT64_FIELD(query_mem);
-	WRITE_NODE_FIELD(transientTypeRecords);
 }
 
 static void
@@ -417,11 +405,9 @@ _outAgg(StringInfo str, Agg *node)
 	WRITE_INT_ARRAY(grpColIdx, node->numCols, AttrNumber);
 	WRITE_OID_ARRAY(grpOperators, node->numCols);
 
-	if (print_variable_fields)
-	{
-		WRITE_LONG_FIELD(numGroups);
-		WRITE_INT_FIELD(transSpace);
-	}
+	WRITE_LONG_FIELD(numGroups);
+	WRITE_INT_FIELD(transSpace);
+
 	WRITE_INT_FIELD(numNullCols);
 	WRITE_UINT64_FIELD(inputGrouping);
 	WRITE_UINT64_FIELD(grouping);
@@ -471,8 +457,6 @@ _outSort(StringInfo str, Sort *node)
 	WRITE_BOOL_ARRAY(nullsFirst, node->numCols);
 
     /* CDB */
-	WRITE_NODE_FIELD(limitOffset);
-	WRITE_NODE_FIELD(limitCount);
     WRITE_BOOL_FIELD(noduplicates);
 
 	WRITE_ENUM_FIELD(share_type, ShareType);
@@ -550,6 +534,7 @@ _outConst(StringInfo str, Const *node)
 	WRITE_NODE_TYPE("CONST");
 
 	WRITE_OID_FIELD(consttype);
+	WRITE_INT_FIELD(consttypmod);
 	WRITE_INT_FIELD(constlen);
 	WRITE_BOOL_FIELD(constbyval);
 	WRITE_BOOL_FIELD(constisnull);
@@ -617,9 +602,6 @@ _outCurrentOfExpr(StringInfo str, CurrentOfExpr *node)
 	WRITE_STRING_FIELD(cursor_name);
 	WRITE_UINT_FIELD(cvarno);
 	WRITE_OID_FIELD(target_relid);
-	WRITE_INT_FIELD(gp_segment_id);
-	WRITE_BINARY_FIELD(ctid, sizeof(ItemPointerData));
-	WRITE_OID_FIELD(tableoid);
 }
 
 static void
@@ -713,6 +695,16 @@ _outOuterJoinInfo(StringInfo str, OuterJoinInfo *node)
  *****************************************************************************/
 
 static void
+_outCreateExtensionStmt(StringInfo str, CreateExtensionStmt *node)
+{
+	WRITE_NODE_TYPE("CREATEEXTENSIONSTMT");
+	WRITE_STRING_FIELD(extname);
+	WRITE_BOOL_FIELD(if_not_exists);
+	WRITE_NODE_FIELD(options);
+	WRITE_ENUM_FIELD(create_ext_state, CreateExtensionState);
+}
+
+static void
 _outCreateStmt(StringInfo str, CreateStmt *node)
 {
 	WRITE_NODE_TYPE("CREATESTMT");
@@ -727,21 +719,6 @@ _outCreateStmt(StringInfo str, CreateStmt *node)
 	WRITE_ENUM_FIELD(oncommit, OnCommitAction);
 	WRITE_STRING_FIELD(tablespacename);
 	WRITE_NODE_FIELD(distributedBy);
-	WRITE_OID_FIELD(oidInfo.relOid);
-	WRITE_OID_FIELD(oidInfo.comptypeOid);
-	WRITE_OID_FIELD(oidInfo.comptypeArrayOid);
-	WRITE_OID_FIELD(oidInfo.toastOid);
-	WRITE_OID_FIELD(oidInfo.toastIndexOid);
-	WRITE_OID_FIELD(oidInfo.toastComptypeOid);
-	WRITE_OID_FIELD(oidInfo.aosegOid);
-	WRITE_OID_FIELD(oidInfo.aosegIndexOid);
-	WRITE_OID_FIELD(oidInfo.aosegComptypeOid);
-	WRITE_OID_FIELD(oidInfo.aovisimapOid);
-	WRITE_OID_FIELD(oidInfo.aovisimapIndexOid);
-	WRITE_OID_FIELD(oidInfo.aovisimapComptypeOid);
-	WRITE_OID_FIELD(oidInfo.aoblkdirOid);
-	WRITE_OID_FIELD(oidInfo.aoblkdirIndexOid);
-	WRITE_OID_FIELD(oidInfo.aoblkdirComptypeOid);
 	WRITE_CHAR_FIELD(relKind);
 	WRITE_CHAR_FIELD(relStorage);
 	/* policy omitted */
@@ -822,7 +799,6 @@ _outAlterPartitionCmd(StringInfo str, AlterPartitionCmd *node)
 	WRITE_NODE_FIELD(partid);
 	WRITE_NODE_FIELD(arg1);
 	WRITE_NODE_FIELD(arg2);
-	WRITE_NODE_FIELD(newOids);
 }
 
 static void
@@ -832,7 +808,6 @@ _outCreateDomainStmt(StringInfo str, CreateDomainStmt *node)
 	WRITE_NODE_FIELD(domainname);
 	WRITE_NODE_FIELD(typname);
 	WRITE_NODE_FIELD(constraints);
-	WRITE_OID_FIELD(domainOid);
 }
 
 static void
@@ -857,9 +832,7 @@ _outColumnDef(StringInfo str, ColumnDef *node)
 	WRITE_BOOL_FIELD(is_local);
 	WRITE_BOOL_FIELD(is_not_null);
 	WRITE_INT_FIELD(attnum);
-	WRITE_OID_FIELD(default_oid);
 	WRITE_NODE_FIELD(raw_default);
-	WRITE_BOOL_FIELD(default_is_null);
 	WRITE_STRING_FIELD(cooked_default);
 	WRITE_NODE_FIELD(constraints);
 	WRITE_NODE_FIELD(encoding);
@@ -905,6 +878,7 @@ _outQuery(StringInfo str, Query *node)
 	WRITE_BOOL_FIELD(hasAggs);
 	WRITE_BOOL_FIELD(hasWindFuncs);
 	WRITE_BOOL_FIELD(hasSubLinks);
+	WRITE_BOOL_FIELD(hasDynamicFunctions);
 	WRITE_NODE_FIELD(rtable);
 	WRITE_NODE_FIELD(jointree);
 	WRITE_NODE_FIELD(targetList);
@@ -922,10 +896,6 @@ _outQuery(StringInfo str, Query *node)
 	WRITE_NODE_FIELD(limitCount);
 	WRITE_NODE_FIELD(rowMarks);
 	WRITE_NODE_FIELD(setOperations);
-	WRITE_NODE_FIELD(resultRelations);
-	WRITE_NODE_FIELD(result_partitions);
-	WRITE_NODE_FIELD(result_aosegnos);
-	WRITE_NODE_FIELD(returningLists);
 	/* Don't serialize policy */
 }
 
@@ -987,6 +957,10 @@ _outRangeTblEntry(StringInfo str, RangeTblEntry *node)
 	WRITE_OID_FIELD(checkAsUser);
 
 	WRITE_BOOL_FIELD(forceDistRandom);
+	/*
+	 * pseudocols is intentionally not serialized. It's only used in the planning
+	 * stage, so no need to transfer it to the QEs.
+	 */
 }
 
 static void
@@ -1093,7 +1067,6 @@ _outConstraint(StringInfo str, Constraint *node)
 	WRITE_NODE_TYPE("CONSTRAINT");
 
 	WRITE_STRING_FIELD(name);
-	WRITE_OID_FIELD(conoid);
 
 	WRITE_ENUM_FIELD(contype,ConstrType);
 
@@ -1133,8 +1106,6 @@ _outCreateQueueStmt(StringInfo str, CreateQueueStmt *node)
 
 	WRITE_STRING_FIELD(queue);
 	WRITE_NODE_FIELD(options); /* List of DefElem nodes */
-	WRITE_OID_FIELD(queueOid);
-	WRITE_NODE_FIELD(optids); /* List of oids for nodes */
 }
 
 static void
@@ -1144,7 +1115,6 @@ _outAlterQueueStmt(StringInfo str, AlterQueueStmt *node)
 
 	WRITE_STRING_FIELD(queue);
 	WRITE_NODE_FIELD(options); /* List of DefElem nodes */
-	WRITE_NODE_FIELD(optids); /* List of oids for nodes */
 }
 
 static void
@@ -1198,6 +1168,12 @@ _outNode(StringInfo str, void *obj)
 		{
 			case T_PlannedStmt:
 				_outPlannedStmt(str,obj);
+				break;
+			case T_QueryDispatchDesc:
+				_outQueryDispatchDesc(str,obj);
+				break;
+			case T_OidAssignment:
+				_outOidAssignment(str,obj);
 				break;
 			case T_Plan:
 				_outPlan(str, obj);
@@ -1551,6 +1527,9 @@ _outNode(StringInfo str, void *obj)
 			case T_AppendRelInfo:
 				_outAppendRelInfo(str, obj);
 				break;
+			case T_CreateExtensionStmt:
+				_outCreateExtensionStmt(str, obj);
+				break;
 
 
 			case T_GrantStmt:
@@ -1647,6 +1626,9 @@ _outNode(StringInfo str, void *obj)
 
 			case T_CompositeTypeStmt:
 				_outCompositeTypeStmt(str,obj);
+				break;
+			case T_CreateEnumStmt:
+				_outCreateEnumStmt(str,obj);
 				break;
 			case T_CreateCastStmt:
 				_outCreateCastStmt(str,obj);
@@ -1781,11 +1763,26 @@ _outNode(StringInfo str, void *obj)
 			case T_CopyStmt:
 				_outCopyStmt(str, obj);
 				break;
+			case T_SelectStmt:
+				_outSelectStmt(str, obj);
+				break;
+			case T_InsertStmt:
+				_outInsertStmt(str, obj);
+				break;
+			case T_DeleteStmt:
+				_outDeleteStmt(str, obj);
+				break;
+			case T_UpdateStmt:
+				_outUpdateStmt(str, obj);
+				break;
 			case T_ColumnDef:
 				_outColumnDef(str, obj);
 				break;
 			case T_TypeName:
 				_outTypeName(str, obj);
+				break;
+			case T_SortBy:
+				_outSortBy(str, obj);
 				break;
 			case T_TypeCast:
 				_outTypeCast(str, obj);
@@ -1908,8 +1905,11 @@ _outNode(StringInfo str, void *obj)
 			case T_SliceTable:
 				_outSliceTable(str, obj);
 				break;
-			case T_VariableResetStmt:
-				_outVariableResetStmt(str, obj);
+			case T_CursorPosInfo:
+				_outCursorPosInfo(str, obj);
+				break;
+			case T_VariableSetStmt:
+				_outVariableSetStmt(str, obj);
 				break;
 
 			case T_DMLActionExpr:
@@ -1978,8 +1978,21 @@ _outNode(StringInfo str, void *obj)
 			case T_AlterTypeStmt:
 				_outAlterTypeStmt(str, obj);
 				break;
+			case T_AlterExtensionStmt:
+				_outAlterExtensionStmt(str, obj);
+				break;
+			case T_AlterExtensionContentsStmt:
+				_outAlterExtensionContentsStmt(str, obj);
+				break;
 			case T_TupleDescNode:
 				_outTupleDescNode(str, obj);
+				break;
+
+			case T_AlterTSConfigurationStmt:
+				_outAlterTSConfigurationStmt(str, obj);
+				break;
+			case T_AlterTSDictionaryStmt:
+				_outAlterTSDictionaryStmt(str, obj);
 				break;
 
 			default:
@@ -1989,35 +2002,6 @@ _outNode(StringInfo str, void *obj)
 		}
 	}
 }
-
-/*
- * Initialize global variables for serializing a plan for the workfile manager.
- * The serialized form of a plan for workfile manager does not include some
- * variable fields such as costs and node ids.
- * In addition, range table pointers are replaced with Oids where applicable.
- */
-void
-outfast_workfile_mgr_init(List *rtable)
-{
-	Assert(NULL == range_table);
-	Assert(print_variable_fields);
-	range_table = rtable;
-	print_variable_fields = false;
-}
-
-/*
- * Reset global variables to their default values at the end of serializing
- * a plan for the workfile manager.
- */
-void
-outfast_workfile_mgr_end()
-{
-	Assert(!print_variable_fields);
-
-	print_variable_fields = true;
-	range_table = NULL;
-}
-
 
 /*
  * nodeToBinaryStringFast -

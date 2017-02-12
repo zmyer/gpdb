@@ -54,6 +54,18 @@ extern bool listTSDictionaries(const char *pattern, bool verbose);
 /* \dFt */
 extern bool listTSTemplates(const char *pattern, bool verbose);
 
+/* \dF */
+extern bool listTSConfigs(const char *pattern, bool verbose);
+
+/* \dFp */
+extern bool listTSParsers(const char *pattern, bool verbose);
+
+/* \dFd */
+extern bool listTSDictionaries(const char *pattern, bool verbose);
+
+/* \dFt */
+extern bool listTSTemplates(const char *pattern, bool verbose);
+
 /* \l */
 extern bool listAllDbs(bool verbose);
 
@@ -71,5 +83,11 @@ extern bool listCasts(const char *pattern);
 
 /* \dn */
 extern bool listSchemas(const char *pattern, bool verbose);
+
+/* \dx */
+extern bool listExtensions(const char *pattern);
+
+/* \dx+ */
+extern bool listExtensionContents(const char *pattern);
 
 #endif   /* DESCRIBE_H */

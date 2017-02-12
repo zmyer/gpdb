@@ -161,23 +161,23 @@ class PgCtlBackendOptions(CmdArgs):
     --------
 
     >>> str(PgCtlBackendOptions(5432, 1, 2))
-    '-p 5432 -b 1 -z 2 --silent-mode=true'
+    '-p 5432 --gp_dbid=1 --gp_num_contents_in_cluster=2 --silent-mode=true'
     >>> str(PgCtlBackendOptions(5432, 1, 2).set_master(2, False, False))
-    '-p 5432 -b 1 -z 2 --silent-mode=true -i -M master -C -1 -x 2'
+    '-p 5432 --gp_dbid=1 --gp_num_contents_in_cluster=2 --silent-mode=true -i -M master --gp_contentid=-1 -x 2'
     >>> str(PgCtlBackendOptions(5432, 1, 2).set_master(2, False, True))
-    '-p 5432 -b 1 -z 2 --silent-mode=true -i -M master -C -1 -x 2 -E'
+    '-p 5432 --gp_dbid=1 --gp_num_contents_in_cluster=2 --silent-mode=true -i -M master --gp_contentid=-1 -x 2 -E'
     >>> str(PgCtlBackendOptions(5432, 1, 2).set_segment('mirror', 1))
-    '-p 5432 -b 1 -z 2 --silent-mode=true -i -M mirror -C 1'
+    '-p 5432 --gp_dbid=1 --gp_num_contents_in_cluster=2 --silent-mode=true -i -M mirror --gp_contentid=1'
     >>> str(PgCtlBackendOptions(5432, 1, 2).set_special('upgrade'))
-    '-p 5432 -b 1 -z 2 --silent-mode=true -U'
+    '-p 5432 --gp_dbid=1 --gp_num_contents_in_cluster=2 --silent-mode=true -U'
     >>> str(PgCtlBackendOptions(5432, 1, 2).set_special('maintenance'))
-    '-p 5432 -b 1 -z 2 --silent-mode=true -m'
+    '-p 5432 --gp_dbid=1 --gp_num_contents_in_cluster=2 --silent-mode=true -m'
     >>> str(PgCtlBackendOptions(5432, 1, 2).set_utility(True))
-    '-p 5432 -b 1 -z 2 --silent-mode=true -c gp_role=utility'
+    '-p 5432 --gp_dbid=1 --gp_num_contents_in_cluster=2 --silent-mode=true -c gp_role=utility'
     >>> str(PgCtlBackendOptions(5432, 1, 2).set_utility(False))
-    '-p 5432 -b 1 -z 2 --silent-mode=true'
+    '-p 5432 --gp_dbid=1 --gp_num_contents_in_cluster=2 --silent-mode=true'
     >>> str(PgCtlBackendOptions(5432, 1, 2).set_restricted(True,1))
-    '-p 5432 -b 1 -z 2 --silent-mode=true -c superuser_reserved_connections=1'
+    '-p 5432 --gp_dbid=1 --gp_num_contents_in_cluster=2 --silent-mode=true -c superuser_reserved_connections=1'
     >>> 
 
     """
@@ -190,8 +190,8 @@ class PgCtlBackendOptions(CmdArgs):
         """
         CmdArgs.__init__(self, [
             "-p", str(port),
-            "-b", str(dbid),
-            "-z", str(numcids),
+            "--gp_dbid="+ str(dbid),
+            "--gp_num_contents_in_cluster="+ str(numcids),
             "--silent-mode=true"
         ])
 
@@ -205,7 +205,7 @@ class PgCtlBackendOptions(CmdArgs):
         @param disable: start without master mirroring?
         @param seqserver: start with seqserver?
         """
-        self.extend(["-i", "-M", "master", "-C", "-1", "-x", str(standby_dbid)])
+        self.extend(["-i", "-M", "master", "--gp_contentid=-1", "-x", str(standby_dbid)])
         if disable: self.append("-y")
         if seqserver: self.append("-E")
         return self
@@ -215,7 +215,7 @@ class PgCtlBackendOptions(CmdArgs):
         @param mode: mirroring mode
         @param content: content id
         """
-        self.extend(["-i", "-M", str(mode), "-C", str(content)])
+        self.extend(["-i", "-M", str(mode), "--gp_contentid="+str(content)])
         return self
 
     #
@@ -258,7 +258,7 @@ class PgCtlStartArgs(CmdArgs):
     >>> str(a).split(' ') #doctest: +NORMALIZE_WHITESPACE
     ['env', GPERA=123', '$GPHOME/bin/pg_ctl', '-D', '/data1/master/gpseg-1', '-l', 
      '/data1/master/gpseg-1/pg_log/startup.log', '-w', '-t', '600', 
-     '-o', '"', '-p', '5432', '-b', '1', '-z', '2', '--silent-mode=true', '"', 'start']
+     '-o', '"', '-p', '5432', '--gp_dbid=1', '--gp_num_contents_in_cluster=2', '--silent-mode=true', '"', 'start']
     """
 
     def __init__(self, datadir, backend, era, wrapper, args, wait, timeout=None):
@@ -773,7 +773,8 @@ class GpSegStartCmd(Command):
                  mirrormode, numContentsInCluster, era,
                  timeout=SEGMENT_TIMEOUT_DEFAULT, verbose=False, 
                  ctxt=LOCAL, remoteHost=None, pickledTransitionData=None,
-                 specialMode=None, wrapper=None, wrapper_args=None):
+                 specialMode=None, wrapper=None, wrapper_args=None,
+                 logfileDirectory=False):
 
         # Referenced by calling code (in operations/startSegments.py), create a clone
         self.dblist = [x for x in segments]
@@ -789,6 +790,8 @@ class GpSegStartCmd(Command):
         cmdStr = str(c)
         logger.debug(cmdStr)
 
+        if (logfileDirectory):
+            cmdStr = cmdStr + " -l '" + logfileDirectory + "'"
         Command.__init__(self,name,cmdStr,ctxt,remoteHost)
 
 
@@ -817,7 +820,7 @@ class GpSegChangeMirrorModeCmd(Command):
 #-----------------------------------------------
 class GpSegStopCmd(Command):
     def __init__(self, name, gphome, version,mode,dbs,timeout=SEGMENT_STOP_TIMEOUT_DEFAULT,
-                 verbose=False, ctxt=LOCAL, remoteHost=None):
+                 verbose=False, ctxt=LOCAL, remoteHost=None, logfileDirectory=False):
         self.gphome=gphome
         self.dblist=dbs
         self.dirportlist=[]
@@ -837,6 +840,8 @@ class GpSegStopCmd(Command):
         self.cmdStr="$GPHOME/sbin/gpsegstop.py %s -D %s -m %s -t %s -V '%s'"  %\
                         (setverbose,dirstr,mode,timeout,version)
 
+        if (logfileDirectory):
+            self.cmdStr = self.cmdStr + " -l '" + logfileDirectory + "'"
         Command.__init__(self,name,self.cmdStr,ctxt,remoteHost)
 
 
@@ -967,7 +972,7 @@ class NewGpStop(Command):
 
 #-----------------------------------------------
 class GpStop(Command):
-    def __init__(self, name, masterOnly=False, verbose=False, quiet=False, restart=False, fast=False, force=False, datadir=None,ctxt=LOCAL, remoteHost=None):
+    def __init__(self, name, masterOnly=False, verbose=False, quiet=False, restart=False, fast=False, force=False, datadir=None, ctxt=LOCAL, remoteHost=None, logfileDirectory=False):
         self.cmdStr="$GPHOME/bin/gpstop -a"
         if masterOnly:
             self.cmdStr += " -m"
@@ -983,6 +988,8 @@ class GpStop(Command):
             self.cmdStr += " -v"
         if quiet:
             self.cmdStr += " -q"
+        if logfileDirectory:
+            self.cmdStr += " -l '" + logfileDirectory + "'"
         Command.__init__(self,name,self.cmdStr,ctxt,remoteHost)
 
     @staticmethod
@@ -1217,17 +1224,6 @@ class GpCatVersionDirectory(Command):
         return cmd.get_version()
 
 #-----------------------------------------------
-class GpSuspendSegmentsOnHost(Command):
-    def __init__(self, name, gpconfigstrings, resume, ctxt=LOCAL, remoteHost=None):
-        if resume:
-            pauseOrResume = "--resume"
-        else:
-            pauseOrResume = "--pause"
-
-        cmdStr="echo '%s' | $GPHOME/sbin/gpsuspend.py %s" % (gpconfigstrings, pauseOrResume)
-        Command.__init__(self,name,cmdStr,ctxt,remoteHost)
-
-#-----------------------------------------------
 class GpAddConfigScript(Command):
     def __init__(self, name, directorystring, entry, value=None, removeonly=False, ctxt=LOCAL, remoteHost=None):
         cmdStr="echo '%s' | $GPHOME/sbin/gpaddconfig.py --entry %s" % (directorystring, entry)
@@ -1333,7 +1329,7 @@ def get_gphome():
 def get_masterdatadir():
     logger.debug("Checking if MASTER_DATA_DIRECTORY env variable is set.")
     master_datadir = os.environ.get('MASTER_DATA_DIRECTORY')
-    if master_datadir is None:
+    if not master_datadir:
         raise GpError("Environment Variable MASTER_DATA_DIRECTORY not set!")
     return master_datadir
 

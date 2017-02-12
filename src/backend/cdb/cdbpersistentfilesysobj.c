@@ -168,7 +168,6 @@ static void PersistentFileSysObj_PrintRelationFile(
 
 	TransactionId			parentXid;
 	int64					persistentSerialNum;
-	ItemPointerData			previousFreeTid;
 
 	GpPersistentRelationNode_GetValues(
 									values,
@@ -189,19 +188,9 @@ static void PersistentFileSysObj_PrintRelationFile(
 									&mirrorAppendOnlyNewEof,
 									&relBufpoolKind,
 									&parentXid,
-									&persistentSerialNum,
-									&previousFreeTid);
+									&persistentSerialNum);
 
-	if (state == PersistentFileSysState_Free)
-	{
-		elog(elevel,
-			 "%s gp_persistent_relation_node %s: Free. Free order number " INT64_FORMAT ", previous free TID %s",
-			 prefix,
-			 ItemPointerToString(persistentTid),
-			 persistentSerialNum,
-			 ItemPointerToString2(&previousFreeTid));
-	}
-	else if (relationStorageManager == PersistentFileSysRelStorageMgr_BufferPool)
+	if (relationStorageManager == PersistentFileSysRelStorageMgr_BufferPool)
 	{
 		elog(elevel,
 			 "%s gp_persistent_relation_node %s: %u/%u/%u, segment file #%d, relation storage manager '%s', persistent state '%s', create mirror data loss tracking session num " INT64_FORMAT ", "
@@ -210,7 +199,7 @@ static void PersistentFileSysObj_PrintRelationFile(
 			 "resync changed page count " INT64_FORMAT ", "
 			 "resync checkpoint loc %s, resync checkpoint block num %u), "
 			 "relation buffer pool kind %u, parent xid %u, "
-			 "persistent serial num " INT64_FORMAT ", previous free TID %s",
+			 "persistent serial num " INT64_FORMAT,
 			 prefix,
 			 ItemPointerToString(persistentTid),
 			 relFileNode.spcNode,
@@ -228,8 +217,7 @@ static void PersistentFileSysObj_PrintRelationFile(
 			 (unsigned int)mirrorBufpoolResyncCkptBlockNum,
 			 relBufpoolKind,
 			 parentXid,
-			 persistentSerialNum,
-			 ItemPointerToString2(&previousFreeTid));
+			 persistentSerialNum);
 	}
 	else
 	{
@@ -239,7 +227,7 @@ static void PersistentFileSysObj_PrintRelationFile(
 			 "mirror existence state '%s', data synchronization state '%s', "
 			 "Append-Only (loss EOF " INT64_FORMAT ", new EOF " INT64_FORMAT ", equal = %s), "
 			 "relation buffer pool kind %u, parent xid %u, "
-			 "persistent serial num " INT64_FORMAT ", previous free TID %s",
+			 "persistent serial num " INT64_FORMAT ,
 			 prefix,
 			 ItemPointerToString(persistentTid),
 			 relFileNode.spcNode,
@@ -256,8 +244,7 @@ static void PersistentFileSysObj_PrintRelationFile(
 			 ((mirrorAppendOnlyLossEof == mirrorAppendOnlyNewEof) ? "true" : "false"),
 			 relBufpoolKind,
 			 parentXid,
-			 persistentSerialNum,
-			 ItemPointerToString2(&previousFreeTid));
+			 persistentSerialNum);
 	}
 }
 
@@ -278,7 +265,6 @@ static void PersistentFileSysObj_PrintDatabaseDir(
 	int32					reserved;
 	TransactionId			parentXid;
 	int64					persistentSerialNum;
-	ItemPointerData			previousFreeTid;
 
 	GpPersistentDatabaseNode_GetValues(
 									values,
@@ -289,36 +275,22 @@ static void PersistentFileSysObj_PrintDatabaseDir(
 									&mirrorExistenceState,
 									&reserved,
 									&parentXid,
-									&persistentSerialNum,
-									&previousFreeTid);
+									&persistentSerialNum);
 
-	if (state == PersistentFileSysState_Free)
-	{
-		elog(elevel,
-			 "%s gp_persistent_database_node %s: Free. Free order number " INT64_FORMAT ", previous free TID %s",
-			 prefix,
-			 ItemPointerToString(persistentTid),
-			 persistentSerialNum,
-			 ItemPointerToString2(&previousFreeTid));
-	}
-	else
-	{
-		elog(elevel,
-			 "%s gp_persistent_database_node %s: %u/%u, persistent state '%s', create mirror data loss tracking session num " INT64_FORMAT ", "
-			 "mirror existence state '%s', reserved %u, parent xid %u, "
-			 "persistent serial num " INT64_FORMAT ", previous free TID %s",
-			 prefix,
-			 ItemPointerToString(persistentTid),
-			 dbDirNode.tablespace,
-			 dbDirNode.database,
-			 PersistentFileSysObjState_Name(state),
-			 createMirrorDataLossTrackingSessionNum,
-			 MirroredObjectExistenceState_Name(mirrorExistenceState),
-			 reserved,
-			 parentXid,
-			 persistentSerialNum,
-			 ItemPointerToString2(&previousFreeTid));
-	}
+	elog(elevel,
+		 "%s gp_persistent_database_node %s: %u/%u, persistent state '%s', create mirror data loss tracking session num " INT64_FORMAT ", "
+		 "mirror existence state '%s', reserved %u, parent xid %u, "
+		 "persistent serial num " INT64_FORMAT ,
+		 prefix,
+		 ItemPointerToString(persistentTid),
+		 dbDirNode.tablespace,
+		 dbDirNode.database,
+		 PersistentFileSysObjState_Name(state),
+		 createMirrorDataLossTrackingSessionNum,
+		 MirroredObjectExistenceState_Name(mirrorExistenceState),
+		 reserved,
+		 parentXid,
+		 persistentSerialNum);
 }
 
 static void PersistentFileSysObj_PrintTablespaceDir(
@@ -339,7 +311,6 @@ static void PersistentFileSysObj_PrintTablespaceDir(
 	int32					reserved;
 	TransactionId			parentXid;
 	int64					persistentSerialNum;
-	ItemPointerData			previousFreeTid;
 
 	GpPersistentTablespaceNode_GetValues(
 									values,
@@ -350,36 +321,22 @@ static void PersistentFileSysObj_PrintTablespaceDir(
 									&mirrorExistenceState,
 									&reserved,
 									&parentXid,
-									&persistentSerialNum,
-									&previousFreeTid);
+									&persistentSerialNum);
 
-	if (state == PersistentFileSysState_Free)
-	{
-		elog(elevel,
-			 "%s gp_persistent_tablespace_node %s: Free. Free order number " INT64_FORMAT ", previous free TID %s",
-			 prefix,
-			 ItemPointerToString(persistentTid),
-			 persistentSerialNum,
-			 ItemPointerToString2(&previousFreeTid));
-	}
-	else
-	{
-		elog(elevel,
-			 "%s gp_persistent_tablespace_node %s: tablespace %u (filespace %u), persistent state '%s', create mirror data loss tracking session num " INT64_FORMAT ", "
-			 "mirror existence state '%s', reserved %u, parent xid %u, "
-			 "persistent serial num " INT64_FORMAT ", previous free TID %s",
-			 prefix,
-			 ItemPointerToString(persistentTid),
-			 tablespaceOid,
-			 filespaceOid,
-			 PersistentFileSysObjState_Name(state),
-			 createMirrorDataLossTrackingSessionNum,
-			 MirroredObjectExistenceState_Name(mirrorExistenceState),
-			 reserved,
-			 parentXid,
-			 persistentSerialNum,
-			 ItemPointerToString2(&previousFreeTid));
-	}
+	elog(elevel,
+		 "%s gp_persistent_tablespace_node %s: tablespace %u (filespace %u), persistent state '%s', create mirror data loss tracking session num " INT64_FORMAT ", "
+		 "mirror existence state '%s', reserved %u, parent xid %u, "
+		 "persistent serial num " INT64_FORMAT ,
+		 prefix,
+		 ItemPointerToString(persistentTid),
+		 tablespaceOid,
+		 filespaceOid,
+		 PersistentFileSysObjState_Name(state),
+		 createMirrorDataLossTrackingSessionNum,
+		 MirroredObjectExistenceState_Name(mirrorExistenceState),
+		 reserved,
+		 parentXid,
+		 persistentSerialNum);
 }
 
 static void PersistentFileSysObj_PrintFilespaceDir(
@@ -405,7 +362,6 @@ static void PersistentFileSysObj_PrintFilespaceDir(
 	int32					reserved;
 	TransactionId			parentXid;
 	int64					persistentSerialNum;
-	ItemPointerData			previousFreeTid;
 
 	GpPersistentFilespaceNode_GetValues(
 									values,
@@ -419,55 +375,41 @@ static void PersistentFileSysObj_PrintFilespaceDir(
 									&mirrorExistenceState,
 									&reserved,
 									&parentXid,
-									&persistentSerialNum,
-									&previousFreeTid);
+									&persistentSerialNum);
 
-	if (state == PersistentFileSysState_Free)
-	{
-		elog(elevel,
-			 "%s gp_persistent_filespace_node %s: Free. Free order number " INT64_FORMAT ", previous free TID %s",
-			 prefix,
-			 ItemPointerToString(persistentTid),
-			 persistentSerialNum,
-			 ItemPointerToString2(&previousFreeTid));
-	}
-	else
-	{
-		char *filespaceLocation1;
-		char *filespaceLocation2;
+	char *filespaceLocation1;
+	char *filespaceLocation2;
 
-		PersistentFilespace_ConvertBlankPaddedLocation(
-												&filespaceLocation1,
-												locationBlankPadded1,
-												/* isPrimary */ false);	// Always say false so we don't error out here.
-		PersistentFilespace_ConvertBlankPaddedLocation(
-												&filespaceLocation2,
-												locationBlankPadded2,
-												/* isPrimary */ false);	// Always say false so we don't error out here.
-		elog(elevel,
-			 "%s gp_persistent_filespace_node %s: filespace %u, #1 (dbid %u, location '%s'), #2 (dbid %u, location '%s'), persistent state '%s', create mirror data loss tracking session num " INT64_FORMAT ", "
-			 "mirror existence state '%s', reserved %u, parent xid %u, "
-			 "persistent serial num " INT64_FORMAT ", previous free TID %s",
-			 prefix,
-			 ItemPointerToString(persistentTid),
-			 filespaceOid,
-			 dbId1,
-			 (filespaceLocation1 == NULL ? "<empty>" : filespaceLocation1),
-			 dbId2,
-			 (filespaceLocation2 == NULL ? "<empty>" : filespaceLocation2),
-			 PersistentFileSysObjState_Name(state),
-			 createMirrorDataLossTrackingSessionNum,
-			 MirroredObjectExistenceState_Name(mirrorExistenceState),
-			 reserved,
-			 parentXid,
-			 persistentSerialNum,
-			 ItemPointerToString2(&previousFreeTid));
+	PersistentFilespace_ConvertBlankPaddedLocation(
+											&filespaceLocation1,
+											locationBlankPadded1,
+											/* isPrimary */ false);	// Always say false so we don't error out here.
+	PersistentFilespace_ConvertBlankPaddedLocation(
+											&filespaceLocation2,
+											locationBlankPadded2,
+											/* isPrimary */ false);	// Always say false so we don't error out here.
+	elog(elevel,
+		 "%s gp_persistent_filespace_node %s: filespace %u, #1 (dbid %u, location '%s'), #2 (dbid %u, location '%s'), persistent state '%s', create mirror data loss tracking session num " INT64_FORMAT ", "
+		 "mirror existence state '%s', reserved %u, parent xid %u, "
+		 "persistent serial num " INT64_FORMAT ,
+		 prefix,
+		 ItemPointerToString(persistentTid),
+		 filespaceOid,
+		 dbId1,
+		 (filespaceLocation1 == NULL ? "<empty>" : filespaceLocation1),
+		 dbId2,
+		 (filespaceLocation2 == NULL ? "<empty>" : filespaceLocation2),
+		 PersistentFileSysObjState_Name(state),
+		 createMirrorDataLossTrackingSessionNum,
+		 MirroredObjectExistenceState_Name(mirrorExistenceState),
+		 reserved,
+		 parentXid,
+		 persistentSerialNum);
 
-		if (filespaceLocation1 != NULL)
-			pfree(filespaceLocation1);
-		if (filespaceLocation2 != NULL)
-			pfree(filespaceLocation2);
-	}
+	if (filespaceLocation1 != NULL)
+		pfree(filespaceLocation1);
+	if (filespaceLocation2 != NULL)
+		pfree(filespaceLocation2);
 }
 
 static void PersistentFileSysObj_InitOurs(
@@ -516,8 +458,7 @@ void PersistentFileSysObj_Init(
 						Persistent_RelationScanKeyInit,
 						Persistent_RelationAllowDuplicateEntry,
 						Natts_gp_persistent_relation_node,
-						Anum_gp_persistent_relation_node_persistent_serial_num,
-						Anum_gp_persistent_relation_node_previous_free_tid);
+						Anum_gp_persistent_relation_node_persistent_serial_num);
 
 		PersistentFileSysObj_InitOurs(
 						fileSysObjData,
@@ -540,8 +481,7 @@ void PersistentFileSysObj_Init(
 						Persistent_DatabaseScanKeyInit,
 						Persistent_DatabaseAllowDuplicateEntry,
 						Natts_gp_persistent_database_node,
-						Anum_gp_persistent_database_node_persistent_serial_num,
-						Anum_gp_persistent_database_node_previous_free_tid);
+						Anum_gp_persistent_database_node_persistent_serial_num);
 		
 		PersistentFileSysObj_InitOurs(
 						fileSysObjData,
@@ -564,8 +504,7 @@ void PersistentFileSysObj_Init(
 						Persistent_TablespaceScanKeyInit,
 						Persistent_TablespaceAllowDuplicateEntry,
 						Natts_gp_persistent_tablespace_node,
-						Anum_gp_persistent_tablespace_node_persistent_serial_num,
-						Anum_gp_persistent_tablespace_node_previous_free_tid);
+						Anum_gp_persistent_tablespace_node_persistent_serial_num);
 
 		PersistentFileSysObj_InitOurs(
 						fileSysObjData,
@@ -588,8 +527,7 @@ void PersistentFileSysObj_Init(
 						Persistent_FilespaceScanKeyInit,
 						Persistent_FilespaceAllowDuplicateEntry,
 						Natts_gp_persistent_filespace_node,
-						Anum_gp_persistent_filespace_node_persistent_serial_num,
-						Anum_gp_persistent_filespace_node_previous_free_tid);
+						Anum_gp_persistent_filespace_node_persistent_serial_num);
 		
 		PersistentFileSysObj_InitOurs(
 						fileSysObjData,
@@ -624,10 +562,6 @@ void PersistentFileSysObj_Reset(void)
 									 fsObjType,
 									 &fileSysObjData,
 									 &fileSysObjSharedData);
-
-		PersistentStore_ResetFreeList(
-						 &fileSysObjData->storeData,
-						 &fileSysObjSharedData->storeSharedData);
 
 		switch (fsObjType)
 		{
@@ -801,37 +735,6 @@ int64 PersistentFileSysObj_CurrentMaxSerialNum(
 								&fileSysObjSharedData->storeSharedData);
 }
 
-PersistentTidIsKnownResult PersistentFileSysObj_TidIsKnown(
-	PersistentFsObjType 	fsObjType,
-
-	ItemPointer 			persistentTid,
-
-	ItemPointer 			maxTid)
-{
-	READ_PERSISTENT_STATE_ORDERED_LOCK_DECLARE;
-
-	PersistentFileSysObjData 		*fileSysObjData;
-	PersistentFileSysObjSharedData 	*fileSysObjSharedData;
-
-	PersistentTidIsKnownResult result;
-
-	PersistentFileSysObj_GetDataPtrs(
-								fsObjType,
-								&fileSysObjData,
-								&fileSysObjSharedData);
-
-	READ_PERSISTENT_STATE_ORDERED_LOCK;
-
-	result = PersistentStore_TidIsKnown(
-								&fileSysObjSharedData->storeSharedData,
-								persistentTid,
-								maxTid);
-
-	READ_PERSISTENT_STATE_ORDERED_UNLOCK;
-
-	return result;
-}
-
 void PersistentFileSysObj_UpdateTuple(
 	PersistentFsObjType		fsObjType,
 
@@ -947,14 +850,10 @@ void PersistentFileSysObj_FreeTuple(
 {
 	Datum *freeValues;
 
-	ItemPointerData previousFreeTid;
-
 	Assert(fsObjType >= PersistentFsObjType_First);
 	Assert(fsObjType <= PersistentFsObjType_Last);
 
 	freeValues = (Datum*)palloc(fileSysObjData->storeData.numAttributes * sizeof(Datum));
-
-	MemSet(&previousFreeTid, 0, sizeof(ItemPointerData));
 
 	switch (fsObjType)
 	{
@@ -982,8 +881,7 @@ void PersistentFileSysObj_FreeTuple(
 												/* mirrorAppendOnlyNewEof */ 0,
 												PersistentFileSysRelBufpoolKind_None,
 												InvalidTransactionId,
-												/* persistentSerialNum */ 0,
-												&previousFreeTid);
+												/* persistentSerialNum */ 0);
 		}
 		break;
 
@@ -997,8 +895,7 @@ void PersistentFileSysObj_FreeTuple(
 											MirroredObjectExistenceState_None,
 											/* reserved */ 0,
 											InvalidTransactionId,
-											/* persistentSerialNum */ 0,
-											&previousFreeTid);
+											/* persistentSerialNum */ 0);
 		break;
 
 	case PersistentFsObjType_TablespaceDir:
@@ -1011,8 +908,7 @@ void PersistentFileSysObj_FreeTuple(
 											MirroredObjectExistenceState_None,
 											/* reserved */ 0,
 											InvalidTransactionId,
-											/* persistentSerialNum */ 0,
-											&previousFreeTid);
+											/* persistentSerialNum */ 0);
 		break;
 
 	case PersistentFsObjType_FilespaceDir:
@@ -1034,8 +930,7 @@ void PersistentFileSysObj_FreeTuple(
 												MirroredObjectExistenceState_None,
 												/* reserved */ 0,
 												InvalidTransactionId,
-												/* persistentSerialNum */ 0,
-												&previousFreeTid);
+												/* persistentSerialNum */ 0);
 		}
 		break;
 
@@ -1746,7 +1641,9 @@ PersistentFileSysObj_RemoveSegment(PersistentFileSysObjName *fsObjName,
 
 	READTUPLE_FOR_UPDATE_ERRCONTEXT_POP;
 
-	GpPersistent_GetCommonValues(
+	if (tupleCopy != NULL)
+	{
+		GpPersistent_GetCommonValues(
 							fsObjType,
 							values,
 							&actualFsObjName,
@@ -1755,12 +1652,6 @@ PersistentFileSysObj_RemoveSegment(PersistentFileSysObjName *fsObjName,
 							&parentXid,
 							&serialNum);
 
-	if (state == PersistentFileSysState_Free)
-	{
-		heap_freetuple(tupleCopy);
-	}
-	else
-	{
 		Datum *newValues;
 		bool *replaces;
 
@@ -1910,7 +1801,10 @@ PersistentFileSysObj_ActivateStandby(PersistentFileSysObjName *fsObjName,
 
 	READTUPLE_FOR_UPDATE_ERRCONTEXT_POP;
 
-	GpPersistent_GetCommonValues(
+
+	if (tupleCopy != NULL)
+	{
+		GpPersistent_GetCommonValues(
 							fsObjType,
 							values,
 							&actualFsObjName,
@@ -1919,12 +1813,6 @@ PersistentFileSysObj_ActivateStandby(PersistentFileSysObjName *fsObjName,
 							&parentXid,
 							&serialNum);
 
-	if (state == PersistentFileSysState_Free)
-	{
-		heap_freetuple(tupleCopy);
-	}
-	else
-	{
 		Datum *newValues;
 		bool *replaces;
 		int olddbidattnum;
@@ -2053,8 +1941,9 @@ PersistentFileSysObj_AddMirror(PersistentFileSysObjName *fsObjName,
 
 	READTUPLE_FOR_UPDATE_ERRCONTEXT_POP;
 
-
-	GpPersistent_GetCommonValues(
+	if (tupleCopy != NULL)
+	{
+		GpPersistent_GetCommonValues(
 							fsObjType,
 							values,
 							&actualFsObjName,
@@ -2063,12 +1952,6 @@ PersistentFileSysObj_AddMirror(PersistentFileSysObjName *fsObjName,
 							&parentXid,
 							&serialNum);
 
-	if (state == PersistentFileSysState_Free)
-	{
-		heap_freetuple(tupleCopy);
-	}
-	else
-	{
 		Datum *newValues;
 		bool *replaces;
 		bool needs_update = false;
@@ -2143,18 +2026,6 @@ void PersistentFileSysObj_RepairDelete(
 	PersistentFileSysObjData 		*fileSysObjData;
 	PersistentFileSysObjSharedData 	*fileSysObjSharedData;
 
-	Datum *values;
-
-	HeapTuple tupleCopy;
-
-	PersistentFileSysObjName		fsObjName;
-	PersistentFileSysState			state;
-
-	MirroredObjectExistenceState	mirrorExistenceState;
-
-	TransactionId					parentXid;
-	int64							serialNum;
-
 	if (PersistentStore_IsZeroTid(persistentTid))
 		elog(ERROR, "TID for persistent repair delete tuple is invalid (0,0)");
 
@@ -2163,37 +2034,18 @@ void PersistentFileSysObj_RepairDelete(
 								&fileSysObjData,
 								&fileSysObjSharedData);
 
-	values = (Datum*)palloc(fileSysObjData->storeData.numAttributes * sizeof(Datum));
-
-	PersistentFileSysObj_ReadTuple(
-							fsObjType,
-							persistentTid,
-							values,
-							&tupleCopy);
-
-	GpPersistent_GetCommonValues(
-							fsObjType,
-							values,
-							&fsObjName,
-							&state,
-							&mirrorExistenceState,
-							&parentXid,
-							&serialNum);
-	if (state == PersistentFileSysState_Free)
-		elog(ERROR,
-		     "Persistent object for TID %s is already free",
-			 ItemPointerToString(persistentTid));
-
-	heap_freetuple(tupleCopy);
-
+	/*
+	 * There used to be a check here to perform ReadTuple and then
+	 * validate if its free then error out. Removed the check as now
+	 * simple_heap_delete can error out if trying to delete non
+	 * existent or invisible tuple.
+	 */
 	PersistentFileSysObj_FreeTuple(
 								fileSysObjData,
 								fileSysObjSharedData,
 								fsObjType,
 								persistentTid,
 								/* flushToXLog */ true);
-
-	pfree(values);
 }
 
 static void
@@ -2738,6 +2590,11 @@ void PersistentFileSysObj_DropObject(
 
 	READTUPLE_FOR_UPDATE_ERRCONTEXT_POP;
 
+	if (tupleCopy == NULL)
+		elog(ERROR, "Expected persistent entry '%s' not to be in 'Free' state for DROP at TID %s",
+			 PersistentFileSysObjName_TypeAndObjectName(fsObjName),
+			 ItemPointerToString(persistentTid));
+
 	GpPersistent_GetCommonValues(
 							fsObjType,
 							values,
@@ -2750,11 +2607,6 @@ void PersistentFileSysObj_DropObject(
 	pfree(values);
 
 	heap_freetuple(tupleCopy);
-
-	if (actualState == PersistentFileSysState_Free)
-		elog(ERROR, "Expected persistent entry '%s' not to be in 'Free' state for DROP at TID %s",
-			 PersistentFileSysObjName_TypeAndObjectName(fsObjName),
-			 ItemPointerToString(persistentTid));
 
 	if (persistentSerialNum != actualSerialNum)
 		elog(ERROR, "Expected persistent entry '%s' serial number mismatch for DROP (expected " INT64_FORMAT ", found " INT64_FORMAT "), at TID %s",
@@ -3251,8 +3103,6 @@ void PersistentFileSysObj_UpdateAppendOnlyMirrorResyncEofs(
 	PersistentFileSysRelBufpoolKind relBufpoolKind;
 	TransactionId					parentXid;
 	int64							actualPersistentSerialNum;
-	ItemPointerData 				previousFreeTid;
-
 	int64							updateMirrorAppendOnlyLossEof;
 
 	PersistentFileSysObj_GetDataPtrs(
@@ -3286,6 +3136,14 @@ void PersistentFileSysObj_UpdateAppendOnlyMirrorResyncEofs(
 
 	READTUPLE_FOR_UPDATE_ERRCONTEXT_POP;
 
+	if (tupleCopy == NULL)
+		elog(ERROR, "Persistent %u/%u/%u, segment file #%d, tuple at TID %s not found for update Append-Only mirror resync EOFs",
+			 relFileNode->spcNode,
+			 relFileNode->dbNode,
+			 relFileNode->relNode,
+			 segmentFileNum,
+			 ItemPointerToString(persistentTid));
+
 	GpPersistentRelationNode_GetValues(
 									values,
 									&actualRelFileNode.spcNode,
@@ -3305,16 +3163,7 @@ void PersistentFileSysObj_UpdateAppendOnlyMirrorResyncEofs(
 									&mirrorAppendOnlyNewEof,
 									&relBufpoolKind,
 									&parentXid,
-									&actualPersistentSerialNum,
-									&previousFreeTid);
-
-	if (persistentState == PersistentFileSysState_Free)
-		elog(ERROR, "Persistent %u/%u/%u, segment file #%d, entry is 'Free' for update Append-Only mirror resync EOFs at TID %s",
-			 relFileNode->spcNode,
-			 relFileNode->dbNode,
-			 relFileNode->relNode,
-			 segmentFileNum,
-			 ItemPointerToString(persistentTid));
+									&actualPersistentSerialNum);
 
 	if (persistentSerialNum != actualPersistentSerialNum)
 		elog(ERROR, "Persistent %u/%u/%u, segment file #%d, serial number mismatch for update Append-Only mirror resync EOFs (expected " INT64_FORMAT ", found " INT64_FORMAT "), at TID %s",
@@ -3793,13 +3642,8 @@ void PersistentFileSysObj_PreparedEndXactAction(
 				mirrorCatchupRequired = false;
 			}
 
-#ifdef FAULT_INJECTOR
-			FaultInjector_InjectFaultIfSet(
-							UpdateCommittedEofInPersistentTable,
-							DDLNotSpecified,
-							"", 	// databaseName
-							"");	// tablename
-#endif
+			SIMPLE_FAULT_INJECTOR(UpdateCommittedEofInPersistentTable);
+
 			PersistentFileSysObj_UpdateAppendOnlyMirrorResyncEofs(
 															&eofs->relFileNode,
 															eofs->segmentFileNum,
@@ -4283,7 +4127,6 @@ void PersistentFileSysObj_MarkBufPoolRelationForScanIncrementalResync(
 	PersistentFileSysRelBufpoolKind relBufpoolKind;
 	TransactionId					parentXid;
 	int64							actualPersistentSerialNum;
-	ItemPointerData 				previousFreeTid;
 
 	PersistentFileSysObj_GetDataPtrs(
 								PersistentFsObjType_RelationFile,
@@ -4331,9 +4174,7 @@ void PersistentFileSysObj_MarkBufPoolRelationForScanIncrementalResync(
 									&mirrorAppendOnlyNewEof,
 									&relBufpoolKind,
 									&parentXid,
-									&actualPersistentSerialNum,
-									&previousFreeTid);
-
+									&actualPersistentSerialNum);
 
 	if (persistentSerialNum != actualPersistentSerialNum)
 		elog(ERROR, "Persistent '%s' serial number mismatch for update physically truncated (expected " INT64_FORMAT ", found " INT64_FORMAT ")",
@@ -4398,7 +4239,6 @@ bool PersistentFileSysObj_CanAppendOnlyCatchupDuringResync(
 	PersistentFileSysRelBufpoolKind relBufpoolKind;
 	TransactionId					parentXid;
 	int64							actualPersistentSerialNum;
-	ItemPointerData 				previousFreeTid;
 
 	PersistentFileSysObjName_SetRelationFile(
 										&fsObjName,
@@ -4451,8 +4291,7 @@ bool PersistentFileSysObj_CanAppendOnlyCatchupDuringResync(
 									&mirrorAppendOnlyNewEof,
 									&relBufpoolKind,
 									&parentXid,
-									&actualPersistentSerialNum,
-									&previousFreeTid);
+									&actualPersistentSerialNum);
 
 	WRITE_PERSISTENT_STATE_ORDERED_UNLOCK;
 
@@ -4533,7 +4372,6 @@ void PersistentFileSysObj_GetAppendOnlyCatchupMirrorStartEof(
 	PersistentFileSysRelBufpoolKind relBufpoolKind;
 	TransactionId					parentXid;
 	int64							actualPersistentSerialNum;
-	ItemPointerData 				previousFreeTid;
 
 	PersistentFileSysObjName_SetRelationFile(
 										&fsObjName,
@@ -4586,8 +4424,7 @@ void PersistentFileSysObj_GetAppendOnlyCatchupMirrorStartEof(
 									&mirrorAppendOnlyNewEof,
 									&relBufpoolKind,
 									&parentXid,
-									&actualPersistentSerialNum,
-									&previousFreeTid);
+									&actualPersistentSerialNum);
 
 	READ_PERSISTENT_STATE_ORDERED_UNLOCK;
 
@@ -5303,163 +5140,6 @@ void PersistentFileSysObj_MarkMirrorReDropped(void)
 }
 
 
-void PersistentFileSysObj_MirrorAdd(void)
-{
-	PersistentFsObjType 	fsObjType;
-
-	for (fsObjType = PersistentFsObjType_First;
-		 fsObjType <= PersistentFsObjType_Last;
-		 fsObjType++)
-	{
-		PersistentFileSysObj_ScanStateAction(
-										StateAction_MirrorAdd,
-										fsObjType);
-	}
-}
-
-
-void PersistentFileSysObj_MarkWholeMirrorScanIncremental(void)
-{
-	WRITE_PERSISTENT_STATE_ORDERED_LOCK_DECLARE;
-
-	PersistentFileSysObjData *fileSysObjData;
-	PersistentFileSysObjSharedData	*fileSysObjSharedData;
-
-	PersistentStoreScan storeScan;
-
-	HeapTuple tupleCopy;
-
-	Datum values[Natts_gp_persistent_relation_node];
-
-	ItemPointerData persistentTid;
-	int64 persistentSerialNum;
-
-	tupleCopy = NULL;
-
-	PersistentFileSysObj_VerifyInitScan();
-
-	PersistentFileSysObj_GetDataPtrs(
-								PersistentFsObjType_RelationFile,
-								&fileSysObjData,
-								&fileSysObjSharedData);
-
-	WRITE_PERSISTENT_STATE_ORDERED_LOCK;
-
-	PersistentStore_BeginScan(
-						&fileSysObjData->storeData,
-						&fileSysObjSharedData->storeSharedData,
-						&storeScan);
-
-	while (PersistentStore_GetNext(
-							&storeScan,
-							values,
-							&persistentTid,
-							&persistentSerialNum))
-	{
-		RelFileNode 					relFileNode;
-		int32 							segmentFileNum;
-
-		PersistentFileSysRelStorageMgr	relationStorageManager;
-		PersistentFileSysState			persistentState;
-		int64							createMirrorDataLossTrackingSessionNum;
-		MirroredObjectExistenceState	mirrorExistenceState;
-		MirroredRelDataSynchronizationState mirrorDataSynchronizationState;
-		bool 							mirrorBufpoolMarkedForScanIncrementalResync;
-		int64							mirrorBufpoolResyncChangedPageCount;
-		XLogRecPtr						mirrorBufpoolResyncCkptLoc;
-		BlockNumber 					mirrorBufpoolResyncCkptBlockNum;
-		int64							mirrorAppendOnlyLossEof;
-		int64							mirrorAppendOnlyNewEof;
-		PersistentFileSysRelBufpoolKind relBufpoolKind;
-		TransactionId					parentXid;
-		int64							serialNum;
-		ItemPointerData					previousFreeTid;
-
-		PersistentFileSysObjName		fsObjName;
-
-		GpPersistentRelationNode_GetValues(
-										values,
-										&relFileNode.spcNode,
-										&relFileNode.dbNode,
-										&relFileNode.relNode,
-										&segmentFileNum,
-										&relationStorageManager,
-										&persistentState,
-										&createMirrorDataLossTrackingSessionNum,
-										&mirrorExistenceState,
-										&mirrorDataSynchronizationState,
-										&mirrorBufpoolMarkedForScanIncrementalResync,
-										&mirrorBufpoolResyncChangedPageCount,
-										&mirrorBufpoolResyncCkptLoc,
-										&mirrorBufpoolResyncCkptBlockNum,
-										&mirrorAppendOnlyLossEof,
-										&mirrorAppendOnlyNewEof,
-										&relBufpoolKind,
-										&parentXid,
-										&serialNum,
-										&previousFreeTid);
-
-		PersistentFileSysObjName_SetRelationFile(
-											&fsObjName,
-											&relFileNode,
-											segmentFileNum);
-
-		if (persistentState != PersistentFileSysState_BulkLoadCreatePending
-			&&
-			relationStorageManager == PersistentFileSysRelStorageMgr_BufferPool
-			&&
-			MirroredObjectExistenceState_IsResynchCreated(mirrorExistenceState))
-		{
-			Assert(
-				persistentState == PersistentFileSysState_CreatePending ||
-			 	persistentState == PersistentFileSysState_Created);
-
-			if (Debug_persistent_print)
-				elog(Persistent_DebugPrintLevel(),
-					 "PersistentFileSysObj_MarkWholeMirrorScanIncremental: Mark '%s' needing scan incremental, persistent state '%s', mirror existence state '%s', serial number " INT64_FORMAT " at TID %s",
-					 PersistentFileSysObjName_ObjectName(&fsObjName),
-					 PersistentFileSysObjState_Name(persistentState),
-					 MirroredObjectExistenceState_Name(mirrorExistenceState),
-					 serialNum,
-					 ItemPointerToString(&persistentTid));
-
-			tupleCopy = PersistentStore_GetScanTupleCopy(&storeScan);
-
-			PersistentFileSysObj_UpdateTupleRelDataSynchronizationState(
-													fileSysObjData,
-													fileSysObjSharedData,
-													tupleCopy,
-													&persistentTid,
-													persistentSerialNum,
-													MirroredRelDataSynchronizationState_BufferPoolScanIncremental,
-													/* flushToXLog */ false);
-
-			heap_freetuple(tupleCopy);
-		}
-		else
-		{
-			if (Debug_persistent_print)
-				elog(Persistent_DebugPrintLevel(),
-					 "PersistentFileSysObj_MarkWholeMirrorScanIncremental: Skipping '%s' for scan incremental, relation storage manager '%s', persistent state '%s', mirror existence state '%s', serial number " INT64_FORMAT " at TID %s",
-					 PersistentFileSysObjName_ObjectName(&fsObjName),
-					 PersistentFileSysRelStorageMgr_Name(relationStorageManager),
-					 PersistentFileSysObjState_Name(persistentState),
-					 MirroredObjectExistenceState_Name(mirrorExistenceState),
-					 serialNum,
-					 ItemPointerToString(&persistentTid));
-		}
-
-		WRITE_PERSISTENT_STATE_ORDERED_UNLOCK;
-
-		WRITE_PERSISTENT_STATE_ORDERED_LOCK;
-
-	}
-
-	WRITE_PERSISTENT_STATE_ORDERED_UNLOCK;
-
-	PersistentStore_EndScan(&storeScan);
-}
-
 /*
  * Mark the special persistent tables as needing 'Scan Incremental' recovery.
  */
@@ -5518,8 +5198,6 @@ void PersistentFileSysObj_MarkSpecialScanIncremental(void)
 		PersistentFileSysRelBufpoolKind relBufpoolKind;
 		TransactionId					parentXid;
 		int64							serialNum;
-		ItemPointerData					previousFreeTid;
-
 		PersistentFileSysObjName		fsObjName;
 
 		int32							numOf32kBlocks;
@@ -5543,8 +5221,7 @@ void PersistentFileSysObj_MarkSpecialScanIncremental(void)
 										&mirrorAppendOnlyNewEof,
 										&relBufpoolKind,
 										&parentXid,
-										&serialNum,
-										&previousFreeTid);
+										&serialNum);
 
 		PersistentFileSysObjName_SetRelationFile(
 											&fsObjName,
@@ -5697,8 +5374,6 @@ void PersistentFileSysObj_MarkAppendOnlyCatchup(void)
 		PersistentFileSysRelBufpoolKind relBufpoolKind;
 		TransactionId					parentXid;
 		int64							serialNum;
-		ItemPointerData					previousFreeTid;
-
 		PersistentFileSysObjName		fsObjName;
 
 		GpPersistentRelationNode_GetValues(
@@ -5720,8 +5395,7 @@ void PersistentFileSysObj_MarkAppendOnlyCatchup(void)
 										&mirrorAppendOnlyNewEof,
 										&relBufpoolKind,
 										&parentXid,
-										&serialNum,
-										&previousFreeTid);
+										&serialNum);
 
 		if (persistentState == PersistentFileSysState_Free)
 			continue;
@@ -5849,8 +5523,6 @@ static void PersistentFileSysObj_MarkPageIncremental(
 	PersistentFileSysRelBufpoolKind relBufpoolKind;
 	TransactionId					parentXid;
 	int64							serialNum;
-	ItemPointerData 				previousFreeTid;
-
 	PersistentFileSysObjName		fsObjName;
 
 	if (PersistentStore_IsZeroTid(persistentTid))
@@ -5878,6 +5550,17 @@ static void PersistentFileSysObj_MarkPageIncremental(
 
 	READTUPLE_FOR_UPDATE_ERRCONTEXT_POP;
 
+	if (tupleCopy == NULL)
+	{
+		if (Debug_persistent_print)
+			elog(Persistent_DebugPrintLevel(),
+				 "PersistentFileSysObj_MarkPageIncremental: Skipping 'Free' entry at TID %s",
+				 ItemPointerToString(persistentTid));
+
+		WRITE_PERSISTENT_STATE_ORDERED_UNLOCK;
+		return;
+	}
+
 	GpPersistentRelationNode_GetValues(
 									values,
 									&relFileNode.spcNode,
@@ -5897,23 +5580,7 @@ static void PersistentFileSysObj_MarkPageIncremental(
 									&mirrorAppendOnlyNewEof,
 									&relBufpoolKind,
 									&parentXid,
-									&serialNum,
-									&previousFreeTid);
-
-	if (persistentState == PersistentFileSysState_Free)
-	{
-		if (Debug_persistent_print)
-			elog(Persistent_DebugPrintLevel(),
-				 "PersistentFileSysObj_MarkPageIncremental: Skipping 'Free' entry (input serial number " INT64_FORMAT ", actual serial number " INT64_FORMAT ") at TID %s",
-				 persistentSerialNum,
-				 serialNum,
-				 ItemPointerToString(persistentTid));
-
-		heap_freetuple(tupleCopy);
-
-		WRITE_PERSISTENT_STATE_ORDERED_UNLOCK;
-		return;
-	}
+									&serialNum);
 
 	if (serialNum != persistentSerialNum)
 	{
@@ -6083,7 +5750,6 @@ bool PersistentFileSysObj_ResynchronizeScan(
 	TransactionId					parentXid;
 	int64							serialNum;
 	PersistentFileSysRelBufpoolKind relBufpoolKind;
-	ItemPointerData 				previousFreeTid;
 
 	PersistentFileSysObjName		fsObjName;
 
@@ -6143,8 +5809,7 @@ bool PersistentFileSysObj_ResynchronizeScan(
 										mirrorAppendOnlyNewEof,
 										&relBufpoolKind,
 										&parentXid,
-										&serialNum,
-										&previousFreeTid);
+										&serialNum);
 
 		if (state == PersistentFileSysState_Free)
 			continue;
@@ -6194,21 +5859,6 @@ bool PersistentFileSysObj_ResynchronizeScan(
 	return true;
 }
 
-void PersistentFileSysObj_ResynchronizeAbandonScan(
-	ResynchronizeScanToken			*resynchronizeScanToken)
-{
-	if (resynchronizeScanToken->done)
-		return;
-
-	if (resynchronizeScanToken->beginScan)
-	{
-		PersistentStore_EndScan(&resynchronizeScanToken->storeScan);
-		resynchronizeScanToken->beginScan = false;
-	}
-
-	resynchronizeScanToken->done = true;
-}
-
 /*
  * Refetch the resynchronize relation information while under RELATION_RESYNCHRONIZE lock
  * based on its persistent TID and serial number.
@@ -6247,7 +5897,6 @@ bool PersistentFileSysObj_ResynchronizeRefetch(
 	PersistentFileSysRelBufpoolKind relBufpoolKind;
 	TransactionId					parentXid;
 	int64							serialNum;
-	ItemPointerData 				previousFreeTid;
 
 	if (PersistentStore_IsZeroTid(persistentTid))
 		elog(ERROR, "TID for persistent '%s' tuple for marking page incremental is invalid (0,0)",
@@ -6276,6 +5925,9 @@ bool PersistentFileSysObj_ResynchronizeRefetch(
 
 	READTUPLE_FOR_UPDATE_ERRCONTEXT_POP;
 
+	if (tupleCopy == NULL)
+		return false;
+
 	GpPersistentRelationNode_GetValues(
 									values,
 									&actualRelFileNode.spcNode,
@@ -6295,89 +5947,16 @@ bool PersistentFileSysObj_ResynchronizeRefetch(
 									mirrorAppendOnlyNewEof,
 									&relBufpoolKind,
 									&parentXid,
-									&serialNum,
-									&previousFreeTid);
+									&serialNum);
 
 	heap_freetuple(tupleCopy);
 
 	WRITE_PERSISTENT_STATE_ORDERED_UNLOCK;
 
-	if (persistentState == PersistentFileSysState_Free)
-		return false;
-
 	if (persistentSerialNum != serialNum)
 		return false;
 
 	return true;
-}
-
-void PersistentFileSysObj_ResynchronizeBufferPoolCkpt(
-	ItemPointer 					persistentTid,
-	int64							persistentSerialNum,
-	XLogRecPtr						mirrorBufpoolResyncCkptLoc,
-	BlockNumber 					mirrorBufpoolResyncCkptBlockNum,
-	bool							flushToXLog)
-{
-	WRITE_PERSISTENT_STATE_ORDERED_LOCK_DECLARE;
-
-	READTUPLE_FOR_UPDATE_ERRCONTEXT_DECLARE;
-
-	PersistentFileSysObjData 		*fileSysObjData;
-	PersistentFileSysObjSharedData 	*fileSysObjSharedData;
-
-	Datum values[Natts_gp_persistent_relation_node];
-
-	HeapTuple tupleCopy;
-
-	Datum newValues[Natts_gp_persistent_relation_node];
-	bool replaces[Natts_gp_persistent_relation_node];
-
-	if (PersistentStore_IsZeroTid(persistentTid))
-		elog(ERROR, "TID for persistent '%s' tuple for resynchronize Buffer Pool checkpoint is invalid (0,0)",
-			 PersistentFileSysObjName_TypeName(PersistentFsObjType_RelationFile));
-
-	if (persistentSerialNum == 0)
-		elog(ERROR, "Persistent '%s' serial number for resynchronize Buffer Pool checkpoint is invalid (0)",
-			 PersistentFileSysObjName_TypeName(PersistentFsObjType_RelationFile));
-
-	PersistentFileSysObj_GetDataPtrs(
-								PersistentFsObjType_RelationFile,
-								&fileSysObjData,
-								&fileSysObjSharedData);
-
-	WRITE_PERSISTENT_STATE_ORDERED_LOCK;
-
-	READTUPLE_FOR_UPDATE_ERRCONTEXT_PUSHTYPE(PersistentFsObjType_RelationFile, persistentTid, persistentSerialNum);
-
-	PersistentFileSysObj_ReadTuple(
-							PersistentFsObjType_RelationFile,
-							persistentTid,
-							values,
-							&tupleCopy);
-
-	READTUPLE_FOR_UPDATE_ERRCONTEXT_POP;
-
-	MemSet(newValues, 0, Natts_gp_persistent_relation_node * sizeof(Datum));
-	MemSet(replaces, 0, Natts_gp_persistent_relation_node * sizeof(bool));
-
-	replaces[Anum_gp_persistent_relation_node_mirror_bufpool_resync_ckpt_loc - 1] = true;
-	newValues[Anum_gp_persistent_relation_node_mirror_bufpool_resync_ckpt_loc - 1] =
-									PointerGetDatum(&mirrorBufpoolResyncCkptLoc);
-
-	replaces[Anum_gp_persistent_relation_node_mirror_bufpool_resync_ckpt_block_num - 1] = true;
-	newValues[Anum_gp_persistent_relation_node_mirror_bufpool_resync_ckpt_block_num - 1] =
-									Int32GetDatum(mirrorBufpoolResyncCkptBlockNum);
-
-	PersistentFileSysObj_ReplaceTuple(
-								PersistentFsObjType_RelationFile,
-								persistentTid,
-								tupleCopy,
-								newValues,
-								replaces,
-								flushToXLog);
-
-	WRITE_PERSISTENT_STATE_ORDERED_UNLOCK;
-
 }
 
 void PersistentFileSysObj_ResynchronizeRelationComplete(
@@ -6483,279 +6062,6 @@ void PersistentFileSysObj_ResynchronizeRelationComplete(
 
 }
 
-bool PersistentFileSysObj_OnlineVerifyScan(
-	OnlineVerifyScanToken			*onlineVerifyScanToken,
-	RelFileNode						*relFileNode,
-	int32							*segmentFileNum,
-	PersistentFileSysRelStorageMgr 	*relStorageMgr,
-	MirroredRelDataSynchronizationState *mirrorDataSynchronizationState,
-	PersistentFileSysRelBufpoolKind *relBufpoolKind,
-	int64							*mirrorAppendOnlyLossEof,
-	int64							*mirrorAppendOnlyNewEof,
-	ItemPointer						persistentTid,
-	int64							*persistentSerialNum)
-{
-	WRITE_PERSISTENT_STATE_ORDERED_LOCK_DECLARE;
-
-	PersistentFileSysObjData *fileSysObjData;
-	PersistentFileSysObjSharedData	*fileSysObjSharedData;
-
-	Datum values[Natts_gp_persistent_relation_node];
-
-	PersistentFileSysState			state;
-	int64							createMirrorDataLossTrackingSessionNum;
-	MirroredObjectExistenceState	mirrorExistenceState;
-	bool							mirrorBufpoolMarkedForScanIncrementalResync;
-	int64							mirrorBufpoolResyncChangedPageCount;
-	XLogRecPtr						mirrorBufpoolResyncCkptLoc;
-	BlockNumber 					mirrorBufpoolResyncCkptBlockNum;
-	TransactionId					parentXid;
-	int64							serialNum;
-	ItemPointerData 				previousFreeTid;
-
-	PersistentFileSysObjName		fsObjName;
-
-	if (onlineVerifyScanToken->done)
-		return false;
-
-	PersistentFileSysObj_GetDataPtrs(
-								PersistentFsObjType_RelationFile,
-								&fileSysObjData,
-								&fileSysObjSharedData);
-
-	WRITE_PERSISTENT_STATE_ORDERED_LOCK;
-
-	if (!onlineVerifyScanToken->beginScan)
-	{
-		PersistentStore_BeginScan(
-							&fileSysObjData->storeData,
-							&fileSysObjSharedData->storeSharedData,
-							&onlineVerifyScanToken->storeScan);
-
-		onlineVerifyScanToken->beginScan = true;
-	}
-
-	while (true)
-	{
-		if (!PersistentStore_GetNext(
-								&onlineVerifyScanToken->storeScan,
-								values,
-								persistentTid,
-								persistentSerialNum))
-		{
-			PersistentStore_EndScan(&onlineVerifyScanToken->storeScan);
-			onlineVerifyScanToken->beginScan = false;
-			onlineVerifyScanToken->done = true;
-
-			WRITE_PERSISTENT_STATE_ORDERED_UNLOCK;
-
-			return false;
-		}
-
-		GpPersistentRelationNode_GetValues(
-										values,
-										&relFileNode->spcNode,
-										&relFileNode->dbNode,
-										&relFileNode->relNode,
-										segmentFileNum,
-										relStorageMgr,
-										&state,
-										&createMirrorDataLossTrackingSessionNum,
-										&mirrorExistenceState,
-										mirrorDataSynchronizationState,
-										&mirrorBufpoolMarkedForScanIncrementalResync,
-										&mirrorBufpoolResyncChangedPageCount,
-										&mirrorBufpoolResyncCkptLoc,
-										&mirrorBufpoolResyncCkptBlockNum,
-										mirrorAppendOnlyLossEof,
-										mirrorAppendOnlyNewEof,
-										relBufpoolKind,
-										&parentXid,
-										&serialNum,
-										&previousFreeTid);
-
-		if (state == PersistentFileSysState_Free)
-			continue;
-
-		PersistentFileSysObjName_SetRelationFile(
-											&fsObjName,
-											relFileNode,
-											*segmentFileNum);
-
-		if (state != PersistentFileSysState_BulkLoadCreatePending &&
-			MirroredObjectExistenceState_IsResynchCreated(mirrorExistenceState))
-		{
-
-			if (Debug_persistent_print)
-				elog(Persistent_DebugPrintLevel(),
-					 "PersistentFileSysObj_OnlineVerifyScan: Return '%s' needing data resynchronization ('%s'), persistent state '%s', mirror existence state '%s', serial number " INT64_FORMAT " at TID %s",
-					 PersistentFileSysObjName_ObjectName(&fsObjName),
-					 MirroredRelDataSynchronizationState_Name(*mirrorDataSynchronizationState),
-					 PersistentFileSysObjState_Name(state),
-					 MirroredObjectExistenceState_Name(mirrorExistenceState),
-					 serialNum,
-					 ItemPointerToString(persistentTid));
-
-			break;
-		}
-		else
-		{
-			if (Debug_persistent_print)
-				elog(Persistent_DebugPrintLevel(),
-					 "PersistentFileSysObj_OnlineVerifyScan: Skip '%s' -- doesn't need data resynchronization ('%s'), persistent state '%s', mirror existence state '%s', serial number " INT64_FORMAT " at TID %s",
-					 PersistentFileSysObjName_ObjectName(&fsObjName),
-					 MirroredRelDataSynchronizationState_Name(*mirrorDataSynchronizationState),
-					 PersistentFileSysObjState_Name(state),
-					 MirroredObjectExistenceState_Name(mirrorExistenceState),
-					 serialNum,
-					 ItemPointerToString(persistentTid));
-		}
-
-		WRITE_PERSISTENT_STATE_ORDERED_UNLOCK;
-
-		WRITE_PERSISTENT_STATE_ORDERED_LOCK;
-
-	}
-
-	WRITE_PERSISTENT_STATE_ORDERED_UNLOCK;
-
-	return true;
-}
-
-void PersistentFileSysObj_OnlineVerifyAbandonScan(
-	OnlineVerifyScanToken			*onlineVerifyScanToken)
-{
-	if (onlineVerifyScanToken->done)
-		return;
-
-	if (onlineVerifyScanToken->beginScan)
-	{
-		PersistentStore_EndScan(&onlineVerifyScanToken->storeScan);
-		onlineVerifyScanToken->beginScan = false;
-	}
-
-	onlineVerifyScanToken->done = true;
-}
-
-bool PersistentFileSysObj_FilespaceScan(
-	FilespaceScanToken				*filespaceScanToken,
-	Oid 							*filespaceOid,
-	int16							*dbId1,
-	char							locationBlankPadded1[FilespaceLocationBlankPaddedWithNullTermLen],
-	int16							*dbId2,
-	char							locationBlankPadded2[FilespaceLocationBlankPaddedWithNullTermLen],
-	PersistentFileSysState			*persistentState,
-	MirroredObjectExistenceState	*mirrorExistenceState,
-	ItemPointer						persistentTid,
-	int64							*persistentSerialNum)
-{
-	WRITE_PERSISTENT_STATE_ORDERED_LOCK_DECLARE;
-
-	PersistentFileSysObjData *fileSysObjData;
-	PersistentFileSysObjSharedData	*fileSysObjSharedData;
-
-	Datum values[Natts_gp_persistent_filespace_node];
-
-	int64							createMirrorDataLossTrackingSessionNum;
-	int32							reserved;
-	TransactionId					parentXid;
-	int64							serialNum;
-	ItemPointerData 				previousFreeTid;
-
-	PersistentFileSysObjName		fsObjName;
-
-	if (filespaceScanToken->done)
-		return false;
-
-	PersistentFileSysObj_GetDataPtrs(
-								PersistentFsObjType_FilespaceDir,
-								&fileSysObjData,
-								&fileSysObjSharedData);
-
-	WRITE_PERSISTENT_STATE_ORDERED_LOCK;
-
-	if (!filespaceScanToken->beginScan)
-	{
-		PersistentStore_BeginScan(
-							&fileSysObjData->storeData,
-							&fileSysObjSharedData->storeSharedData,
-							&filespaceScanToken->storeScan);
-
-		filespaceScanToken->beginScan = true;
-	}
-
-	while (true)
-	{
-
-		if (!PersistentStore_GetNext(
-								&filespaceScanToken->storeScan,
-								values,
-								persistentTid,
-								persistentSerialNum))
-		{
-			PersistentStore_EndScan(&filespaceScanToken->storeScan);
-			filespaceScanToken->beginScan = false;
-			filespaceScanToken->done = true;
-
-			WRITE_PERSISTENT_STATE_ORDERED_UNLOCK;
-
-			return false;
-		}
-
-		GpPersistentFilespaceNode_GetValues(
-										values,
-										filespaceOid,
-										dbId1,
-										locationBlankPadded1,
-										dbId2,
-										locationBlankPadded2,
-										persistentState,
-										&createMirrorDataLossTrackingSessionNum,
-										mirrorExistenceState,
-										&reserved,
-										&parentXid,
-										&serialNum,
-										&previousFreeTid);
-
-		if (*persistentState == PersistentFileSysState_Free)
-			continue;
-
-		PersistentFileSysObjName_SetFilespaceDir(
-											&fsObjName,
-											*filespaceOid);
-		if (Debug_persistent_print)
-			elog(Persistent_DebugPrintLevel(),
-				 "PersistentFileSysObj_FilespaceScan: Return '%s' (persistent state '%s', mirror existence state '%s', serial number " INT64_FORMAT " at TID %s",
-				 PersistentFileSysObjName_ObjectName(&fsObjName),
-				 PersistentFileSysObjState_Name(*persistentState),
-				 MirroredObjectExistenceState_Name(*mirrorExistenceState),
-				 serialNum,
-				 ItemPointerToString(persistentTid));
-
-		break;
-
-	}
-
-	WRITE_PERSISTENT_STATE_ORDERED_UNLOCK;
-
-	return true;
-}
-
-void PersistentFileSysObj_FilespaceAbandonScan(
-	FilespaceScanToken			*filespaceScanToken)
-{
-	if (filespaceScanToken->done)
-		return;
-
-	if (filespaceScanToken->beginScan)
-	{
-		PersistentStore_EndScan(&filespaceScanToken->storeScan);
-		filespaceScanToken->beginScan = false;
-	}
-
-	filespaceScanToken->done = true;
-}
-
 bool PersistentFileSysObj_ScanForRelation(
 	RelFileNode 		*relFileNode,
 				/* The tablespace, database, and relation OIDs for the create. */
@@ -6833,7 +6139,6 @@ bool PersistentFileSysObj_ScanForRelation(
 		PersistentFileSysRelBufpoolKind relBufpoolKind;
 		TransactionId					parentXid;
 		int64							serialNum;
-		ItemPointerData					previousFreeTid;
 
 		GpPersistentRelationNode_GetValues(
 										values,
@@ -6854,8 +6159,7 @@ bool PersistentFileSysObj_ScanForRelation(
 										&mirrorAppendOnlyNewEof,
 										&relBufpoolKind,
 										&parentXid,
-										&serialNum,
-										&previousFreeTid);
+										&serialNum);
 
 		if (persistentState != PersistentFileSysState_BulkLoadCreatePending &&
 			persistentState != PersistentFileSysState_CreatePending &&
@@ -6938,7 +6242,6 @@ static void PersistentFileSysObj_StartupIntegrityCheckRelation(void)
 		PersistentFileSysRelBufpoolKind relBufpoolKind;
 		TransactionId					parentXid;
 		int64							serialNum;
-		ItemPointerData					previousFreeTid;
 
 		DbDirNode dbDirNode;
 
@@ -6961,8 +6264,7 @@ static void PersistentFileSysObj_StartupIntegrityCheckRelation(void)
 										&mirrorAppendOnlyNewEof,
 										&relBufpoolKind,
 										&parentXid,
-										&serialNum,
-										&previousFreeTid);
+										&serialNum);
 
 		if (persistentState == PersistentFileSysState_Free)
 			continue;

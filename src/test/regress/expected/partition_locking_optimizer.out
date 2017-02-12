@@ -9,7 +9,6 @@ create or replace view locktest as
 select coalesce(
   case when relname like 'pg_toast%index' then 'toast index'
        when relname like 'pg_toast%' then 'toast table'
-       when relname like 'pg_aoseg%index' then 'aoseg index'
        when relname like 'pg_aoseg%' then 'aoseg table'
        else relname end, 'dropped table'),
   mode,
@@ -50,7 +49,6 @@ select * from locktest;
  gp_distribution_policy     | RowExclusiveLock    | relation | master
  locktest                   | AccessShareLock     | relation | master
  pg_class                   | AccessShareLock     | relation | master
- pg_class                   | RowExclusiveLock    | relation | n segments
  pg_class                   | RowExclusiveLock    | relation | master
  pg_class_oid_index         | AccessShareLock     | relation | master
  pg_class_relname_nsp_index | AccessShareLock     | relation | master
@@ -64,7 +62,7 @@ select * from locktest;
  toast index                | AccessExclusiveLock | relation | master
  toast table                | ShareLock           | relation | n segments
  toast table                | ShareLock           | relation | master
-(19 rows)
+(18 rows)
 
 commit;
 -- drop
@@ -116,7 +114,6 @@ select * from locktest;
  pg_appendonly              | RowExclusiveLock    | relation | n segments
  pg_appendonly              | RowExclusiveLock    | relation | master
  pg_class                   | AccessShareLock     | relation | master
- pg_class                   | RowExclusiveLock    | relation | n segments
  pg_class                   | RowExclusiveLock    | relation | master
  pg_class_oid_index         | AccessShareLock     | relation | master
  pg_class_relname_nsp_index | AccessShareLock     | relation | master
@@ -130,7 +127,7 @@ select * from locktest;
  toast index                | AccessExclusiveLock | relation | master
  toast table                | ShareLock           | relation | n segments
  toast table                | ShareLock           | relation | master
-(21 rows)
+(20 rows)
 
 commit;
 begin;
@@ -143,7 +140,6 @@ insert into g values(1), (2), (3);
 select * from locktest;
           coalesce          |        mode         |         locktype         |    node    
 ----------------------------+---------------------+--------------------------+------------
- aoseg index                | AccessShareLock     | relation                 | n segments
  aoseg table                | AccessShareLock     | relation                 | n segments
  aoseg table                | AccessShareLock     | relation                 | n segments
  aoseg table                | AccessShareLock     | relation                 | n segments
@@ -167,7 +163,7 @@ select * from locktest;
  pg_class_oid_index         | AccessShareLock     | relation                 | master
  pg_class_relname_nsp_index | AccessShareLock     | relation                 | master
  pg_locks                   | AccessShareLock     | relation                 | master
-(24 rows)
+(23 rows)
 
 commit;
 -- drop
@@ -187,8 +183,6 @@ select * from locktest;
  dropped table              | AccessExclusiveLock | relation | master
  dropped table              | AccessExclusiveLock | relation | master
  dropped table              | AccessExclusiveLock | relation | n segments
- dropped table              | AccessExclusiveLock | relation | master
- dropped table              | AccessExclusiveLock | relation | n segments
  dropped table              | AccessExclusiveLock | relation | n segments
  gp_distribution_policy     | RowExclusiveLock    | relation | n segments
  gp_distribution_policy     | RowExclusiveLock    | relation | master
@@ -204,7 +198,7 @@ select * from locktest;
  pg_partition               | RowExclusiveLock    | relation | master
  pg_partition_rule          | RowExclusiveLock    | relation | master
  pg_type                    | RowExclusiveLock    | relation | master
-(28 rows)
+(26 rows)
 
 commit;
 -- Indexing
@@ -241,14 +235,11 @@ select * from locktest;
  g_idx                      | AccessExclusiveLock | relation | master
  locktest                   | AccessShareLock     | relation | master
  pg_class                   | AccessShareLock     | relation | master
- pg_class                   | RowExclusiveLock    | relation | master
  pg_class_oid_index         | AccessShareLock     | relation | master
  pg_class_relname_nsp_index | AccessShareLock     | relation | master
  pg_locks                   | AccessShareLock     | relation | master
- pg_partition               | AccessShareLock     | relation | master
  pg_partition_rule          | AccessShareLock     | relation | master
- pg_type                    | RowExclusiveLock    | relation | master
-(13 rows)
+(10 rows)
 
 commit;
 -- Force use of the index in the select and delete below. We're not interested

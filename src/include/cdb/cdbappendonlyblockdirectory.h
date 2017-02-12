@@ -4,14 +4,10 @@
  *
  * Copyright (c) 2009, Greenplum Inc.
  *
- * $Id: $
- * $Change: $
- * $DateTime: $
- * $Author: $
  *------------------------------------------------------------------------------
  */
-#ifndef APPENDONLYBLOCKDIRECTORY_H
-#define APPENDONLYBLOCKDIRECTORY_H
+#ifndef CDBAPPENDONLYBLOCKDIRECTORY_H
+#define CDBAPPENDONLYBLOCKDIRECTORY_H
 
 #include "access/aosegfiles.h"
 #include "access/aocssegfiles.h"
@@ -167,7 +163,6 @@ extern bool AppendOnlyBlockDirectory_GetEntry(
 	AppendOnlyBlockDirectoryEntry	*directoryEntry);
 extern void AppendOnlyBlockDirectory_Init_forInsert(
 	AppendOnlyBlockDirectory *blockDirectory,
-	AppendOnlyEntry *aoEntry,
 	Snapshot appendOnlyMetaDataSnapshot,
 	FileSegInfo *segmentFileInfo,
 	int64 lastSequence,
@@ -177,7 +172,6 @@ extern void AppendOnlyBlockDirectory_Init_forInsert(
 	bool isAOCol);
 extern void AppendOnlyBlockDirectory_Init_forSearch(
 	AppendOnlyBlockDirectory *blockDirectory,
-	AppendOnlyEntry *aoEntry,
 	Snapshot appendOnlyMetaDataSnapshot,
 	FileSegInfo **segmentFileInfo,
 	int totalSegfiles,
@@ -187,7 +181,6 @@ extern void AppendOnlyBlockDirectory_Init_forSearch(
 	bool *proj);
 extern void AppendOnlyBlockDirectory_Init_addCol(
 	AppendOnlyBlockDirectory *blockDirectory,
-	AppendOnlyEntry *aoEntry,
 	Snapshot appendOnlyMetaDataSnapshot,
 	FileSegInfo *segmentFileInfo,
 	Relation aoRel,
@@ -220,7 +213,7 @@ extern void AppendOnlyBlockDirectory_End_forSearch(
 extern void AppendOnlyBlockDirectory_End_addCol(
 	AppendOnlyBlockDirectory *blockDirectory);
 extern void AppendOnlyBlockDirectory_DeleteSegmentFile(
-		AppendOnlyEntry *aoEntry,
+	Relation aoRel,
 		Snapshot snapshot,
 		int segno,
 		int columnGroupNo);

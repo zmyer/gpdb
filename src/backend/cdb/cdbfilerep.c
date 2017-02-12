@@ -293,8 +293,9 @@ FileRepOperationToString[] = {
 	_("validation filespace dir or existence"),
 	_("drop files from dir"),
 	_("drop temporary files"),
+	_("start checksum computation of a SLRU directory"),
+	_("verify checksum of a SLRU directory"),
 	_("not specified"),
-
 };
 
 const char*
@@ -338,6 +339,7 @@ FileRepStatusToString[] = {
 	_("read-only file system"),
 	_("mirror loss occurred"),
 	_("mirror error"),
+	_("slru checksum failed")
 };
 
 const char *
@@ -2212,13 +2214,8 @@ FileRep_ProcessSignals()
 			FileRep_SetPostmasterReset();
 		else
 		{
-#ifdef FAULT_INJECTOR
-			FaultInjector_InjectFaultIfSet(
-						   FileRepImmediateShutdownRequested,
-						   DDLNotSpecified,
-						   "",	// databaseName
-						   ""); // tableName
-#endif
+			SIMPLE_FAULT_INJECTOR(FileRepImmediateShutdownRequested);
+
 			FileRep_SignalChildren(SIGQUIT, false);
 			processExit = true;
 			exitWithImmediateShutdown = true;
@@ -2261,8 +2258,6 @@ FileRep_ProcessSignals()
 				break;
 			if ( errno == ECHILD)
 				break;
-
-			bool resetRequired = freeAuxiliaryProcEntryAndReturnReset(term_pid, NULL);
 
 			/* NOTE see do_reaper() */
 			for (i=0; i < MaxFileRepSubProc; i++)
@@ -2313,8 +2308,7 @@ FileRep_ProcessSignals()
 
 					if (! EXIT_STATUS_0(term_status) &&
 					    ! EXIT_STATUS_1(term_status) &&
-					    ! EXIT_STATUS_2(term_status) &&
-						resetRequired)
+					    ! EXIT_STATUS_2(term_status))
 					{
 					    FileRep_SetPostmasterReset();
 					}
@@ -2942,6 +2936,7 @@ FileRep_IsOperationSynchronous(FileRepOperation_e fileRepOperation)
 		case FileRepOperationHeartBeat:
 		case FileRepOperationCreateAndOpen:
 		case FileRepOperationValidation:
+		case FileRepOperationVerifySlruDirectoryChecksum:
 			return TRUE;
 
 		case FileRepOperationOpen:
@@ -2950,7 +2945,7 @@ FileRep_IsOperationSynchronous(FileRepOperation_e fileRepOperation)
 		case FileRepOperationWrite:
 		case FileRepOperationDropFilesFromDir:
 		case FileRepOperationDropTemporaryFiles:
-
+		case FileRepOperationStartSlruChecksum:
 			return FALSE;
 
 		case FileRepOperationNotSpecified:
@@ -4324,10 +4319,14 @@ FileRepStats_GpmonCreateSock(void)
 		elog(DEBUG1, "FileRepStats_GpmonCreateSock destAddress localhost, port %d\n",
 				 gpperfmon_port);
 
+		pg_freeaddrinfo_all(hint.ai_family, addrs);
 		return;
 	}
-	elog(WARNING, "gpmon: cannot create socket (%m)");
 
+	if (addrs)
+		pg_freeaddrinfo_all(hint.ai_family, addrs);
+
+	elog(WARNING, "gpmon: cannot create socket (%m)");
 }
 
 /*

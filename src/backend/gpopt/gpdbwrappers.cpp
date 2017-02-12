@@ -20,181 +20,6 @@
 //
 //---------------------------------------------------------------------------
 
-#define ALLOW_sigsetjmp
-#define ALLOW_DatumGetBool
-#define ALLOW_BoolGetDatum
-#define ALLOW_DatumGetChar
-#define ALLOW_CharGetDatum
-#define ALLOW_DatumGetInt8
-#define ALLOW_Int8GetDatum
-#define ALLOW_DatumGetUInt8
-#define ALLOW_UInt8GetDatum
-#define ALLOW_DatumGetInt16
-#define ALLOW_Int16GetDatum
-#define ALLOW_DatumGetUInt16
-#define ALLOW_UInt16GetDatum
-#define ALLOW_DatumGetInt32
-#define ALLOW_Int32GetDatum
-#define ALLOW_DatumGetUInt32
-#define ALLOW_UInt32GetDatum
-#define ALLOW_DatumGetInt64
-#define ALLOW_Int64GetDatum
-#define ALLOW_DatumGetUInt64
-#define ALLOW_UInt64GetDatum
-#define ALLOW_DatumGetObjectId
-#define ALLOW_DatumGetPointer
-#define ALLOW_DatumGetFloat4
-#define ALLOW_DatumGetFloat8
-#define ALLOW_PointerGetDatum
-#define ALLOW_aggregate_exists
-#define ALLOW_bms_add_member
-#define ALLOW_copyObject
-#define ALLOW_datumGetSize
-#define ALLOW_deconstruct_array
-#define ALLOW_expression_tree_mutator
-#define ALLOW_expression_tree_walker
-#define ALLOW_exprType
-#define ALLOW_exprTypmod
-#define ALLOW_extract_nodes_plan
-#define ALLOW_extract_nodes_expression
-#define ALLOW_free_attstatsslot
-#define ALLOW_func_strict
-#define ALLOW_func_volatile
-#define ALLOW_func_data_access
-#define ALLOW_FuncnameGetCandidates
-#define ALLOW_function_exists
-#define ALLOW_function_oids
-#define ALLOW_get_agg_transtype
-#define ALLOW_flatten_join_alias_var_optimizer
-#define ALLOW_get_aggregate
-#define ALLOW_is_agg_ordered
-#define ALLOW_has_agg_prelimfunc
-#define ALLOW_get_array_type
-#define ALLOW_get_attstatsslot
-#define ALLOW_get_att_stats
-#define ALLOW_get_commutator
-#define ALLOW_trigger_exists
-#define ALLOW_get_trigger_name
-#define ALLOW_get_trigger_relid
-#define ALLOW_get_trigger_funcid
-#define ALLOW_get_trigger_type
-#define ALLOW_trigger_enabled
-#define ALLOW_get_func_name
-#define ALLOW_get_func_output_arg_types
-#define ALLOW_get_func_arg_types
-#define ALLOW_get_func_retset
-#define ALLOW_get_func_rettype
-#define ALLOW_get_negator
-#define ALLOW_get_opcode
-#define ALLOW_get_opname
-#define ALLOW_get_partition_attrs
-#define ALLOW_rel_is_leaf_partition
-#define ALLOW_rel_partition_get_master
-#define ALLOW_BuildLogicalIndexInfo
-#define ALLOW_get_parts
-#define ALLOW_countLeafPartTables
-#define ALLOW_get_relation_keys
-#define ALLOW_get_typ_typrelid
-#define ALLOW_get_type_name
-#define ALLOW_getgpsegmentCount
-#define ALLOW_heap_attisnull
-#define ALLOW_heap_freetuple
-#define ALLOW_index_exists
-#define ALLOW_isGreenplumDbHashable
-#define ALLOW_lappend
-#define ALLOW_lappend_int
-#define ALLOW_lappend_oid
-#define ALLOW_lcons
-#define ALLOW_lcons_int
-#define ALLOW_lcons_oid
-#define ALLOW_list_concat
-#define ALLOW_list_copy
-#define ALLOW_list_head
-#define ALLOW_list_tail
-#define ALLOW_list_length
-#define ALLOW_list_nth
-#define ALLOW_list_free
-#define ALLOW_list_nth_int
-#define ALLOW_list_nth_oid
-#define ALLOW_list_member_oid
-#define ALLOW_freeListAndNull
-#define ALLOW_lookup_type_cache
-#define ALLOW_makeString
-#define ALLOW_makeInteger
-#define ALLOW_makeBoolConst
-#define ALLOW_makeTargetEntry
-#define ALLOW_makeVar
-#define ALLOW_MemoryContextAllocImpl
-#define ALLOW_MemoryContextAllocZeroAlignedImpl
-#define ALLOW_MemoryContextAllocZeroImpl
-#define ALLOW_MemoryContextFreeImpl
-#define ALLOW_MemoryContextReallocImpl
-#define ALLOW_MemoryContextStrdup
-#define ALLOW_nodeToString
-#define ALLOW_numeric_to_double_no_overflow
-#define ALLOW_convert_timevalue_to_scalar
-#define ALLOW_convert_network_to_scalar
-#define ALLOW_op_hashjoinable
-#define ALLOW_op_mergejoinable
-#define ALLOW_op_strict
-#define ALLOW_op_input_types
-#define ALLOW_operator_exists
-#define ALLOW_palloc
-#define ALLOW_pfree
-#define ALLOW_equal
-#define ALLOW_pg_detoast_datum
-#define ALLOW_query_or_expression_tree_walker
-#define ALLOW_query_or_expression_tree_mutator
-#define ALLOW_query_tree_mutator
-#define ALLOW_range_table_mutator
-#define ALLOW_rel_part_status
-#define ALLOW_relation_exists
-#define ALLOW_relation_oids
-#define ALLOW_RelationClose
-#define ALLOW_RelationGetIndexList
-#define ALLOW_RelationBuildTriggers
-#define ALLOW_RelationIdGetRelation
-#define ALLOW_tlist_member
-#define ALLOW_tlist_members
-#define ALLOW_type_exists
-#define ALLOW_GetExtTableEntry
-#define ALLOW_ParseExternalTableUri
-#define ALLOW_getCdbComponentDatabases
-#define ALLOW_pg_strcasecmp
-#define ALLOW_makeRandomSegMap
-#define ALLOW_makeStringInfo
-#define ALLOW_appendStringInfo
-#define ALLOW_get_cast_func
-#define ALLOW_get_relation_part_constraints
-#define ALLOW_get_operator_type
-#define ALLOW_get_comparison_operator
-#define ALLOW_equality_oper_opid
-#define ALLOW_find_nodes
-#define ALLOW_char_to_parttype
-#define ALLOW_makeNullConst
-#define ALLOW_coerce_to_common_type
-#define ALLOW_resolve_generic_type
-#define ALLOW_has_subclass
-#define ALLOW_cdbhash_const
-#define ALLOW_cdbhash_const_list
-
-#define ALLOW_ExecCheckRTPerms
-#define ALLOW_evaluate_expr
-#define ALLOW_get_operator_opclasses
-#define ALLOW_get_index_opclasses
-
-#define ALLOW_interpretOidsOption
-#define ALLOW_defGetString
-#define ALLOW_fold_arrayexpr_constants
-#define ALLOW_has_parquet_children
-#define ALLOW_relation_policy
-#define ALLOW_child_distribution_mismatch
-#define ALLOW_child_triggers
-#define ALLOW_static_part_selection
-#define ALLOW_isMotionGather
-#define ALLOW_estimate_rel_size
-#define ALLOW_rel_partitioning_is_uniform
-
 #include "gpopt/utils/gpdbdefs.h"
 
 #include "gpos/base.h"
@@ -215,8 +40,11 @@
 
 #define GP_WRAP_END	\
 		}	\
+		else \
+		{ \
+			GPOS_RAISE(gpdxl::ExmaGPDB, gpdxl::ExmiGPDBError); \
+		} \
 	}	\
-	GPOS_RAISE(gpdxl::ExmaGPDB, gpdxl::ExmiGPDBError)
 
 using namespace gpos;
 
@@ -807,22 +635,6 @@ gpdb::CFuncDataAccess
 	return '\0';
 }
 
-FuncCandidateList
-gpdb::FclFuncCandidates
-	(
-	List *plistNames,
-	int iArgs
-	)
-{
-	GP_WRAP_START;
-	{
-		/* catalog tables: pg_proc */
-		return FuncnameGetCandidates(plistNames, iArgs, false, false);
-	}
-	GP_WRAP_END;
-	return NULL;
-}
-
 bool
 gpdb::FFunctionExists
 	(
@@ -1190,6 +1002,22 @@ gpdb::PnodePartConstraintRel
 	GP_WRAP_END;
 	return NULL;
 }
+
+bool
+gpdb::FHasExternalPartition
+	(
+	Oid oid
+	)
+{
+	GP_WRAP_START;
+	{
+		/* catalog tables: pg_partition, pg_partition_rule */
+		return rel_has_external_partition(oid);
+	}
+	GP_WRAP_END;
+	return false;
+}
+
 
 bool
 gpdb::FLeafPartition
@@ -1705,7 +1533,7 @@ gpdb::PlcListTail
 	return NULL;
 }
 
-int
+uint32
 gpdb::UlListLength
 	(
 	List *l
@@ -1807,20 +1635,6 @@ gpdb::FreeListDeep
 	GP_WRAP_END;
 }
 
-void
-gpdb::FreeListAndNull
-	(
-	List **listPtrPtr
-	)
-{
-	GP_WRAP_START;
-	{
-		freeListAndNull(listPtrPtr);
-		return;
-	}
-	GP_WRAP_END;
-}
-
 bool
 gpdb::FMotionGather
 	(
@@ -1830,6 +1644,20 @@ gpdb::FMotionGather
 	GP_WRAP_START;
 	{
 		return isMotionGather(pmotion);
+	}
+	GP_WRAP_END;
+	return false;
+}
+
+bool
+gpdb::FAppendOnlyPartitionTable
+	(
+	Oid rootOid
+	)
+{
+	GP_WRAP_START;
+	{
+		return rel_has_appendonly_partition(rootOid);
 	}
 	GP_WRAP_END;
 	return false;
@@ -2800,21 +2628,22 @@ gpdb::PnodeCoerceToCommonType
 	return NULL;
 }
 
-Oid
-gpdb::OidResolveGenericType
+bool
+gpdb::FResolvePolymorphicType
 	(
-	Oid declared_type,
-	Oid context_actual_type,
-	Oid context_declared_type
+	int numargs,
+	Oid *argtypes,
+	char *argmodes,
+	FuncExpr *call_expr
 	)
 {
 	GP_WRAP_START;
 	{
-		/* catalog tables: pg_type */
-		return resolve_generic_type(declared_type, context_actual_type, context_declared_type);
+		/* catalog tables: pg_proc */
+		return resolve_polymorphic_argtypes(numargs, argtypes, argmodes, (Node *)call_expr);
 	}
 	GP_WRAP_END;
-	return 0;
+	return false;
 }
 
 // hash a const value with GPDB's hash function
@@ -2858,18 +2687,18 @@ gpdb::CheckRTPermissions
 {
 	GP_WRAP_START;
 	{
-		ExecCheckRTPerms(plRangeTable);	
+		ExecCheckRTPerms(plRangeTable);
 		return;
 	}
 	GP_WRAP_END;
 }
 
-// check permissions on range table
+// get index op family properties
 void
 gpdb::IndexOpProperties
 	(
 	Oid opno,
-	Oid opclass,
+	Oid opfamily,
 	int *strategy,
 	Oid *subtype,
 	bool *recheck
@@ -2879,20 +2708,19 @@ gpdb::IndexOpProperties
 	{
 		/* catalog tables: pg_amop */
 
-		// FIXME: We assume the 'opclass' arg is actually an opfamily
-		// Also, only the right type is returned to the caller, the left
+		// Only the right type is returned to the caller, the left
 		// type is simply ignored.
 		Oid	lefttype;
 
-		get_op_opfamily_properties(opno, opclass, strategy, &lefttype, subtype, recheck);
+		get_op_opfamily_properties(opno, opfamily, strategy, &lefttype, subtype, recheck);
 		return;
 	}
 	GP_WRAP_END;
 }
 
-// get oids of opclasses for the index keys
+// get oids of opfamilies for the index keys
 List *
-gpdb::PlIndexOpClasses
+gpdb::PlIndexOpFamilies
 	(
 	Oid oidIndex
 	)
@@ -2901,9 +2729,7 @@ gpdb::PlIndexOpClasses
 	{
 		/* catalog tables: pg_index */
 
-		// FIXME: We actually return the operator *families* of the index keys.
-		// As long as we do the same for operators below, i.e. fetch the
-		// operator families that an operator belons to, this works.
+		// We return the operator families of the index keys.
 		return get_index_opfamilies(oidIndex);
 	}
 	GP_WRAP_END;
@@ -2911,9 +2737,9 @@ gpdb::PlIndexOpClasses
 	return NIL;
 }
 
-// get oids of classes this operator belongs to
+// get oids of families this operator belongs to
 List *
-gpdb::PlScOpOpClasses
+gpdb::PlScOpOpFamilies
 	(
 	Oid opno
 	)
@@ -2922,9 +2748,8 @@ gpdb::PlScOpOpClasses
 	{
 		/* catalog tables: pg_amop */
 
-		// FIXME: We actually return the operator *families* this operator
-		// belongs to. As long as we do the same for index columns above,
-		// this works.
+		// We return the operator families this operator
+		// belongs to.
 		return get_operator_opfamilies(opno);
 	}
 	GP_WRAP_END;
@@ -2940,12 +2765,13 @@ Expr *
 gpdb::PexprEvaluate
 	(
 	Expr *pexpr,
-	Oid oidResultType
+	Oid oidResultType,
+	int32 iTypeMod
 	)
 {
 	GP_WRAP_START;
 	{
-		return evaluate_expr(pexpr, oidResultType);
+		return evaluate_expr(pexpr, oidResultType, iTypeMod);
 	}
 	GP_WRAP_END;
 	return NULL;
@@ -3065,7 +2891,13 @@ static int64 mdcache_invalidation_counter = 0;
 static int64 last_mdcache_invalidation_counter = 0;
 
 static void
-mdcache_invalidation_counter_callback(Datum arg, Oid relid)
+mdsyscache_invalidation_counter_callback(Datum arg, int cacheid,  ItemPointer tuplePtr)
+{
+	mdcache_invalidation_counter++;
+}
+
+static void
+mdrelcache_invalidation_counter_callback(Datum arg, Oid relid)
 {
 	mdcache_invalidation_counter++;
 }
@@ -3124,17 +2956,17 @@ register_mdcache_invalidation_callbacks(void)
 		 */
 		/* gp_segment_config */
 	};
-	int			i;
+	unsigned int i;
 
 	for (i = 0; i < lengthof(metadata_caches); i++)
 	{
 		CacheRegisterSyscacheCallback(metadata_caches[i],
-									  &mdcache_invalidation_counter_callback,
+									  &mdsyscache_invalidation_counter_callback,
 									  (Datum) 0);
 	}
 
 	/* also register the relcache callback */
-	CacheRegisterRelcacheCallback(&mdcache_invalidation_counter_callback,
+	CacheRegisterRelcacheCallback(&mdrelcache_invalidation_counter_callback,
 								  (Datum) 0);
 }
 

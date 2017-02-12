@@ -8,17 +8,19 @@
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/rewrite/rewriteSupport.c,v 1.64 2007/01/05 22:19:37 momjian Exp $
+ *	  $PostgreSQL: pgsql/src/backend/rewrite/rewriteSupport.c,v 1.65 2008/01/01 19:45:51 momjian Exp $
  *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
 
 #include "access/heapam.h"
-#include "catalog/catquery.h"
 #include "catalog/indexing.h"
+#include "catalog/pg_rewrite.h"
 #include "rewrite/rewriteSupport.h"
+#include "utils/fmgroids.h"
 #include "utils/inval.h"
+#include "utils/lsyscache.h"
 #include "utils/syscache.h"
 
 
@@ -42,23 +44,14 @@ SetRelationRuleStatus(Oid relationId, bool relHasRules,
 	Relation	relationRelation;
 	HeapTuple	tuple;
 	Form_pg_class classForm;
-	cqContext	cqc;
-	cqContext  *pcqCtx;
 
 	/*
 	 * Find the tuple to update in pg_class, using syscache for the lookup.
 	 */
 	relationRelation = heap_open(RelationRelationId, RowExclusiveLock);
-
-	pcqCtx = caql_addrel(cqclr(&cqc), relationRelation);
-
-	tuple = caql_getfirst(
-			pcqCtx,
-			cql("SELECT * FROM pg_class "
-				" WHERE oid = :1 "
-				" FOR UPDATE ",
-				ObjectIdGetDatum(relationId)));
-
+	tuple = SearchSysCacheCopy(RELOID,
+							   ObjectIdGetDatum(relationId),
+							   0, 0, 0);
 	if (!HeapTupleIsValid(tuple))
 		elog(ERROR, "cache lookup failed for relation %u", relationId);
 	classForm = (Form_pg_class) GETSTRUCT(tuple);
@@ -74,7 +67,10 @@ SetRelationRuleStatus(Oid relationId, bool relHasRules,
 			classForm->relstorage = RELSTORAGE_VIRTUAL;
 		}
 
-		caql_update_current(pcqCtx, tuple); /* implicit update of index  */
+		simple_heap_update(relationRelation, &tuple->t_self, tuple);
+
+		/* Keep the catalog indexes up to date */
+		CatalogUpdateIndexes(relationRelation, tuple);
 	}
 	else
 	{
@@ -84,4 +80,83 @@ SetRelationRuleStatus(Oid relationId, bool relHasRules,
 
 	heap_freetuple(tuple);
 	heap_close(relationRelation, RowExclusiveLock);
+}
+
+/*
+ * Find rule oid.
+ *
+ * If missing_ok is false, throw an error if rule name not found.  If
+ * true, just return InvalidOid.
+ */
+Oid
+get_rewrite_oid(Oid relid, const char *rulename, bool missing_ok)
+{
+	HeapTuple	tuple;
+	Oid			ruleoid;
+
+	/* Find the rule's pg_rewrite tuple, get its OID */
+	tuple = SearchSysCache2(RULERELNAME,
+							ObjectIdGetDatum(relid),
+							PointerGetDatum(rulename));
+	if (!HeapTupleIsValid(tuple))
+	{
+		if (missing_ok)
+			return InvalidOid;
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("rule \"%s\" for relation \"%s\" does not exist",
+						rulename, get_rel_name(relid))));
+	}
+	Assert(relid == ((Form_pg_rewrite) GETSTRUCT(tuple))->ev_class);
+	ruleoid = HeapTupleGetOid(tuple);
+	ReleaseSysCache(tuple);
+	return ruleoid;
+}
+
+/*
+ * Find rule oid, given only a rule name but no rel OID.
+ *
+ * If there's more than one, it's an error.  If there aren't any, that's an
+ * error, too.  In general, this should be avoided - it is provided to support
+ * syntax that is compatible with pre-7.3 versions of PG, where rule names
+ * were unique across the entire database.
+ */
+Oid
+get_rewrite_oid_without_relid(const char *rulename, Oid *reloid)
+{
+	Relation	RewriteRelation;
+	HeapScanDesc scanDesc;
+	ScanKeyData scanKeyData;
+	HeapTuple	htup;
+	Oid			ruleoid;
+
+	/* Search pg_rewrite for such a rule */
+	ScanKeyInit(&scanKeyData,
+				Anum_pg_rewrite_rulename,
+				BTEqualStrategyNumber, F_NAMEEQ,
+				CStringGetDatum(rulename));
+
+	RewriteRelation = heap_open(RewriteRelationId, AccessShareLock);
+	scanDesc = heap_beginscan(RewriteRelation, SnapshotNow, 1, &scanKeyData);
+
+	htup = heap_getnext(scanDesc, ForwardScanDirection);
+	if (!HeapTupleIsValid(htup))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("rule \"%s\" does not exist", rulename)));
+
+	ruleoid = HeapTupleGetOid(htup);
+	if (reloid != NULL)
+		*reloid = ((Form_pg_rewrite) GETSTRUCT(htup))->ev_class;
+
+	if (HeapTupleIsValid(htup = heap_getnext(scanDesc, ForwardScanDirection)))
+		ereport(ERROR,
+				(errcode(ERRCODE_DUPLICATE_OBJECT),
+				 errmsg("there are multiple rules named \"%s\"", rulename),
+				 errhint("Specify a relation name as well as a rule name.")));
+
+	heap_endscan(scanDesc);
+	heap_close(RewriteRelation, AccessShareLock);
+
+	return ruleoid;
 }

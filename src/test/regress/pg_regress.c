@@ -11,7 +11,7 @@
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- * $PostgreSQL: pgsql/src/test/regress/pg_regress.c,v 1.36 2007/07/18 21:19:17 alvherre Exp $
+ * $PostgreSQL: pgsql/src/test/regress/pg_regress.c,v 1.41.2.4 2009/11/14 15:39:41 mha Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -86,6 +86,7 @@ static char *encoding = NULL;
 static _stringlist *schedulelist = NULL;
 static _stringlist *extra_tests = NULL;
 static char *temp_install = NULL;
+static char *temp_config = NULL;
 static char *top_builddir = NULL;
 static int	temp_port = 65432;
 static bool nolocale = false;
@@ -95,6 +96,7 @@ static char *user = NULL;
 static char *srcdir = NULL;
 static _stringlist *extraroles = NULL;
 static char *initfile = NULL;
+static char *aodir = NULL;
 
 /* internal variables */
 static const char *progname;
@@ -407,6 +409,169 @@ replace_string(char *string, char *replace, char *replacement)
 	}
 }
 
+typedef struct replacements
+{
+	char *abs_srcdir;
+	char *abs_builddir;
+	char *testtablespace;
+	char *dlsuffix;
+	char *bindir;
+	char *orientation;
+} replacements;
+
+static void
+convert_line(char *line, replacements *repls)
+{
+	replace_string(line, "@abs_srcdir@", repls->abs_srcdir);
+	replace_string(line, "@abs_builddir@", repls->abs_builddir);
+	replace_string(line, "@testtablespace@", repls->testtablespace);
+	replace_string(line, "@DLSUFFIX@", repls->dlsuffix);
+	replace_string(line, "@bindir@", repls->bindir);
+	if (repls->orientation)
+		replace_string(line, "@orientation@", repls->orientation);
+}
+
+/*
+ * Generate two files for each UAO test case, one for row and the
+ * other for column orientation.
+ */
+static int
+generate_uao_sourcefiles(char *src_dir, char *dest_dir, char *suffix, replacements *repls)
+{
+	struct stat st;
+	int			ret;
+	char	  **name;
+	char	  **names;
+	int			count = 0;
+
+	/*
+	 * Return silently if src_dir or dest_dir is not a directory, in
+	 * the same spirit as in convert_sourcefiles_in().
+	 */
+	ret = stat(src_dir, &st);
+	if (ret != 0 || !S_ISDIR(st.st_mode))
+		return 0;
+
+	ret = stat(dest_dir, &st);
+	if (ret != 0 || !S_ISDIR(st.st_mode))
+		return 0;
+
+	names = pgfnames(src_dir);
+	if (!names)
+		/* Error logged in pgfnames */
+		exit_nicely(2);
+
+	/* finally loop on each file and generate the files */
+	for (name = names; *name; name++)
+	{
+		char		srcfile[MAXPGPATH];
+		char		destfile_row[MAXPGPATH];
+		char		destfile_col[MAXPGPATH];
+		char		prefix[MAXPGPATH];
+		FILE	   *infile,
+				   *outfile_row,
+				   *outfile_col;
+		char		line[1024];
+		char		line_row[1024];
+		bool		has_tokens = false;
+
+		/* reject filenames not finishing in ".source" */
+		if (strlen(*name) < 8)
+			continue;
+		if (strcmp(*name + strlen(*name) - 7, ".source") != 0)
+			continue;
+
+		count++;
+
+		/*
+		 * Build the full actual paths to open.  Optimizer specific
+		 * answer filenames must end with "optimizer".
+		 */
+		snprintf(srcfile, MAXPGPATH, "%s/%s", src_dir, *name);
+		if (strlen(*name) > 17 &&
+			strcmp(*name + strlen(*name) - 17, "_optimizer.source") == 0)
+		{
+			snprintf(prefix, strlen(*name) - 16, "%s", *name);
+			snprintf(destfile_row, MAXPGPATH, "%s/%s_row_optimizer.%s",
+					 dest_dir, prefix, suffix);
+			snprintf(destfile_col, MAXPGPATH, "%s/%s_column_optimizer.%s",
+					 dest_dir, prefix, suffix);
+		}
+		else
+		{
+			snprintf(prefix, strlen(*name) - 6, "%s", *name);
+			snprintf(destfile_row, MAXPGPATH, "%s/%s_row.%s",
+					 dest_dir, prefix, suffix);
+			snprintf(destfile_col, MAXPGPATH, "%s/%s_column.%s",
+					 dest_dir, prefix, suffix);
+		}
+
+		infile = fopen(srcfile, "r");
+		if (!infile)
+		{
+			fprintf(stderr, _("%s: could not open file \"%s\" for reading: %s\n"),
+					progname, srcfile, strerror(errno));
+			exit_nicely(2);
+		}
+		outfile_row = fopen(destfile_row, "w");
+		if (!outfile_row)
+		{
+			fprintf(stderr, _("%s: could not open file \"%s\" for writing: %s\n"),
+					progname, destfile_row, strerror(errno));
+			exit_nicely(2);
+		}
+		outfile_col = fopen(destfile_col, "w");
+		if (!outfile_col)
+		{
+			fprintf(stderr, _("%s: could not open file \"%s\" for writing: %s\n"),
+					progname, destfile_col, strerror(errno));
+			exit_nicely(2);
+		}
+
+		while (fgets(line, sizeof(line), infile))
+		{
+			strncpy(line_row, line, sizeof(line));
+			repls->orientation = "row";
+			convert_line(line_row, repls);
+			repls->orientation = "column";
+			convert_line(line, repls);
+			fputs(line, outfile_col);
+			fputs(line_row, outfile_row);
+			/*
+			 * Remember if there are any more tokens that we didn't recognize.
+			 * They need to be handled by the gpstringsubs.pl script
+			 */
+			if (!has_tokens && strchr(line, '@') != NULL)
+				has_tokens = true;
+		}
+
+		fclose(infile);
+		fclose(outfile_row);
+		fclose(outfile_col);
+		if (has_tokens)
+		{
+			char		cmd[MAXPGPATH * 3];
+			snprintf(cmd, sizeof(cmd),
+					 SYSTEMQUOTE "%s %s" SYSTEMQUOTE, gpstringsubsprog, destfile_row);
+			if (run_diff(cmd, destfile_row) != 0)
+			{
+				fprintf(stderr, _("%s: could not convert %s\n"),
+						progname, destfile_row);
+			}
+			snprintf(cmd, sizeof(cmd),
+					 SYSTEMQUOTE "%s %s" SYSTEMQUOTE, gpstringsubsprog, destfile_col);
+			if (run_diff(cmd, destfile_col) != 0)
+			{
+				fprintf(stderr, _("%s: could not convert %s\n"),
+						progname, destfile_col);
+			}
+		}
+	}
+
+	pgfnames_cleanup(names);
+	return count;
+}
+
 /*
  * Convert *.source found in the "source" directory, replacing certain tokens
  * in the file contents with their intended values, and put the resulting files
@@ -414,16 +579,19 @@ replace_string(char *string, char *replace, char *replacement)
  * the given suffix.
  */
 static void
-convert_sourcefiles_in(char *source, char *dest, char *suffix)
+convert_sourcefiles_in(char *source, char * dest_dir, char *dest, char *suffix)
 {
 	char		abs_srcdir[MAXPGPATH];
 	char		abs_builddir[MAXPGPATH];
 	char		testtablespace[MAXPGPATH];
 	char		indir[MAXPGPATH];
-	char		outdir[MAXPGPATH];
+	replacements repls;
+	struct stat st;
+	int			ret;
 	char	  **name;
 	char	  **names;
 	int			count = 0;
+
 #ifdef WIN32
 	char	   *c;
 #endif
@@ -436,8 +604,8 @@ convert_sourcefiles_in(char *source, char *dest, char *suffix)
 	}
 
 	/*
-	 * in a VPATH build, use the provided source directory; otherwise, use
-	 * the current directory.
+	 * in a VPATH build, use the provided source directory; otherwise, use the
+	 * current directory.
 	 */
 	if (srcdir)
 		strlcpy(abs_srcdir, srcdir, MAXPGPATH);
@@ -445,15 +613,32 @@ convert_sourcefiles_in(char *source, char *dest, char *suffix)
 		strlcpy(abs_srcdir, abs_builddir, MAXPGPATH);
 
 	snprintf(indir, MAXPGPATH, "%s/%s", abs_srcdir, source);
+
+	/* Check that indir actually exists and is a directory */
+	ret = stat(indir, &st);
+	if (ret != 0 || !S_ISDIR(st.st_mode))
+	{
+		/*
+		 * No warning, to avoid noise in tests that do not have
+		 * these directories; for example, ecpg, contrib and src/pl.
+		 */
+		return;
+	}
+
 	names = pgfnames(indir);
 	if (!names)
 		/* Error logged in pgfnames */
 		exit_nicely(2);
 
 	/* also create the output directory if not present */
-	snprintf(outdir, sizeof(outdir), "%s/%s", abs_srcdir, dest);
-	if (!directory_exists(outdir))
-		make_directory(outdir);
+	{
+		char		outdir[MAXPGPATH];
+
+		snprintf(outdir, MAXPGPATH, "%s/%s", dest_dir, dest);
+
+		if (!directory_exists(outdir))
+			make_directory(outdir);
+	}
 
 #ifdef WIN32
 	/* in Win32, replace backslashes with forward slashes */
@@ -465,7 +650,6 @@ convert_sourcefiles_in(char *source, char *dest, char *suffix)
 			*c = '/';
 #endif
 
-	/* try to create the test tablespace dir if it doesn't exist */
 	snprintf(testtablespace, MAXPGPATH, "%s/testtablespace", abs_builddir);
 
 #ifdef WIN32
@@ -484,6 +668,13 @@ convert_sourcefiles_in(char *source, char *dest, char *suffix)
 	make_directory(testtablespace);
 #endif
 
+	memset(&repls, 0, sizeof(repls));
+	repls.abs_srcdir = abs_srcdir;
+	repls.abs_builddir = abs_builddir;
+	repls.testtablespace = testtablespace;
+	repls.dlsuffix = DLSUFFIX;
+	repls.bindir = bindir;
+
 	/* finally loop on each file and do the replacement */
 	for (name = names; *name; name++)
 	{
@@ -494,6 +685,15 @@ convert_sourcefiles_in(char *source, char *dest, char *suffix)
 				   *outfile;
 		char		line[1024];
 		bool		has_tokens = false;
+
+		if (aodir && strncmp(*name, aodir, strlen(aodir)) == 0 &&
+			strcmp(*name + strlen(*name) - 7, ".source") != 0)
+		{
+			snprintf(srcfile, MAXPGPATH, "%s/%s",  indir, *name);
+			snprintf(destfile, MAXPGPATH, "%s/%s/%s", dest_dir, dest, *name);
+			count += generate_uao_sourcefiles(srcfile, destfile, suffix, &repls);
+			continue;
+		}
 
 		/* reject filenames not finishing in ".source" */
 		if (strlen(*name) < 8)
@@ -506,7 +706,8 @@ convert_sourcefiles_in(char *source, char *dest, char *suffix)
 		/* build the full actual paths to open */
 		snprintf(prefix, strlen(*name) - 6, "%s", *name);
 		snprintf(srcfile, MAXPGPATH, "%s/%s", indir, *name);
-		snprintf(destfile, MAXPGPATH, "%s/%s.%s", outdir, prefix, suffix);
+		snprintf(destfile, MAXPGPATH, "%s/%s/%s.%s", dest_dir, dest, 
+				 prefix, suffix);
 
 		infile = fopen(srcfile, "r");
 		if (!infile)
@@ -524,11 +725,7 @@ convert_sourcefiles_in(char *source, char *dest, char *suffix)
 		}
 		while (fgets(line, sizeof(line), infile))
 		{
-			replace_string(line, "@abs_srcdir@", abs_srcdir);
-			replace_string(line, "@abs_builddir@", abs_builddir);
-			replace_string(line, "@testtablespace@", testtablespace);
-			replace_string(line, "@DLSUFFIX@", DLSUFFIX);
-			replace_string(line, "@bindir@", bindir);
+			convert_line(line, &repls);
 			fputs(line, outfile);
 
 			/*
@@ -573,20 +770,10 @@ convert_sourcefiles_in(char *source, char *dest, char *suffix)
 static void
 convert_sourcefiles(void)
 {
-	struct stat	st;
-	int		ret;
+	convert_sourcefiles_in("input", inputdir, "sql", "sql");
+	convert_sourcefiles_in("output", outputdir, "expected", "out");
 
-	ret = stat("input", &st);
-	if (ret == 0 && S_ISDIR(st.st_mode))
-		convert_sourcefiles_in("input", "sql", "sql");
-
-	ret = stat("output", &st);
-	if (ret == 0 && S_ISDIR(st.st_mode))
-		convert_sourcefiles_in("output", "expected", "out");
-
-	ret = stat("mapred", &st);
-	if (ret == 0 && S_ISDIR(st.st_mode))
-		convert_sourcefiles_in("mapred", "yml", "yml");
+	convert_sourcefiles_in("mapred", inputdir, "yml", "yml");
 }
 
 /*
@@ -843,6 +1030,19 @@ initialize_environment(void)
 		}
 
 		/*
+		 * GNU make stores some flags in the MAKEFLAGS environment variable to
+		 * pass arguments to its own children.	If we are invoked by make,
+		 * that causes the make invoked by us to think its part of the make
+		 * task invoking us, and so it tries to communicate with the toplevel
+		 * make.  Which fails.
+		 *
+		 * Unset the variable to protect against such problems.  We also reset
+		 * MAKELEVEL to be certain the child doesn't notice the make above us.
+		 */
+		unsetenv("MAKEFLAGS");
+		unsetenv("MAKELEVEL");
+
+		/*
 		 * Adjust path variables to point into the temp-install tree
 		 */
 		tmp = malloc(strlen(temp_install) + 32 + strlen(bindir));
@@ -872,8 +1072,10 @@ initialize_environment(void)
 		add_to_path("LD_LIBRARY_PATH", ':', libdir);
 		add_to_path("DYLD_LIBRARY_PATH", ':', libdir);
 		add_to_path("LIBPATH", ':', libdir);
-#if defined(WIN32) || defined(__CYGWIN__)
+#if defined(WIN32)
 		add_to_path("PATH", ';', libdir);
+#elif defined(__CYGWIN__)
+		add_to_path("PATH", ':', libdir);
 #endif
 	}
 	else
@@ -1030,57 +1232,6 @@ spawn_process(const char *cmdline)
 
 	ZeroMemory(&si, sizeof(si));
 	si.cb = sizeof(si);
-	
-	Advapi32Handle = LoadLibrary("ADVAPI32.DLL");
-	if (Advapi32Handle != NULL)
-	{
-      _CreateRestrictedToken = (__CreateRestrictedToken) GetProcAddress(Advapi32Handle, "CreateRestrictedToken");
-   }
-   
-   if (_CreateRestrictedToken == NULL)
-   {
-      if (Advapi32Handle != NULL)
-      	FreeLibrary(Advapi32Handle);
-      fprintf(stderr, "ERROR: Unable to create restricted tokens on this platform\n");
-      exit_nicely(2);
-   }
-
-   /* Open the current token to use as base for the restricted one */
-   if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &origToken))
-   {
-      fprintf(stderr, "Failed to open process token: %lu\n", GetLastError());
-      exit_nicely(2);
-   }
-
-	/* Allocate list of SIDs to remove */
-	ZeroMemory(&dropSids, sizeof(dropSids));
-	if (!AllocateAndInitializeSid(&NtAuthority, 2,
-			SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &dropSids[0].Sid) ||
-		 !AllocateAndInitializeSid(&NtAuthority, 2,
-		   SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_POWER_USERS, 0, 0, 0, 0, 0, 0, &dropSids[1].Sid))
-   {
-      fprintf(stderr, "Failed to allocate SIDs: %lu\n", GetLastError());
-      exit_nicely(2);
-   }
-	
-	b = _CreateRestrictedToken(origToken,
-          DISABLE_MAX_PRIVILEGE,
-          sizeof(dropSids)/sizeof(dropSids[0]),
-          dropSids,
-          0, NULL,
-          0, NULL,
-          &restrictedToken);
-
-   FreeSid(dropSids[1].Sid);
-   FreeSid(dropSids[0].Sid);
-   CloseHandle(origToken);
-   FreeLibrary(Advapi32Handle);
-   
-   if (!b)
-   {
-      fprintf(stderr, "Failed to create restricted token: %lu\n", GetLastError());
-      exit_nicely(2);
-   }
 
 	Advapi32Handle = LoadLibrary("ADVAPI32.DLL");
 	if (Advapi32Handle != NULL)
@@ -1162,7 +1313,7 @@ spawn_process(const char *cmdline)
 
 	free(cmdline2);
 
-	ResumeThread(pi.hThread);
+    ResumeThread(pi.hThread);
 	CloseHandle(pi.hThread);
 	return pi.hProcess;
 #endif
@@ -1757,7 +1908,7 @@ run_schedule(const char *schedule, test_function tfunc)
 				bool		newdiff;
 
 				if (tl)
-					tl = tl->next;		/* tl has the same length as rl and el
+					tl = tl->next;		/* tl has the same lengt has rl and el
 										 * if it exists */
 
 				newdiff = results_differ(tests[i], rl->str, el->str);
@@ -1849,7 +2000,7 @@ run_single_test(const char *test, test_function tfunc)
 		bool		newdiff;
 
 		if (tl)
-			tl = tl->next;		/* tl has the same length as rl and el if it
+			tl = tl->next;		/* tl has the same lengt has rl and el if it
 								 * exists */
 
 		newdiff = results_differ(test, rl->str, el->str);
@@ -2061,30 +2212,40 @@ trim_white_space(char *str)
 }
 
 /*
- * Check whether the optimizer is on or off, and set the global
+ * @brief Check whether a feature (i.e., optimizer or codegen) is on or off.
+ * If the input feature is optimizer, then set the global
  * variable "optimizer_enabled" accordingly.
+ *
+ * @param feature_name Name of the feature to be checked (i.e., optimizer or codegen)
+ * @param on_msg Message to be printed when the feature is enabled
+ * @param off_msg Message to be printed when the feature is disabled
+ * @return true if the feature is enabled; false otherwise
  */
-static void
-check_optimizer_status(void)
+static bool
+check_feature_status(const char *feature_name, const char *on_msg, const char *off_msg)
 {
 	char psql_cmd[MAXPGPATH];
 	char statusfilename[MAXPGPATH];
 	char line[1024];
+	bool isEnabled = false;
+	int len;
 
-	header(_("checking optimizer status"));
+	header(_("checking %s status"), feature_name);
 
-	snprintf(statusfilename, sizeof(statusfilename), SYSTEMQUOTE "%s/optimizer_status.out" SYSTEMQUOTE, outputdir);
+	snprintf(statusfilename, sizeof(statusfilename), SYSTEMQUOTE "%s/%s_status.out" SYSTEMQUOTE, outputdir, feature_name);
 
-	snprintf(psql_cmd, sizeof(psql_cmd),
-			 SYSTEMQUOTE "\"%s%spsql\" -X -c \"show optimizer;\" -o \"%s\" -d \"postgres\"" SYSTEMQUOTE,
-			 psqldir ? psqldir : "",
-			 psqldir ? "/" : "",
-			 statusfilename);
+	len = snprintf(psql_cmd, sizeof(psql_cmd),
+			SYSTEMQUOTE "\"%s%spsql\" -X -t -c \"show %s;\" -o \"%s\" -d \"postgres\"" SYSTEMQUOTE,
+			psqldir ? psqldir : "",
+			psqldir ? "/" : "",
+			feature_name,
+			statusfilename);
+
+	if (len >= sizeof(psql_cmd))
+		exit_nicely(2);
 
 	if (system(psql_cmd) != 0)
-	{
 		exit_nicely(2);
-	}
 
 	FILE *statusfile = fopen(statusfilename, "r");
 	if (!statusfile)
@@ -2099,20 +2260,21 @@ check_optimizer_status(void)
 		char *trimmed = trim_white_space(line);
 		if (strncmp(trimmed, "on", 2) == 0)
 		{
-			optimizer_enabled = true;
-			status(_("Optimizer enabled. Using optimizer answer files whenever possible"));
+			status(_("%s"), on_msg);
+			isEnabled = true;
 			break;
 		}
 
 		if (strncmp(trimmed, "off", 3) == 0)
 		{
-			optimizer_enabled = false;
-			status(_("Optimizer disabled. Using planner answer files"));
+			status(_("%s"), off_msg);
 			break;
 		}
 	}
 	status_end();
 	fclose(statusfile);
+	unlink(statusfilename);
+	return isEnabled;
 }
 
 static void
@@ -2138,11 +2300,14 @@ help(void)
 	printf(_("  --srcdir=DIR              absolute path to source directory (for VPATH builds)\n"));
 	printf(_("  --temp-install=DIR        create a temporary installation in DIR\n"));
     printf(_(" --init-file=GPD_INIT_FILE  init file to be used for gpdiff\n"));
+	printf(_("  --ao-dir=DIR              directory name prefix containing generic\n"));
+	printf(_("                            UAO row and column tests\n"));
 	printf(_("\n"));
 	printf(_("Options for \"temp-install\" mode:\n"));
 	printf(_("  --no-locale               use C locale\n"));
 	printf(_("  --top-builddir=DIR        (relative) path to top level build directory\n"));
 	printf(_("  --temp-port=PORT          port number to start temp postmaster on\n"));
+	printf(_("  --temp-config=PATH        append contents of PATH to temporary config\n"));
 	printf(_("\n"));
 	printf(_("Options for using an existing installation:\n"));
 	printf(_("  --host=HOST               use postmaster running on HOST\n"));
@@ -2186,7 +2351,9 @@ regression_main(int argc, char *argv[], init_function ifunc, test_function tfunc
 		{"psqldir", required_argument, NULL, 16},
 		{"srcdir", required_argument, NULL, 17},
 		{"create-role", required_argument, NULL, 18},
-        {"init-file", required_argument, NULL, 19},
+		{"temp-config", required_argument, NULL, 19},
+        {"init-file", required_argument, NULL, 20},
+        {"ao-dir", required_argument, NULL, 21},
 		{NULL, 0, NULL, 0}
 	};
 
@@ -2282,10 +2449,16 @@ regression_main(int argc, char *argv[], init_function ifunc, test_function tfunc
 			case 18:
 				split_to_stringlist(strdup(optarg), ", ", &extraroles);
 				break;
-            case 19:
+			case 19:
+				temp_config = strdup(optarg);
+				break;
+            case 20:
                 initfile = strdup(optarg);
                 break;
-            default:
+            case 21:
+                aodir = strdup(optarg);
+                break;
+			default:
 				/* getopt_long already emitted a complaint */
 				fprintf(stderr, _("\nTry \"%s -h\" for more information.\n"),
 						progname);
@@ -2372,6 +2545,32 @@ regression_main(int argc, char *argv[], init_function ifunc, test_function tfunc
 		{
 			fprintf(stderr, _("\n%s: initdb failed\nExamine %s/log/initdb.log for the reason.\nCommand was: %s\n"), progname, outputdir, buf);
 			exit_nicely(2);
+		}
+
+		/* add any extra config specified to the postgresql.conf */
+		if (temp_config != NULL)
+		{
+			FILE	   *extra_conf;
+			FILE	   *pg_conf;
+			char		line_buf[1024];
+
+			snprintf(buf, sizeof(buf), "%s/data/postgresql.conf", temp_install);
+			pg_conf = fopen(buf, "a");
+			if (pg_conf == NULL)
+			{
+				fprintf(stderr, _("\n%s: could not open %s for adding extra config:\nError was %s\n"), progname, buf, strerror(errno));
+				exit_nicely(2);
+			}
+			extra_conf = fopen(temp_config, "r");
+			if (extra_conf == NULL)
+			{
+				fprintf(stderr, _("\n%s: could not open %s to read extra config:\nError was %s\n"), progname, temp_config, strerror(errno));
+				exit_nicely(2);
+			}
+			while (fgets(line_buf, sizeof(line_buf), extra_conf) != NULL)
+				fputs(line_buf, pg_conf);
+			fclose(extra_conf);
+			fclose(pg_conf);
 		}
 
 		/*
@@ -2473,7 +2672,14 @@ regression_main(int argc, char *argv[], init_function ifunc, test_function tfunc
 	/*
 	 * Find out if optimizer is on or off
 	 */
-	check_optimizer_status();
+	optimizer_enabled = check_feature_status("optimizer",
+			"Optimizer enabled. Using optimizer answer files whenever possible",
+			"Optimizer disabled. Using planner answer files");
+
+	/*
+	 * Find out if codegen is on or off
+	 */
+	check_feature_status("codegen", "Codegen enabled", "Codegen disabled");
 
 	/*
 	 * Ready to run the tests

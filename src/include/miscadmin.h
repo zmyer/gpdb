@@ -13,7 +13,7 @@
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- * $PostgreSQL: pgsql/src/include/miscadmin.h,v 1.194 2007/04/16 18:29:56 alvherre Exp $
+ * $PostgreSQL: pgsql/src/include/miscadmin.h,v 1.199.2.1 2009/12/09 21:58:17 tgl Exp $
  *
  * NOTES
  *	  some of the information in this file should be moved to other files.
@@ -24,6 +24,7 @@
 #define MISCADMIN_H
 
 #include "pgtime.h"				/* for pg_time_t */
+
 
 #define PG_VERSIONSTR "postgres (Greenplum Database) " PG_VERSION "\n"
 #define PG_BACKEND_VERSIONSTR "postgres (Greenplum Database) " PG_VERSION "\n"
@@ -87,7 +88,7 @@ extern PGDLLIMPORT volatile int32 InterruptHoldoffCount;
 extern PGDLLIMPORT volatile int32 CritSectionCount;
 
 /* in tcop/postgres.c */
-extern void ProcessInterrupts(void);
+extern void ProcessInterrupts(const char* filename, int lineno);
 extern void BackoffBackendTick(void);
 extern bool gp_enable_resqueue_priority;
 
@@ -122,7 +123,7 @@ do { \
 		}\
 	}\
 	if (InterruptPending) \
-		ProcessInterrupts(); \
+		ProcessInterrupts(__FILE__, __LINE__); \
 	if (gp_enable_resqueue_priority)	\
 		BackoffBackendTick(); \
 	ReportOOMConsumption(); \
@@ -132,7 +133,7 @@ do { \
 #define CHECK_FOR_INTERRUPTS() \
 do { \
 	if (InterruptPending) \
-		ProcessInterrupts(); \
+		ProcessInterrupts(__FILE__, __LINE__); \
 	if (gp_enable_resqueue_priority)	\
 		BackoffBackendTick(); \
 	ReportOOMConsumption(); \
@@ -147,7 +148,7 @@ do { \
 	if (UNBLOCKED_SIGNAL_QUEUE()) \
 		pgwin32_dispatch_queued_signals(); \
 	if (InterruptPending) \
-		ProcessInterrupts(); \
+		ProcessInterrupts(__FILE__, __LINE__); \
 } while(0)
 #endif   /* WIN32 */
 
@@ -196,6 +197,7 @@ do { \
 extern pid_t PostmasterPid;
 extern bool IsPostmasterEnvironment;
 extern PGDLLIMPORT bool IsUnderPostmaster;
+extern bool IsBinaryUpgrade;
 
 extern bool ExitOnAnyError;
 
@@ -237,7 +239,6 @@ extern PGDLLIMPORT bool  pljava_release_lingering_savepoints;
 extern PGDLLIMPORT Oid MyDatabaseId;
 
 extern PGDLLIMPORT Oid MyDatabaseTableSpace;
-
 
 /*
  * Date/Time Configuration
@@ -325,6 +326,19 @@ extern int gp_vmem_protect_limit;
 extern int gp_vmem_protect_gang_cache_limit;
 
 /* in tcop/postgres.c */
+
+#if defined(__ia64__) || defined(__ia64)
+typedef struct
+{
+	char	   *stack_base_ptr;
+	char	   *register_stack_base_ptr;
+} pg_stack_base_t;
+#else
+typedef char *pg_stack_base_t;
+#endif
+
+extern pg_stack_base_t set_stack_base(void);
+extern void restore_stack_base(pg_stack_base_t base);
 extern void check_stack_depth(void);
 
 
@@ -367,6 +381,7 @@ extern char *make_absolute_path(const char *path);
 
 /* in utils/misc/superuser.c */
 extern bool superuser(void);	/* current user is superuser */
+extern bool procRoleIsSuperuser(void); /* proc role id is superuser */
 extern bool superuser_arg(Oid roleid);	/* given user is superuser */
 
 
@@ -475,5 +490,12 @@ typedef enum
 } AuxProcType;
 
 extern AuxProcType MyAuxProcType; /* bootstrap.c */
+
+#define AmStartupProcess()          (MyAuxProcType == StartupProcess || \
+										MyAuxProcType == StartupPass2Process || \
+										MyAuxProcType == StartupPass3Process || \
+										MyAuxProcType == StartupPass4Process)
+#define AmCheckpointerProcess()     (MyAuxProcType == CheckpointProcess)
+#define AmBgWriterProcess()			(MyAuxProcType == BgWriterProcess)
 
 #endif   /* MISCADMIN_H */

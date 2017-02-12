@@ -4,7 +4,7 @@
  *
  * Copyright (c) 2000-2008, PostgreSQL Global Development Group
  *
- * $PostgreSQL: pgsql/src/backend/utils/misc/guc-file.l,v 1.47 2007/02/10 14:58:55 petere Exp $
+ * $PostgreSQL: pgsql/src/backend/utils/misc/guc-file.l,v 1.53 2008/01/01 19:45:54 momjian Exp $
  */
 
 %{
@@ -37,9 +37,14 @@ int GUC_yylex_destroy  (void);
 
 
 
-/* Avoid exit() on fatal scanner errors (a bit ugly -- see yy_fatal_error) */
+/*
+ * flex emits a yy_fatal_error() function that it calls in response to
+ * critical errors like malloc failure, file I/O errors, and detection of
+ * internal inconsistency.  That function prints a message and calls exit().
+ * Mutate it to instead call our handler, which jumps out of the parser.
+ */
 #undef fprintf
-#define fprintf(file, fmt, msg)  ereport(ERROR, (errmsg_internal("%s", msg)))
+#define fprintf(file, fmt, msg) GUC_flex_fatal(msg)
 
 enum {
 	GUC_ID = 1,
@@ -53,23 +58,14 @@ enum {
 	GUC_ERROR = 100
 };
 
-struct name_value_pair
-{
-	char       *name;
-	char       *value;
-	struct name_value_pair *next;
-};
-
 static unsigned int ConfigFileLineno;
+static const char *GUC_flex_fatal_errmsg;
+static sigjmp_buf *GUC_flex_fatal_jmp;
 
 /* flex fails to supply a prototype for yylex, so provide one */
 int GUC_yylex(void);
 
-static bool ParseConfigFile(const char *config_file, const char *calling_file,
-							int depth, GucContext context, int elevel,
-							struct name_value_pair **head_p,
-							struct name_value_pair **tail_p);
-static void free_name_value_list(struct name_value_pair * list);
+static int GUC_flex_fatal(const char *msg);
 static char *GUC_scanstr(const char *s);
 
 %}
@@ -135,6 +131,10 @@ ProcessConfigFile(GucContext context)
 {
 	int			elevel;
 	struct name_value_pair *item, *head, *tail;
+	char	   *cvc = NULL;
+	struct config_string *cvc_struct;
+	const char *envvar;
+	int			i;
 
 	Assert(context == PGC_POSTMASTER || context == PGC_SIGHUP);
 
@@ -149,6 +149,7 @@ ProcessConfigFile(GucContext context)
 	else
 		elevel = ERROR;
 
+	/* Parse the file into a list of option names and values */
 	head = tail = NULL;
 
 	if (!ParseConfigFile(ConfigFileName, NULL,
@@ -156,19 +157,194 @@ ProcessConfigFile(GucContext context)
 						 &head, &tail))
 		goto cleanup_list;
 
-	/* try to apply options brute-force; depending on the context bad ones will be
-	 * logged accordingly;
+	/*
+	 * We need the proposed new value of custom_variable_classes to check
+	 * custom variables with.  ParseConfigFile ensured that if it's in
+	 * the file, it's first in the list.  But first check to see if we
+	 * have an active value from the command line, which should override
+	 * the file in any case.  (Since there's no relevant env var, the
+	 * only possible nondefault sources are the file and ARGV.)
+	 */
+	cvc_struct = (struct config_string *)
+		find_option("custom_variable_classes", false, elevel);
+	if (cvc_struct && cvc_struct->gen.reset_source > PGC_S_FILE)
+	{
+		cvc = guc_strdup(elevel, cvc_struct->reset_val);
+		if (cvc == NULL)
+			goto cleanup_list;
+	}
+	else if (head != NULL &&
+			 guc_name_compare(head->name, "custom_variable_classes") == 0)
+	{
+		/*
+		 * Need to canonicalize the value via the assign hook.  Casting away
+		 * const is a bit ugly, but we know the result is malloc'd.
+		 */
+		cvc = (char *) assign_custom_variable_classes(head->value,
+													  false, PGC_S_FILE);
+		if (cvc == NULL)
+		{
+			ereport(elevel,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("invalid value for parameter \"%s\": \"%s\"",
+							head->name, head->value)));
+			goto cleanup_list;
+		}
+	}
+
+	/*
+	 * Mark all extant GUC variables as not present in the config file.
+	 * We need this so that we can tell below which ones have been removed
+	 * from the file since we last processed it.
+	 */
+	for (i = 0; i < num_guc_variables; i++)
+	{
+		struct config_generic *gconf = guc_variables[i];
+
+		gconf->status &= ~GUC_IS_IN_FILE;
+	}
+
+	/*
+	 * Check if all options are valid.  As a side-effect, the GUC_IS_IN_FILE
+	 * flag is set on each GUC variable mentioned in the list.
 	 */
 	for (item = head; item; item = item->next)
 	{
+		char *sep = strchr(item->name, GUC_QUALIFIER_SEPARATOR);
+
+		if (sep)
+		{
+			/*
+			 * We have to consider three cases for custom variables:
+			 *
+			 * 1. The class name is not valid according to the (new) setting
+			 * of custom_variable_classes.  If so, reject.  We don't care
+			 * which side is at fault.
+			 */
+			if (!is_custom_class(item->name, sep - item->name, cvc))
+			{
+				ereport(elevel,
+						(errcode(ERRCODE_UNDEFINED_OBJECT),
+						 errmsg("unrecognized configuration parameter \"%s\"",
+								item->name)));
+				goto cleanup_list;
+			}
+			/*
+			 * 2. There is no GUC entry.  If we called set_config_option then
+			 * it would make a placeholder, which we don't want to do yet,
+			 * since we could still fail further down the list.  Do nothing
+			 * (assuming that making the placeholder will succeed later).
+			 */
+			if (find_option(item->name, false, elevel) == NULL)
+				continue;
+			/*
+			 * 3. There is already a GUC entry (either real or placeholder) for
+			 * the variable.  In this case we should let set_config_option
+			 * check it, since the assignment could well fail if it's a real
+			 * entry.
+			 */
+		}
+
+		if (!set_config_option(item->name, item->value, context,
+							   PGC_S_FILE, GUC_ACTION_SET, false))
+			goto cleanup_list;
+	}
+
+	/*
+	 * Check for variables having been removed from the config file, and
+	 * revert their reset values (and perhaps also effective values) to the
+	 * boot-time defaults.  If such a variable can't be changed after startup,
+	 * just throw a warning and continue.  (This is analogous to the fact that
+	 * set_config_option only throws a warning for a new but different value.
+	 * If we wanted to make it a hard error, we'd need an extra pass over the
+	 * list so that we could throw the error before starting to apply
+	 * changes.)
+	 */
+	for (i = 0; i < num_guc_variables; i++)
+	{
+		struct config_generic *gconf = guc_variables[i];
+		GucStack   *stack;
+
+		if (gconf->reset_source != PGC_S_FILE ||
+			(gconf->status & GUC_IS_IN_FILE))
+			continue;
+		if (gconf->context < PGC_SIGHUP)
+		{
+			ereport(elevel,
+					(errcode(ERRCODE_CANT_CHANGE_RUNTIME_PARAM),
+					 errmsg("parameter \"%s\" cannot be changed after server start; configuration file change ignored",
+							gconf->name)));
+			continue;
+		}
+
+		/*
+		 * Reset any "file" sources to "default", else set_config_option
+		 * will not override those settings.
+		 */
+		if (gconf->reset_source == PGC_S_FILE)
+			gconf->reset_source = PGC_S_DEFAULT;
+		if (gconf->source == PGC_S_FILE)
+			gconf->source = PGC_S_DEFAULT;
+		for (stack = gconf->stack; stack; stack = stack->prev)
+		{
+			if (stack->source == PGC_S_FILE)
+				stack->source = PGC_S_DEFAULT;
+		}
+
+		/* Now we can re-apply the wired-in default */
+		set_config_option(gconf->name, NULL, context, PGC_S_DEFAULT,
+						  GUC_ACTION_SET, true);
+	}
+
+	/*
+	 * Restore any variables determined by environment variables.  This
+	 * is a no-op except in the case where one of these had been in the
+	 * config file and is now removed.  PGC_S_ENV_VAR will override the
+	 * wired-in default we just applied, but cannot override any other source.
+	 *
+	 * Keep this list in sync with InitializeGUCOptions()!
+	 * PGPORT can be ignored, because it cannot be changed without restart.
+	 * We assume rlimit hasn't changed, either.
+	 */
+	envvar = getenv("PGDATESTYLE");
+	if (envvar != NULL)
+		set_config_option("datestyle", envvar, PGC_POSTMASTER,
+						  PGC_S_ENV_VAR, GUC_ACTION_SET, true);
+
+	envvar = getenv("PGCLIENTENCODING");
+	if (envvar != NULL)
+		set_config_option("client_encoding", envvar, PGC_POSTMASTER,
+						  PGC_S_ENV_VAR, GUC_ACTION_SET, true);
+
+
+	/* If we got here all the options checked out okay, so apply them. */
+	for (item = head; item; item = item->next)
+	{
 		set_config_option(item->name, item->value, context,
-						  PGC_S_FILE, false, true);
+						  PGC_S_FILE, GUC_ACTION_SET, true);
 	}
 
  cleanup_list:
 	free_name_value_list(head);
+	if (cvc)
+		free(cvc);
 }
 
+/*
+ * Flex fatal errors bring us here.  Stash the error message and jump back to
+ * ParseConfigFp().  Assume all msg arguments point to string constants; this
+ * holds for flex 2.5.31 (earliest we support) and flex 2.5.35 (latest as of
+ * this writing).  Otherwise, we would need to copy the message.
+ *
+ * We return "int" since this takes the place of calls to fprintf().
+*/
+static int
+GUC_flex_fatal(const char *msg)
+{
+	GUC_flex_fatal_errmsg = msg;
+	siglongjmp(*GUC_flex_fatal_jmp, 1);
+	return 0;	/* keep compiler quiet */
+}
 
 /*
  * Read and parse a single configuration file.  This function recurses
@@ -198,16 +374,19 @@ ProcessConfigFile(GucContext context)
  * where an error will lead to immediate process exit anyway; so there is
  * no point in contorting the code so it can clean up nicely.
  */
-static bool
+bool
 ParseConfigFile(const char *config_file, const char *calling_file,
 				int depth, GucContext context, int elevel,
 				struct name_value_pair **head_p,
 				struct name_value_pair **tail_p)
 {
 	bool		OK = true;
+	unsigned int save_ConfigFileLineno = ConfigFileLineno;
+	sigjmp_buf *save_GUC_flex_fatal_jmp = GUC_flex_fatal_jmp;
+	sigjmp_buf	flex_fatal_jmp;
 	char		abs_path[MAXPGPATH];
 	FILE	   *fp;
-	YY_BUFFER_STATE lex_buffer;
+	volatile YY_BUFFER_STATE lex_buffer = NULL;
 	int			token;
 
 	/*
@@ -252,18 +431,35 @@ ParseConfigFile(const char *config_file, const char *calling_file,
 		return false;
 	}
 
+	if (sigsetjmp(flex_fatal_jmp, 1) == 0)
+		GUC_flex_fatal_jmp = &flex_fatal_jmp;
+	else
+	{
+		/*
+		 * Regain control after a fatal, internal flex error.  It may have
+		 * corrupted parser state.  Consequently, abandon the file, but trust
+		 * that the state remains sane enough for yy_delete_buffer().
+		 */
+		elog(elevel, "%s at file \"%s\" line %u",
+			 GUC_flex_fatal_errmsg, config_file, ConfigFileLineno);
+
+		OK = false;
+		goto cleanup_exit;
+	}
+
 	/*
 	 * Parse
 	 */
+	ConfigFileLineno = 1;
+
 	lex_buffer = yy_create_buffer(fp, YY_BUF_SIZE);
 	yy_switch_to_buffer(lex_buffer);
-
-	ConfigFileLineno = 1;
 
 	/* This loop iterates once per logical line */
 	while ((token = yylex()))
 	{
 		char	   *opt_name, *opt_value;
+		struct name_value_pair *item;
 
 		if (token == GUC_EOL)	/* empty or comment line */
 			continue;
@@ -296,7 +492,7 @@ ParseConfigFile(const char *config_file, const char *calling_file,
 			goto parse_error;
 
 		/* OK, process the option name and value */
-		if (pg_strcasecmp(opt_name, "include") == 0)
+		if (guc_name_compare(opt_name, "include") == 0)
 		{
 			/*
 			 * An include directive isn't a variable and should be processed
@@ -315,27 +511,42 @@ ParseConfigFile(const char *config_file, const char *calling_file,
 				goto cleanup_exit;
 			}
 			yy_switch_to_buffer(lex_buffer);
-			ConfigFileLineno = save_ConfigFileLineno;
 			pfree(opt_name);
 			pfree(opt_value);
 		}
-		else if (pg_strcasecmp(opt_name, "custom_variable_classes") == 0)
+		else if (guc_name_compare(opt_name, "custom_variable_classes") == 0)
 		{
 			/*
 			 * This variable must be processed first as it controls
-			 * the validity of other variables; so apply immediately.
-			 * This may fail; plow through, all failures get logged properly.
+			 * the validity of other variables; so it goes at the head
+			 * of the result list.  If we already found a value for it,
+			 * replace with this one.
 			 */
-			set_config_option(opt_name, opt_value, context,
-								   PGC_S_FILE, false, true);
-			pfree(opt_name);
-			pfree(opt_value);
+			item = *head_p;
+			if (item != NULL &&
+				guc_name_compare(item->name, "custom_variable_classes") == 0)
+			{
+				/* replace existing head item */
+				pfree(item->name);
+				pfree(item->value);
+				item->name = opt_name;
+				item->value = opt_value;
+			}
+			else
+			{
+				/* prepend to list */
+				item = palloc(sizeof *item);
+				item->name = opt_name;
+				item->value = opt_value;
+				item->next = *head_p;
+				*head_p = item;
+				if (*tail_p == NULL)
+					*tail_p = item;
+			}
 		}
 		else
 		{
-			/* append to list */
-			struct name_value_pair *item;
-
+			/* ordinary variable, append to list */
 			item = palloc(sizeof *item);
 			item->name = opt_name;
 			item->value = opt_value;
@@ -371,6 +582,9 @@ ParseConfigFile(const char *config_file, const char *calling_file,
 cleanup_exit:
 	yy_delete_buffer(lex_buffer);
 	FreeFile(fp);
+	/* Each recursion level must save and restore these static variables. */
+	ConfigFileLineno = save_ConfigFileLineno;
+	GUC_flex_fatal_jmp = save_GUC_flex_fatal_jmp;
 	
 	Assert(OK || (context == PGC_POSTMASTER && IsUnderPostmaster) || context == PGC_SIGHUP);
 
@@ -381,7 +595,7 @@ cleanup_exit:
 /*
  * Free a list of name/value pairs, including the names and the values
  */
-static void
+void
 free_name_value_list(struct name_value_pair *list)
 {
 	struct name_value_pair *item;

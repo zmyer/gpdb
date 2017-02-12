@@ -34,7 +34,6 @@
 #include "cdb/cdbpersistenttablespace.h"
 #include "cdb/cdbpersistentdatabase.h"
 #include "cdb/cdbpersistentrelation.h"
-#include "cdb/cdbpersistentrecovery.h"
 #include "cdb/cdbpersistentcheck.h"
 #include "cdb/cdbresynchronizechangetracking.h"
 #include "cdb/cdbvars.h"
@@ -42,7 +41,6 @@
 #include "pgstat.h"
 #include "postmaster/autovacuum.h"
 #include "postmaster/bgwriter.h"
-#include "postmaster/checkpoint.h"
 #include "postmaster/postmaster.h"
 #include "postmaster/primary_mirror_mode.h"
 #include "postmaster/seqserver.h"
@@ -149,7 +147,6 @@ CreateSharedMemoryAndSemaphores(bool makePrivate, int port)
 			}
 		}
 		size = add_size(size, ProcGlobalShmemSize());
-		size = add_size(size, LocalDistribXact_ShmemSize());
 		size = add_size(size, XLOGShmemSize());
 		size = add_size(size, DistributedLog_ShmemSize());
 		size = add_size(size, CLOGShmemSize());
@@ -176,7 +173,6 @@ CreateSharedMemoryAndSemaphores(bool makePrivate, int port)
 		size = add_size(size, PersistentTablespace_ShmemSize());
 		size = add_size(size, PersistentDatabase_ShmemSize());
 		size = add_size(size, PersistentRelation_ShmemSize());
-		size = add_size(size, Pass2Recovery_ShmemSize());
 
 		/*Add shared memory for PT verification checks*/
 		if (Gp_role == GP_ROLE_DISPATCH && debug_persistent_ptcat_verification)
@@ -217,6 +213,9 @@ CreateSharedMemoryAndSemaphores(bool makePrivate, int port)
 			 (unsigned long) size);
 
 		size = add_size(size, BgWriterShmemSize());
+		size = add_size(size, AutoVacuumShmemSize());
+		size = add_size(size, BTreeShmemSize());
+		size = add_size(size, SyncScanShmemSize());
 		size = add_size(size, CheckpointShmemSize());
 
 		size = add_size(size, WalSndShmemSize());
@@ -318,7 +317,6 @@ CreateSharedMemoryAndSemaphores(bool makePrivate, int port)
 	PersistentTablespace_ShmemInit();
 	PersistentDatabase_ShmemInit();
 	PersistentRelation_ShmemInit();
-	Pass2Recovery_ShmemInit();
 
 	if (Gp_role == GP_ROLE_DISPATCH && debug_persistent_ptcat_verification)
 		Persistent_PostDTMRecv_ShmemInit();
@@ -345,7 +343,6 @@ CreateSharedMemoryAndSemaphores(bool makePrivate, int port)
 	GPMemoryProtect_ShmemInit();
 
 	CreateSharedProcArray();
-	LocalDistribXact_ShmemCreate();
 	CreateSharedBackendStatus();
 	
 	/*
@@ -409,6 +406,7 @@ CreateSharedMemoryAndSemaphores(bool makePrivate, int port)
 	 * Set up other modules that need some shared memory space
 	 */
 	BTreeShmemInit();
+	SyncScanShmemInit();
 	workfile_mgr_cache_init();
 
 #ifdef EXEC_BACKEND

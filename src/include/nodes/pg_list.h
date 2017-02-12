@@ -35,7 +35,7 @@
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- * $PostgreSQL: pgsql/src/include/nodes/pg_list.h,v 1.56 2007/01/05 22:19:55 momjian Exp $
+ * $PostgreSQL: pgsql/src/include/nodes/pg_list.h,v 1.57 2008/01/01 19:45:58 momjian Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -341,20 +341,5 @@ extern void *list_nth_replace(List *list, int n, void *new_data);
 
 extern int	length(List *list);
 #endif   /* ENABLE_LIST_COMPAT */
-
-/**
- * If listPtrPtr is non-NULL, and *listPtrPtr is non-NULL then free the list and set *listPtrPtr to NULL
- *
- * @param listPtr a ptr to a list object.  May be NULL, and may also point to NULL
- */
-static inline
-void freeListAndNull(List **listPtrPtr)
-{
-	if ( listPtrPtr && *listPtrPtr)
-	{
-		list_free(*listPtrPtr);
-		*listPtrPtr = NULL;
-	}
-}
 
 #endif   /* PG_LIST_H */

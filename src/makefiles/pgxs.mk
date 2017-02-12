@@ -15,26 +15,29 @@
 #   PGXS := $(shell $(PG_CONFIG) --pgxs)
 #   include $(PGXS)
 #
-# The following variables can be set:
+# Set one of these three variables to specify what is built:
 #
-#   MODULES -- list of shared objects to be build from source file with
-#     same stem (do not include suffix in this list)
-#   DATA -- random files to install into $PREFIX/share/contrib
-#   DATA_built -- random files to install into $PREFIX/share/contrib,
+#   MODULES -- list of shared-library objects to be built from source files
+#     with same stem (do not include library suffixes in this list)
+#   MODULE_big -- a shared library to build from multiple source files
+#     (list object files in OBJS)
+#   PROGRAM -- an executable program to build (list object files in OBJS)
+#
+# The following variables can also be set:
+#
+#   EXTENSION -- name of extension (there must be a $EXTENSION.control file)
+#   MODULEDIR -- subdirectory of $PREFIX/share into which DATA and DOCS files
+#     should be installed (if not set, default is "extension" if EXTENSION
+#     is set, or "contrib" if not)
+#   DATA -- random files to install into $PREFIX/share/$MODULEDIR
+#   DATA_built -- random files to install into $PREFIX/share/$MODULEDIR,
 #     which need to be built first
-#   DOCS -- random files to install under $PREFIX/doc/contrib
+#   DATA_TSEARCH -- random files to install into $PREFIX/share/tsearch_data
+#   DOCS -- random files to install under $PREFIX/doc/$MODULEDIR
 #   SCRIPTS -- script files (not binaries) to install into $PREFIX/bin
 #   SCRIPTS_built -- script files (not binaries) to install into $PREFIX/bin,
 #     which need to be built first
 #   REGRESS -- list of regression test cases (without suffix)
-#
-# or at most one of these two:
-#
-#   PROGRAM -- a binary program to build (list objects files in OBJS)
-#   MODULE_big -- a shared object to build (list object files in OBJS)
-#
-# The following can also be set:
-#
 #   EXTRA_CLEAN -- extra files to remove in 'make clean'
 #   PG_CPPFLAGS -- will be added to CPPFLAGS
 #   PG_LIBS -- will be added to PROGRAM link line
@@ -63,18 +66,31 @@ VPATH =
 endif
 
 
-override CPPFLAGS := -I$(srcdir) $(CPPFLAGS)
+override CPPFLAGS := -I. -I$(srcdir) $(CPPFLAGS)
 
 ifdef MODULES
 override CFLAGS += $(CFLAGS_SL)
 SHLIB_LINK += $(BE_DLLLIBS)
 endif
 
+ifdef MODULEDIR
+datamoduledir := $(MODULEDIR)
+docmoduledir := $(MODULEDIR)
+else
+ifdef EXTENSION
+datamoduledir := extension
+docmoduledir := extension
+else
+datamoduledir := contrib
+docmoduledir := contrib
+endif
+endif
+
 ifdef PG_CPPFLAGS
 override CPPFLAGS := $(PG_CPPFLAGS) $(CPPFLAGS)
 endif
 
-all: $(PROGRAM) $(DATA_built) $(SCRIPTS_built) $(addsuffix $(DLSUFFIX), $(MODULES))
+all: $(PROGRAM) $(DATA_built) $(SCRIPTS_built) $(addsuffix $(DLSUFFIX), $(MODULES)) $(addsuffix .control, $(EXTENSION))
 
 ifdef MODULE_big
 # shared library parameters
@@ -87,56 +103,54 @@ endif # MODULE_big
 
 
 install: all installdirs
+ifneq (,$(EXTENSION))
+	$(INSTALL_DATA) $(addprefix $(srcdir)/, $(addsuffix .control, $(EXTENSION))) '$(DESTDIR)$(datadir)/extension/'
+endif # EXTENSION
 ifneq (,$(DATA)$(DATA_built))
-	@for file in $(addprefix $(srcdir)/, $(DATA)) $(DATA_built); do \
-	  echo "$(INSTALL_DATA) $$file '$(DESTDIR)$(datadir)/contrib'"; \
-	  $(INSTALL_DATA) $$file '$(DESTDIR)$(datadir)/contrib'; \
-	done
+	$(INSTALL_DATA) $(addprefix $(srcdir)/, $(DATA)) $(DATA_built) '$(DESTDIR)$(datadir)/$(datamoduledir)/'
 endif # DATA
+ifneq (,$(DATA_TSEARCH))
+	$(INSTALL_DATA) $(addprefix $(srcdir)/, $(DATA_TSEARCH)) '$(DESTDIR)$(datadir)/tsearch_data/'
+endif # DATA_TSEARCH
 ifdef MODULES
-	@for file in $(addsuffix $(DLSUFFIX), $(MODULES)); do \
-	  echo "$(INSTALL_SHLIB) $$file '$(DESTDIR)$(pkglibdir)'"; \
-	  $(INSTALL_SHLIB) $$file '$(DESTDIR)$(pkglibdir)'; \
-	done
+	$(INSTALL_SHLIB) $(addsuffix $(DLSUFFIX), $(MODULES)) '$(DESTDIR)$(pkglibdir)/'
 endif # MODULES
 ifdef DOCS
 ifdef docdir
-	@for file in $(addprefix $(srcdir)/, $(DOCS)); do \
-	  echo "$(INSTALL_DATA) $$file '$(DESTDIR)$(docdir)/contrib'"; \
-	  $(INSTALL_DATA) $$file '$(DESTDIR)$(docdir)/contrib'; \
-	done
+	$(INSTALL_DATA) $(addprefix $(srcdir)/, $(DOCS)) '$(DESTDIR)$(docdir)/$(docmoduledir)/'
 endif # docdir
 endif # DOCS
 ifdef PROGRAM
 	$(INSTALL_PROGRAM) $(PROGRAM)$(X) '$(DESTDIR)$(bindir)'
 endif # PROGRAM
 ifdef SCRIPTS
-	@for file in $(addprefix $(srcdir)/, $(SCRIPTS)); do \
-	  echo "$(INSTALL_SCRIPT) $$file '$(DESTDIR)$(bindir)'"; \
-	  $(INSTALL_SCRIPT) $$file '$(DESTDIR)$(bindir)'; \
-	done
+	$(INSTALL_SCRIPT) $(addprefix $(srcdir)/, $(SCRIPTS)) '$(DESTDIR)$(bindir)/'
 endif # SCRIPTS
 ifdef SCRIPTS_built
-	@for file in $(SCRIPTS_built); do \
-	  echo "$(INSTALL_SCRIPT) $$file '$(DESTDIR)$(bindir)'"; \
-	  $(INSTALL_SCRIPT) $$file '$(DESTDIR)$(bindir)'; \
-	done
+	$(INSTALL_SCRIPT) $(SCRIPTS_built) '$(DESTDIR)$(bindir)/'
 endif # SCRIPTS_built
 
 ifdef MODULE_big
 install: install-lib
 endif # MODULE_big
 
+
 installdirs:
-ifneq (,$(DATA)$(DATA_built))
-	$(MKDIR_P) '$(DESTDIR)$(datadir)/contrib'
+ifneq (,$(EXTENSION))
+	$(MKDIR_P) '$(DESTDIR)$(datadir)/extension'
 endif
-ifneq (,$(MODULES))
+ifneq (,$(DATA)$(DATA_built))
+	$(MKDIR_P) '$(DESTDIR)$(datadir)/$(datamoduledir)'
+endif
+ifneq (,$(DATA_TSEARCH))
+	$(MKDIR_P) '$(DESTDIR)$(datadir)/tsearch_data'
+endif
+ifneq (,$(MODULES)$(MODULE_big))
 	$(MKDIR_P) '$(DESTDIR)$(pkglibdir)'
 endif
 ifdef DOCS
 ifdef docdir
-	$(MKDIR_P) '$(DESTDIR)$(docdir)/contrib'
+	$(MKDIR_P) '$(DESTDIR)$(docdir)/$(docmoduledir)'
 endif # docdir
 endif # DOCS
 ifneq (,$(PROGRAM)$(SCRIPTS)$(SCRIPTS_built))
@@ -149,14 +163,20 @@ endif # MODULE_big
 
 
 uninstall:
+ifneq (,$(EXTENSION))
+	rm -f $(addprefix '$(DESTDIR)$(datadir)/extension'/, $(notdir $(addsuffix .control, $(EXTENSION))))
+endif
 ifneq (,$(DATA)$(DATA_built))
-	rm -f $(addprefix '$(DESTDIR)$(datadir)'/contrib/, $(notdir $(DATA) $(DATA_built)))
+	rm -f $(addprefix '$(DESTDIR)$(datadir)/$(datamoduledir)'/, $(notdir $(DATA) $(DATA_built)))
+endif
+ifneq (,$(DATA_TSEARCH))
+	rm -f $(addprefix '$(DESTDIR)$(datadir)/tsearch_data'/, $(notdir $(DATA_TSEARCH)))
 endif
 ifdef MODULES
 	rm -f $(addprefix '$(DESTDIR)$(pkglibdir)'/, $(addsuffix $(DLSUFFIX), $(MODULES)))
 endif
 ifdef DOCS
-	rm -f $(addprefix '$(DESTDIR)$(docdir)'/contrib/, $(DOCS))
+	rm -f $(addprefix '$(DESTDIR)$(docdir)/$(docmoduledir)'/, $(DOCS))
 endif
 ifdef PROGRAM
 	rm -f '$(DESTDIR)$(bindir)/$(PROGRAM)$(X)'
@@ -243,7 +263,7 @@ endif
 
 # against installed postmaster
 installcheck: submake
-	$(top_builddir)/src/test/regress/pg_regress --psqldir=$(PSQLDIR) $(REGRESS_OPTS) $(REGRESS)
+	$(top_builddir)/src/test/regress/pg_regress --psqldir="$(PSQLDIR)" $(REGRESS_OPTS) $(REGRESS)
 
 # in-tree test doesn't work yet (no way to install my shared library)
 #check: all submake
@@ -264,5 +284,5 @@ endif
 
 ifdef PROGRAM
 $(PROGRAM): $(OBJS)
-	$(CC) $(CFLAGS) $(OBJS) $(PG_LIBS) $(LDFLAGS) $(LIBS) -o $@
+	$(CC) $(CFLAGS) $(OBJS) $(PG_LIBS) $(LDFLAGS) $(LIBS) -o $@$(X)
 endif

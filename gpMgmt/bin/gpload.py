@@ -1635,9 +1635,9 @@ class gpload:
                 # resolve the fqdn rather than just grabbing the hostname.
                 fqdn = self.getconfig('gpload:input:fully_qualified_domain_name', bool, False)
                 if fqdn:
-                    local_hostname = socket.getfqdn()
+                    local_hostname = [socket.getfqdn()]
                 else:
-                    local_hostname = socket.gethostname()
+                    local_hostname = [socket.gethostname()]
 
             # build gpfdist parameters
             popenList = ['gpfdist']
@@ -2163,7 +2163,7 @@ class gpload:
                 formatOpts += "escape %s " % quote(self.getconfig('gpload:input:quote', 
                     unicode, extraStuff='for csv formatted data'))
             else:
-                formatOpts += "escape %s " % quote("\\")
+                formatOpts += "escape '\\'"
 
         if formatType=='csv':
             formatOpts += "quote %s " % quote(self.getconfig('gpload:input:quote', 
@@ -2714,6 +2714,9 @@ class gpload:
                         pass
             for t in self.threads:
                 t.join()
+
+            if self.db != None:
+                self.db.close()
 
             self.log(self.INFO, 'rows Inserted          = ' + str(self.rowsInserted))
             self.log(self.INFO, 'rows Updated           = ' + str(self.rowsUpdated))

@@ -772,15 +772,11 @@ extern void GetBitmapIndexAuxOids(Relation index, Oid *heapId, Oid *indexId);
 extern Buffer _bitmap_getbuf(Relation rel, BlockNumber blkno, int access);
 extern void _bitmap_wrtbuf(Buffer buf);
 extern void _bitmap_relbuf(Buffer buf);
-extern void _bitmap_wrtnorelbuf(Buffer buf);
 extern void _bitmap_init_lovpage(Relation rel, Buffer buf);
 extern void _bitmap_init_bitmappage(Relation rel, Buffer buf);
 extern void _bitmap_init_buildstate(Relation index, BMBuildState* bmstate);
 extern void _bitmap_cleanup_buildstate(Relation index, BMBuildState* bmstate);
-extern void _bitmap_init(Relation rel, Oid comptypeOid,
-						 Oid heapOid, Oid indexOid,
-						 Oid heapRelfilenode, Oid indexRelfilenode,
-						 bool use_wal);
+extern void _bitmap_init(Relation indexrel, bool use_wal);
 
 /* bitmapinsert.c */
 extern void _bitmap_buildinsert(Relation rel, ItemPointerData ht_ctid, 
@@ -811,7 +807,6 @@ extern void _bitmap_cleanup_scanpos(BMVector bmScanPos,
 									uint32 numBitmapVectors);
 extern uint64 _bitmap_findnexttid(BMBatchWords *words,
 								  BMIterateResult *result);
-extern void _bitmap_findprevtid(BMIterateResult *result);
 extern void _bitmap_findnexttids(BMBatchWords *words,
 								 BMIterateResult *result, uint32 maxTids);
 extern bool _bitmap_getbitmapinpage(BMBatchWords* words,
@@ -853,11 +848,8 @@ extern void _bitmap_findbitmaps(IndexScanDesc scan, ScanDirection dir);
 
 /* bitmapattutil.c */
 extern void _bitmap_create_lov_heapandindex(Relation rel,
-											Oid lovComptypeOid,
 											Oid *lovHeapOid,
-											Oid *lovIndexOid,
-											Oid lovHeapRelfilenode,
-											Oid lovIndexRelfilenode);
+											Oid *lovIndexOid);
 extern void _bitmap_open_lov_heapandindex(Relation rel, BMMetaPage metapage,
 						 Relation *lovHeapP, Relation *lovIndexP,
 						 LOCKMODE lockMode);

@@ -24,6 +24,8 @@ all:
 	$(MAKE) -C contrib/gp_internal_tools all
 	$(MAKE) -C contrib/gp_cancel_query all
 	$(MAKE) -C contrib/indexscan all
+	$(MAKE) -C contrib/pg_upgrade_support all
+	$(MAKE) -C contrib/pg_upgrade all
 	$(MAKE) -C gpAux/extensions mapreduce
 	@echo "All of Greenplum Database successfully made. Ready to install."
 
@@ -42,6 +44,8 @@ install:
 	$(MAKE) -C contrib/gp_internal_tools $@
 	$(MAKE) -C contrib/gp_cancel_query $@
 	$(MAKE) -C contrib/indexscan $@ 
+	$(MAKE) -C contrib/pg_upgrade_support $@
+	$(MAKE) -C contrib/pg_upgrade $@
 	$(MAKE) -C gpMgmt $@
 	$(MAKE) -C gpAux/extensions $@
 
@@ -62,6 +66,8 @@ installdirs uninstall:
 	$(MAKE) -C contrib/gp_internal_tools $@
 	$(MAKE) -C contrib/gp_cancel_query $@
 	$(MAKE) -C contrib/indexscan $@ 
+	$(MAKE) -C contrib/pg_upgrade_support $@
+	$(MAKE) -C contrib/pg_upgrade $@
 
 distprep:
 #	$(MAKE) -C doc $@
@@ -87,7 +93,10 @@ clean:
 	$(MAKE) -C contrib/gp_internal_tools $@
 	$(MAKE) -C contrib/gp_cancel_query $@
 	$(MAKE) -C contrib/indexscan $@
+	$(MAKE) -C contrib/pg_upgrade_support $@
+	$(MAKE) -C contrib/pg_upgrade $@
 	$(MAKE) -C gpAux/extensions $@
+	$(MAKE) -C gpMgmt $@
 # Garbage from autoconf:
 	@rm -rf autom4te.cache/
 
@@ -103,11 +112,28 @@ distclean maintainer-clean:
 # Garbage from autoconf:
 	@rm -rf autom4te.cache/
 
-check: all
+# This is a top-level target that runs "all" regression test suites against
+# a running server. This is what the CI pipeline runs.
+installcheck-world:
+	$(MAKE) -C src/test installcheck-good
+	$(MAKE) -C src/test installcheck-bugbuster
+	$(MAKE) -C src/test/isolation installcheck
+	$(MAKE) -C src/pl installcheck
+	#$(MAKE) -C src/interfaces/ecpg installcheck
+	#$(MAKE) -C contrib installcheck
+	$(MAKE) -C gpAux/extensions installcheck
+	$(MAKE) -C src/bin/gpfdist installcheck
 
-check installcheck installcheck-parallel installcheck-good:
-	$(MAKE) -C src/test $@
-	$(MAKE) -C gpAux/extensions $@
+
+# Run mock tests, that don't require a running server. Arguably these should
+# be part of [install]check-world, but we treat them more like part of
+# compilation than regression testing, in the CI. But they are too heavy-weight
+# to put into "make all", either.
+.PHONY : unittest-check
+unittest-check:
+	$(MAKE) -C src/backend unittest-check
+	$(MAKE) -C src/bin unittest-check
+
 
 GNUmakefile: GNUmakefile.in $(top_builddir)/config.status
 	./config.status $@
@@ -119,7 +145,7 @@ distdir	= postgresql-$(VERSION)
 dummy	= =install=
 garbage = =*  "#"*  ."#"*  *~*  *.orig  *.rej  core  postgresql-*
 
-dist: $(distdir).tar.gz 
+dist: $(distdir).tar.gz $(distdir).tar.bz2
 ifeq ($(split-dist), yes)
 dist: postgresql-base-$(VERSION).tar.gz postgresql-docs-$(VERSION).tar.gz postgresql-opt-$(VERSION).tar.gz postgresql-test-$(VERSION).tar.gz 
 endif
@@ -128,6 +154,8 @@ dist:
 
 $(distdir).tar: distdir
 	$(TAR) chf $@ $(distdir)
+
+.INTERMEDIATE: $(distdir).tar
 
 opt_files = \
 	src/tools src/tutorial \
@@ -150,7 +178,7 @@ postgresql-test-$(VERSION).tar: distdir
 
 distdir:
 	-rm -rf $(distdir)* $(dummy)
-	for x in `cd $(top_srcdir) && find . -name CVS -prune -o -print`; do \
+	for x in `cd $(top_srcdir) && find . \( -name CVS -prune \) -o \( -name .git -prune \) -o -print`; do \
 	  file=`expr X$$x : 'X\./\(.*\)'`; \
 	  if test -d "$(top_srcdir)/$$file" ; then \
 	    mkdir "$(distdir)/$$file" && chmod 777 "$(distdir)/$$file";	\
@@ -165,12 +193,12 @@ distdir:
 	#cp $(distdir)/doc/src/sgml/INSTALL $(distdir)/
 	#cp $(distdir)/doc/src/sgml/regress_README $(distdir)/src/test/regress/README
 	$(MAKE) -C $(distdir) distclean
-	-rm -f $(distdir)/README.CVS
+	#rm -f $(distdir)/README.git
 
-distcheck: $(distdir).tar.gz
+distcheck: dist
 	-rm -rf $(dummy)
 	mkdir $(dummy)
-	$(GZIP) -d -c $< | $(TAR) xf -
+	$(GZIP) -d -c $(distdir).tar.gz | $(TAR) xf -
 	install_prefix=`cd $(dummy) && pwd`; \
 	cd $(distdir) \
 	&& ./configure --prefix="$$install_prefix"

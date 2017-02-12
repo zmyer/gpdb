@@ -41,7 +41,7 @@
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- * $PostgreSQL: pgsql/src/backend/access/transam/slru.c,v 1.40 2007/01/05 22:19:23 momjian Exp $
+ * $PostgreSQL: pgsql/src/backend/access/transam/slru.c,v 1.44 2008/01/01 19:45:48 momjian Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -57,8 +57,10 @@
 #include "storage/fd.h"
 #include "storage/shmem.h"
 #include "miscadmin.h"
+#include "cdb/cdbfilerepprimary.h"
 #include "cdb/cdbmirroredflatfile.h"
 #include "postmaster/primary_mirror_mode.h"
+#include "libpq/md5.h"
 
 /*
  * Define segment size.  A page is the same BLCKSZ as is used everywhere
@@ -154,12 +156,19 @@ static int	slru_errno;
  */
 int log_count_recovered_files_batch = 1000;
 
-static int SimpleLruReadPage_Internal(SlruCtl ctl, int pageno, TransactionId xid, bool *valid);
+static int SimpleLruReadPage_Internal(SlruCtl ctl, int pageno, bool write_ok, TransactionId xid, bool *valid);
+static void SimpleLruZeroLSNs(SlruCtl ctl, int slotno);
+static void SimpleLruWaitIO(SlruCtl ctl, int slotno);
 static bool SlruPhysicalReadPage(SlruCtl ctl, int pageno, int slotno);
 static bool SlruPhysicalWritePage(SlruCtl ctl, int pageno, int slotno,
 					  SlruFlush fdata);
 static void SlruReportIOError(SlruCtl ctl, int pageno, TransactionId xid);
 static int	SlruSelectLRUPage(SlruCtl ctl, int pageno);
+static int SlruRecoverMirrorDir(char *dirName);
+static int SlruVerifyDirectoryChecksum(char *fullDirName);
+static bool isSlruFileName(const char *fileName);
+static int SlruComputeChecksum(char *filePath, char *md5);
+static int SlruCopyDirectory(char *dirName, char *fullDirName);
 
 
 /*
@@ -167,7 +176,7 @@ static int	SlruSelectLRUPage(SlruCtl ctl, int pageno);
  */
 
 Size
-SimpleLruShmemSize(int nslots)
+SimpleLruShmemSize(int nslots, int nlsns)
 {
 	Size		sz;
 
@@ -180,18 +189,21 @@ SimpleLruShmemSize(int nslots)
 	sz += MAXALIGN(nslots * sizeof(int));		/* page_lru_count[] */
 	sz += MAXALIGN(nslots * sizeof(LWLockId));	/* buffer_locks[] */
 
+	if (nlsns > 0)
+		sz += MAXALIGN(nslots * nlsns * sizeof(XLogRecPtr));	/* group_lsn[] */
+
 	return BUFFERALIGN(sz) + BLCKSZ * nslots;
 }
 
 void
-SimpleLruInit(SlruCtl ctl, const char *name, int nslots,
+SimpleLruInit(SlruCtl ctl, const char *name, int nslots, int nlsns,
 			  LWLockId ctllock, const char *subdir)
 {
 	SlruShared	shared;
 	bool		found;
 
 	shared = (SlruShared) ShmemInitStruct(name,
-										  SimpleLruShmemSize(nslots),
+										  SimpleLruShmemSize(nslots, nlsns),
 										  &found);
 
 	if (!IsUnderPostmaster)
@@ -208,6 +220,7 @@ SimpleLruInit(SlruCtl ctl, const char *name, int nslots,
 		shared->ControlLock = ctllock;
 
 		shared->num_slots = nslots;
+		shared->lsn_groups_per_page = nlsns;
 
 		shared->cur_lru_count = 0;
 
@@ -227,8 +240,14 @@ SimpleLruInit(SlruCtl ctl, const char *name, int nslots,
 		offset += MAXALIGN(nslots * sizeof(int));
 		shared->buffer_locks = (LWLockId *) (ptr + offset);
 		offset += MAXALIGN(nslots * sizeof(LWLockId));
-		ptr += BUFFERALIGN(offset);
 
+		if (nlsns > 0)
+		{
+			shared->group_lsn = (XLogRecPtr *) (ptr + offset);
+			offset += MAXALIGN(nslots * nlsns * sizeof(XLogRecPtr));
+		}
+
+		ptr += BUFFERALIGN(offset);
 		for (slotno = 0; slotno < nslots; slotno++)
 		{
 			shared->page_buffer[slotno] = ptr;
@@ -283,6 +302,9 @@ SimpleLruZeroPage(SlruCtl ctl, int pageno)
 	/* Set the buffer to zeroes */
 	MemSet(shared->page_buffer[slotno], 0, BLCKSZ);
 
+	/* Set the LSNs for this new page to zero */
+	SimpleLruZeroLSNs(ctl, slotno);
+
 	/* Assume this page is now the latest active page */
 	shared->latest_page_number = pageno;
 
@@ -290,8 +312,27 @@ SimpleLruZeroPage(SlruCtl ctl, int pageno)
 }
 
 /*
+ * Zero all the LSNs we store for this slru page.
+ *
+ * This should be called each time we create a new page, and each time we read
+ * in a page from disk into an existing buffer.  (Such an old page cannot
+ * have any interesting LSNs, since we'd have flushed them before writing
+ * the page in the first place.)
+ */
+static void
+SimpleLruZeroLSNs(SlruCtl ctl, int slotno)
+{
+	SlruShared	shared = ctl->shared;
+
+	if (shared->lsn_groups_per_page > 0)
+		MemSet(&shared->group_lsn[slotno * shared->lsn_groups_per_page], 0,
+			   shared->lsn_groups_per_page * sizeof(XLogRecPtr));
+}
+
+/*
  * Wait for any active I/O on a page slot to finish.  (This does not
- * guarantee that new I/O hasn't been started before we return, though.)
+ * guarantee that new I/O hasn't been started before we return, though.
+ * In fact the slot might not even contain the same page anymore.)
  *
  * Control lock must be held at entry, and will be held at exit.
  */
@@ -322,8 +363,7 @@ SimpleLruWaitIO(SlruCtl ctl, int slotno)
 			/* indeed, the I/O must have failed */
 			if (shared->page_status[slotno] == SLRU_PAGE_READ_IN_PROGRESS)
 				shared->page_status[slotno] = SLRU_PAGE_EMPTY;
-			else
-				/* write_in_progress */
+			else	/* write_in_progress */
 			{
 				shared->page_status[slotno] = SLRU_PAGE_VALID;
 				shared->page_dirty[slotno] = true;
@@ -335,15 +375,20 @@ SimpleLruWaitIO(SlruCtl ctl, int slotno)
 
 
 int
-SimpleLruReadPage(SlruCtl ctl, int pageno, TransactionId xid)
+SimpleLruReadPage(SlruCtl ctl, int pageno, bool write_ok, TransactionId xid)
 {
-  return SimpleLruReadPage_Internal(ctl, pageno, xid, NULL);
+  return SimpleLruReadPage_Internal(ctl, pageno, write_ok, xid, NULL);
 }  /* end SimpleLruReadPage */
 
 
 /*
  * Find a page in a shared buffer, reading it in if necessary.
  * The page number must correspond to an already-initialized page.
+ *
+ * If write_ok is true then it is OK to return a page that is in
+ * WRITE_IN_PROGRESS state; it is the caller's responsibility to be sure
+ * that modification of the page is safe.  If write_ok is false then we
+ * will not return the page until it is not undergoing active I/O.
  *
  * The passed-in xid is used only for error reporting, and may be
  * InvalidTransactionId if no specific xid is associated with the action.
@@ -360,7 +405,7 @@ SimpleLruReadPage(SlruCtl ctl, int pageno, TransactionId xid)
  * Control lock must be held at entry, and will be held at exit.
  */
 static int
-SimpleLruReadPage_Internal(SlruCtl ctl, int pageno, TransactionId xid, bool *valid)
+SimpleLruReadPage_Internal(SlruCtl ctl, int pageno, bool write_ok, TransactionId xid, bool *valid)
 {
 	SlruShared	shared = ctl->shared;
 
@@ -377,8 +422,13 @@ SimpleLruReadPage_Internal(SlruCtl ctl, int pageno, TransactionId xid, bool *val
 		if (shared->page_number[slotno] == pageno &&
 			shared->page_status[slotno] != SLRU_PAGE_EMPTY)
 		{
-			/* If page is still being read in, we must wait for I/O */
-			if (shared->page_status[slotno] == SLRU_PAGE_READ_IN_PROGRESS)
+			/*
+			 * If page is still being read in, we must wait for I/O.  Likewise
+			 * if the page is being written and the caller said that's not OK.
+			 */
+			if (shared->page_status[slotno] == SLRU_PAGE_READ_IN_PROGRESS ||
+				(shared->page_status[slotno] == SLRU_PAGE_WRITE_IN_PROGRESS &&
+				 !write_ok))
 			{
 				SimpleLruWaitIO(ctl, slotno);
 				/* Now we must recheck state from the top */
@@ -415,6 +465,9 @@ SimpleLruReadPage_Internal(SlruCtl ctl, int pageno, TransactionId xid, bool *val
 
 		/* Do the read */
 		ok = SlruPhysicalReadPage(ctl, pageno, slotno);
+
+		/* Set the LSNs for this newly read-in page to zero */
+		SimpleLruZeroLSNs(ctl, slotno);
 
 		/* Re-acquire control lock and update page state */
 		LWLockAcquire(shared->ControlLock, LW_EXCLUSIVE);
@@ -489,7 +542,7 @@ SimpleLruReadPage_ReadOnly(SlruCtl ctl, int pageno, TransactionId xid, bool *val
 	LWLockRelease(shared->ControlLock);
 	LWLockAcquire(shared->ControlLock, LW_EXCLUSIVE);
 
-	return SimpleLruReadPage_Internal(ctl, pageno, xid, valid);
+	return SimpleLruReadPage_Internal(ctl, pageno, true, xid, valid);
 }
 
 /*
@@ -688,6 +741,48 @@ SlruPhysicalWritePage(SlruCtl ctl, int pageno, int slotno, SlruFlush fdata)
 	MirroredFlatFileOpen	*existingMirroredOpen = NULL;
 	MirroredFlatFileOpen	newMirroredOpen = MirroredFlatFileOpen_Init;
 	MirroredFlatFileOpen	*useMirroredOpen = NULL;
+
+	/*
+	 * Honor the write-WAL-before-data rule, if appropriate, so that we do not
+	 * write out data before associated WAL records.  This is the same action
+	 * performed during FlushBuffer() in the main buffer manager.
+	 */
+	if (shared->group_lsn != NULL)
+	{
+		/*
+		 * We must determine the largest async-commit LSN for the page. This
+		 * is a bit tedious, but since this entire function is a slow path
+		 * anyway, it seems better to do this here than to maintain a per-page
+		 * LSN variable (which'd need an extra comparison in the
+		 * transaction-commit path).
+		 */
+		XLogRecPtr	max_lsn;
+		int			lsnindex,
+					lsnoff;
+
+		lsnindex = slotno * shared->lsn_groups_per_page;
+		max_lsn = shared->group_lsn[lsnindex++];
+		for (lsnoff = 1; lsnoff < shared->lsn_groups_per_page; lsnoff++)
+		{
+			XLogRecPtr	this_lsn = shared->group_lsn[lsnindex++];
+
+			if (XLByteLT(max_lsn, this_lsn))
+				max_lsn = this_lsn;
+		}
+
+		if (!XLogRecPtrIsInvalid(max_lsn))
+		{
+			/*
+			 * As noted above, elog(ERROR) is not acceptable here, so if
+			 * XLogFlush were to fail, we must PANIC.  This isn't much of a
+			 * restriction because XLogFlush is just about all critical
+			 * section anyway, but let's make sure.
+			 */
+			START_CRIT_SECTION();
+			XLogFlush(max_lsn);
+			END_CRIT_SECTION();
+		}
+	}
 
 	/*
 	 * During a Flush, we may already have the desired file open.
@@ -1202,8 +1297,7 @@ SlruScanDirectory(SlruCtl ctl, int cutoffPage, bool doDeletions)
 	cldir = AllocateDir(dir);
 	while ((clde = ReadDir(cldir, dir)) != NULL)
 	{
-		if (strlen(clde->d_name) == 4 &&
-			strspn(clde->d_name, "0123456789ABCDEF") == 4)
+		if (isSlruFileName(clde->d_name))
 		{
 			segno = (int) strtol(clde->d_name, NULL, 16);
 			segpage = segno * SLRU_PAGES_PER_SEGMENT;
@@ -1311,57 +1405,10 @@ SimpleLruPageExists(SlruCtl ctl, int pageno)
 	return false;	// Should not reach here.
 }
 
-static int
-SlruRecoverMirrorDir(char *slru_dir)
-{
-	DIR				*cldir;
-	struct dirent	*clde;
-	int				retval = 0;
-	
-	char		*dir = NULL;
-	char		*mirrorDir = NULL;
-
-	int 		counter = 0;
-
-	if (isTxnDir(slru_dir))
-        {
-                dir = makeRelativeToTxnFilespace(slru_dir);
-                mirrorDir = makeRelativeToPeerTxnFilespace(slru_dir);
-        }
-        else
-        {
-                dir = (char*)palloc(MAXPGPATH);
-                strncpy(dir, slru_dir, MAXPGPATH);
-                mirrorDir = (char*)palloc(MAXPGPATH);
-                strncpy(mirrorDir, slru_dir, MAXPGPATH);
-        }
-	
-	cldir = AllocateDir(dir);
-	while ((clde = ReadDir(cldir, dir)) != NULL) {
-		if (strlen(clde->d_name) == 4 &&
-			strspn(clde->d_name, "0123456789ABCDEF") == 4) {
-			
-			retval = MirrorFlatFile(slru_dir, clde->d_name);
-			
-			if (retval != 0)
-				break;
-			
-		}
-		counter++;
-
-		if (counter % log_count_recovered_files_batch == 0)
-		{
-			elog(LOG, "completed recovering %d files", counter);
-		}
-	}
-	elog(LOG, "completed recovering %d files", counter);
-	FreeDir(cldir);
-
-	pfree(dir);
-	pfree(mirrorDir);	
-	return retval;
-}
-
+/*
+ * This externally visible function will copy several directories from the
+ * primary segment to the mirror segment, if needed.
+ */
 int
 SlruRecoverMirror(void)
 {
@@ -1371,34 +1418,325 @@ SlruRecoverMirror(void)
 	retval = SlruRecoverMirrorDir(CLOG_DIR);
 
 	if (retval != 0)
-		return retval;	
-	
+		return retval;
+
 	elog(LOG, "recovering %s", DISTRIBUTEDLOG_DIR);
 	retval = SlruRecoverMirrorDir(DISTRIBUTEDLOG_DIR);
 
 	if (retval != 0)
-		return retval;	
-	
+		return retval;
+
 	elog(LOG, "recovering %s", DISTRIBUTEDXIDMAP_DIR);
 	retval = SlruRecoverMirrorDir(DISTRIBUTEDXIDMAP_DIR);
 
 	if (retval != 0)
-		return retval;	
-	
+		return retval;
+
 	elog(LOG, "recovering %s", MULTIXACT_MEMBERS_DIR);
 	retval = SlruRecoverMirrorDir(MULTIXACT_MEMBERS_DIR);
 
 	if (retval != 0)
-		return retval;	
-	
+		return retval;
+
 	elog(LOG, "recovering %s", MULTIXACT_OFFSETS_DIR);
 	retval = SlruRecoverMirrorDir(MULTIXACT_OFFSETS_DIR);
 
 	if (retval != 0)
-		return retval;	
-	
+		return retval;
+
 	elog(LOG, "recovering %s", SUBTRANS_DIR);
 	retval = SlruRecoverMirrorDir(SUBTRANS_DIR);
+
+	return retval;
+}
+
+/*
+ * This function will check if the checksum of all the files in 'dirName' match
+ * with those on the mirror and transfer the files if the checksums don't match.
+ */
+static int
+SlruRecoverMirrorDir(char *dirName)
+{
+	char *fullDirName = NULL;
+	int	 retval = STATUS_OK;
+
+	if (isTxnDir(dirName))
+	{
+		fullDirName = makeRelativeToTxnFilespace(dirName);
+	}
+	else
+	{
+		fullDirName = (char*)palloc(MAXPGPATH);
+		strncpy(fullDirName, dirName, MAXPGPATH);
+	}
+
+	retval = SlruVerifyDirectoryChecksum(fullDirName);
+
+	/*
+	 * If checksum mismatch, copy all files in the directory from the
+	 * primary to the mirror.
+	 */
+	if (retval != STATUS_OK)
+		retval = SlruCopyDirectory(dirName, fullDirName);
+
+	pfree(fullDirName);
+
+	return retval;
+}
+
+/*
+ * Verify checksum of a primary directory wrt. to the corresponding mirror
+ * directory.
+ */
+static int
+SlruVerifyDirectoryChecksum(char *fullDirName)
+{
+	char checksumFilePath[MAXPGPATH];
+	char md5[SLRU_MD5_BUFLEN] = {0};
+	int retval = STATUS_OK;
+
+	snprintf(checksumFilePath, sizeof(checksumFilePath), "%s/%s", fullDirName,
+			 SLRU_CHECKSUM_FILENAME);
+
+	/*
+	 * We generate the checksum file and then compute its checksum in an
+	 * SlruComputeChecksum() call.  We keep the checksum file so that if needed
+	 * support can diff the checksum files at the primary and the mirror to see
+	 * which file(s) were not in sync.
+	 */
+	retval = FileRepPrimary_MirrorStartChecksum(
+		FileRep_GetFlatFileIdentifier(fullDirName, SLRU_CHECKSUM_FILENAME));
+
+	if (retval != STATUS_OK)
+	{
+		ereport(WARNING,
+				(errmsg("FileRepPrimary_MirrorStartChecksum() returned: %d",
+						retval)));
+		return retval;
+	}
+
+	retval = SlruCreateChecksumFile(fullDirName);
+
+	if (retval != STATUS_OK)
+		return retval;
+
+
+	retval = SlruComputeChecksum(checksumFilePath, md5);
+
+	if (retval != STATUS_OK)
+		return retval;
+
+	retval = FileRepPrimary_MirrorVerifyDirectoryChecksum(
+				FileRep_GetFlatFileIdentifier(fullDirName, SLRU_CHECKSUM_FILENAME), md5);
+
+	if (retval != STATUS_OK)
+		ereport(WARNING,
+				(errmsg("FileRepPrimary_MirrorVerifyDirectoryChecksum() returned: %d",
+						retval)));
+
+	return retval;
+}
+
+/*
+ * Create a checksum file called 'slru_checksum_file' in the directory
+ * specified by 'fullDirName'.
+ */
+int
+SlruCreateChecksumFile(const char *fullDirName)
+{
+	DIR			  *slruDir = NULL;
+	struct dirent *dirEntry;
+	char 		  *fileName;
+	char		   filePath[MAXPGPATH];
+	char		   checksumFilePath[MAXPGPATH];
+	File		   checksumFileHandle = 0;
+	int			   retval = STATUS_OK;
+	char		   buf[SLRU_CKSUM_LINE_LEN];
+
+	snprintf(checksumFilePath, sizeof(checksumFilePath), "%s/%s", fullDirName,
+			 SLRU_CHECKSUM_FILENAME);
+
+	checksumFileHandle = PathNameOpenFile(checksumFilePath, O_CREAT | O_TRUNC | O_WRONLY,
+										  S_IRUSR | S_IWUSR);
+	if (checksumFileHandle < 0)
+	{
+		ereport(WARNING,
+				(errcode_for_file_access(),
+				 errmsg("could not open file \"%s\": %m", checksumFilePath)));
+		return STATUS_ERROR;
+	}
+
+	slruDir = AllocateDir(fullDirName);
+	if (!slruDir)
+	{
+		FileClose(checksumFileHandle);
+		return STATUS_ERROR;
+	}
+
+	while ((dirEntry = ReadDir(slruDir, fullDirName)) != NULL)
+	{
+		char  md5[SLRU_MD5_BUFLEN] = {0};
+
+		fileName = dirEntry->d_name;
+
+		if (isSlruFileName(fileName))
+		{
+			snprintf(filePath, sizeof(filePath), "%s/%s", fullDirName, fileName);
+
+			if (SlruComputeChecksum(filePath, md5) < 0)
+			{
+				ereport(WARNING,
+						(errmsg("could not compute checksum for file %s: %m",
+								filePath)));
+				retval = STATUS_ERROR;
+				break;
+
+			}
+
+			snprintf(buf, sizeof(buf), "%s: %s\n", fileName, md5);
+
+			if (FileWrite(checksumFileHandle, buf, strlen(buf)) < 0)
+			{
+				ereport(WARNING,
+						(errmsg("could not write to checksum file %s: %m",
+								checksumFilePath)));
+				retval = STATUS_ERROR;
+				break;
+
+			}
+		}
+	}
+
+	FreeDir(slruDir);
+	FileClose(checksumFileHandle);
+
+	return retval;
+}
+
+/*
+ * Given a filename, this function will return true if and only if it is a valid
+ * SLRU filename. Filenames with 4 hex characters are valid.
+ */
+static bool
+isSlruFileName(const char *fileName)
+{
+	return (strlen(fileName) == SLRU_FILENAME_LEN &&
+			strspn(fileName, "0123456789ABCDEF") == SLRU_FILENAME_LEN);
+}
+
+/*
+ * Compute the md5 hash of the file specified by 'filePath'.
+ */
+static int
+SlruComputeChecksum(char *filePath, char *md5)
+{
+	File fileHandle = 0;
+	int  retval = STATUS_OK;
+	char buf[BLCKSZ * SLRU_PAGES_PER_SEGMENT];
+	int  bytesRead;
+
+	fileHandle = PathNameOpenFile(filePath, O_RDONLY | PG_BINARY, S_IRUSR);
+	if (fileHandle < 0)
+	{
+		ereport(WARNING,
+				(errcode_for_file_access(),
+				 errmsg("could not open file %s: %m", filePath)));
+		return STATUS_ERROR;
+	}
+
+	bytesRead = FileRead(fileHandle, buf, sizeof(buf));
+	if (bytesRead >= 0)
+		pg_md5_hash(buf, bytesRead, md5);
+	else
+	{
+		ereport(WARNING,
+				(errcode_for_file_access(),
+				 errmsg("could not read file %s: %m", filePath)));
+		retval = STATUS_ERROR;
+	}
+
+	FileClose(fileHandle);
+
+	return retval;
+}
+
+/*
+ * Copy all the files from the fullDirName to the corresponding directory at the
+ * mirror.
+ */
+static int
+SlruCopyDirectory(char *dirName, char *fullDirName)
+{
+	DIR			  *slruDir = NULL;
+	struct dirent *dirEntry;
+	int			   retval = STATUS_OK;
+	int			   counter = 0;
+
+	slruDir = AllocateDir(fullDirName);
+	if (!slruDir)
+		return STATUS_ERROR;
+
+	while ((dirEntry = ReadDir(slruDir, fullDirName)) != NULL)
+	{
+		if (isSlruFileName(dirEntry->d_name))
+		{
+			retval = MirrorFlatFile(dirName, dirEntry->d_name);
+
+			if (retval != 0)
+				break;
+
+			counter++;
+
+			if (counter % log_count_recovered_files_batch == 0)
+			{
+				elog(LOG, "completed recovering %d files for directory %s",
+					 counter, dirName);
+			}
+		}
+	}
+
+	if (retval == 0)
+		elog(LOG, "completed recovering %d files for directory %s", counter,
+			 dirName);
+	else
+		elog(WARNING,
+			 "could not copy all the files for directory %s (files copied: %d)",
+			 dirName, counter);
+
+	FreeDir(slruDir);
+
+	return retval;
+}
+
+/*
+ * This function is called from the mirror to compute the checksum of the
+ * mirror's checksum file and compare the mirror's checksum with that of the
+ * primary (variable 'primaryMd5').
+ */
+int
+SlruMirrorVerifyDirectoryChecksum(char *dirName, char *checksumFile,
+								  char *primaryMd5)
+{
+	int  retval = STATUS_OK;
+	char mirrorMd5[SLRU_MD5_BUFLEN] = {0};
+	char filePath[MAXPGPATH];
+
+	snprintf(filePath, sizeof(filePath), "%s/%s", dirName, checksumFile);
+
+	if (SlruComputeChecksum(filePath, mirrorMd5) < 0)
+	{
+		ereport(WARNING,
+				(errmsg("could not compute checksum for file %s/%s: %m",
+						dirName, filePath)));
+		retval = STATUS_ERROR;
+	}
+	else if (memcmp(primaryMd5, mirrorMd5, sizeof(mirrorMd5)))
+	{
+		ereport(WARNING,
+				(errmsg("checksum mismatch for file: %s/%s",
+						dirName, checksumFile)));
+		retval = STATUS_ERROR;
+	}
 
 	return retval;
 }

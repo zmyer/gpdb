@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * appendonlyam.h
+ * cdbappendonlyam.h
  *	  append-only relation access method definitions.
  *
  *
@@ -10,8 +10,8 @@
  *
  *-------------------------------------------------------------------------
  */
-#ifndef APPENDONLYAM_H
-#define APPENDONLYAM_H
+#ifndef CDBAPPENDONLYAM_H
+#define CDBAPPENDONLYAM_H
 
 #include "access/htup.h"
 #include "access/relscan.h"
@@ -67,7 +67,6 @@ typedef struct AppendOnlyInsertDescData
 	int64           numSequences; /* total number of available sequences */
 	int64           lastSequence; /* last used sequence */
 	BlockNumber		cur_segno;
-	AppendOnlyEntry *aoEntry;
 	FileSegInfo     *fsInfo;
 	VarBlockMaker	varBlockMaker;
 	int64			bufferCount;
@@ -115,6 +114,16 @@ typedef struct AppendOnlyExecutorReadBlock
 
 	AppendOnlyStorageRead	*storageRead;
 
+	/*
+	 * When reading a segfile that's using version < AORelationVersion_PG83,
+	 * that is, was created before GPDB 5.0 and upgraded with pg_upgrade, we need
+	 * to convert numeric attributes on the fly to new format. numericAtts
+	 * is an array of attribute numbers (0-based), of all numeric columns (including
+	 * domains over numerics). This array is created lazily when first needed.
+	 */
+	int			   *numericAtts;
+	int				numNumericAtts;
+
 	int				segmentFileNum;
 
 	int64			totalRowsScannned;
@@ -139,10 +148,6 @@ typedef struct AppendOnlyExecutorReadBlock
 	
 	uint8			*singleRow;
 	int32			singleRowLen;
-
-	/* synthetic system attributes */
-	ItemPointerData cdb_fake_ctid;
-	MemTupleBinding *mt_bind;
 } AppendOnlyExecutorReadBlock;
 
 /*
@@ -197,8 +202,6 @@ typedef struct AppendOnlyScanDescData
 				 *
 				 * We manage the storage for this.
 				 */
-
-	AppendOnlyEntry		*aoEntry;
 	
 	/*
 	 * The block directory info.
@@ -283,8 +286,6 @@ typedef struct AppendOnlyFetchDescData
 	int				totalSegfiles;
 	FileSegInfo 	**segmentFileInfo;
 
-	AppendOnlyEntry *aoEntry;
-
 	char			*segmentFileName;
 	int				segmentFileNameMaxLen;
 
@@ -344,11 +345,8 @@ extern bool appendonly_fetch(
 	AppendOnlyFetchDesc aoFetchDesc,
 	AOTupleId *aoTid,
 	TupleTableSlot *slot);
-extern void appendonly_fetch_detail(
-	AppendOnlyFetchDesc aoFetchDesc, 
-	AppendOnlyFetchDetail *aoFetchDetail);
 extern void appendonly_fetch_finish(AppendOnlyFetchDesc aoFetchDesc);
-extern AppendOnlyInsertDesc appendonly_insert_init(Relation rel, Snapshot appendOnlyMetaDataSnapshot, int segno, bool update_mode);
+extern AppendOnlyInsertDesc appendonly_insert_init(Relation rel, int segno, bool update_mode);
 extern void appendonly_insert(
 		AppendOnlyInsertDesc aoInsertDesc, 
 		MemTuple instup, 
@@ -370,4 +368,4 @@ extern HTSU_Result appendonly_update(
 		AOTupleId* aoTupleId,
 		AOTupleId* newAoTupleId);
 extern void appendonly_update_finish(AppendOnlyUpdateDesc aoUpdateDesc);
-#endif   /* APPENDONLYAM_H */
+#endif   /* CDBAPPENDONLYAM_H */

@@ -22,6 +22,8 @@
 #include "parser/parse_expr.h"	/* exprType() */
 #include "parser/parse_oper.h"
 
+#include "utils/syscache.h"
+
 #include "cdb/cdbdef.h"         /* CdbSwap() */
 #include "cdb/cdbllize.h"       /* makeFlow() */
 #include "cdb/cdbhash.h"        /* isGreenplumDbHashable() */
@@ -1222,13 +1224,12 @@ cdbpath_dedup_fixup_unique(UniquePath *uniquePath, CdbpathDedupFixupContext *ctx
 
 			optup = equality_oper(exprType((Node *) var), false);
 			eqop = oprid(optup);
-			ReleaseOperator(optup);
+			ReleaseSysCache(optup);
 
 			other_operators = lappend_oid(other_operators, eqop);
 		}
     }
 
-    Assert(ctid_exprs);
     uniquePath->distinct_on_exprs = list_concat(ctid_exprs, other_vars);
 	uniquePath->distinct_on_eq_operators = list_concat(ctid_operators, other_operators);
 
@@ -1389,6 +1390,14 @@ cdbpath_dedup_fixup_append(AppendPath *appendPath, CdbpathDedupFixupContext *ctx
     ListCell   *cell;
     int         ncol;
     bool        save_need_subplan_id = ctx->need_subplan_id;
+
+	/*
+	 * The planner creates dummy AppendPaths with no subplans, if it can
+	 * eliminate a relation altogther with constraint exclusion. We have
+	 * nothing to do for those.
+	 */
+	if (appendPath->subpaths == NIL)
+		return;
 
     Assert(!ctx->rowid_vars);
 

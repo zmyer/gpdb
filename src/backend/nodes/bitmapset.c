@@ -14,13 +14,14 @@
  * Copyright (c) 2003-2008, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/nodes/bitmapset.c,v 1.12 2007/01/05 22:19:29 momjian Exp $
+ *	  $PostgreSQL: pgsql/src/backend/nodes/bitmapset.c,v 1.14 2008/01/01 19:45:49 momjian Exp $
  *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
 
 #include "nodes/bitmapset.h"
+#include "access/hash.h"
 
 
 #define WORDNUM(x)	((int)((unsigned)(x) >> BITS_PER_BITMAPWORD_LOG2))
@@ -87,22 +88,22 @@ static const uint8 number_of_ones[256] = {
 static inline int
 num_low_order_zero_bits(bitmapword w)
 {
-    int         x = 0;
-    int         i;
-    bitmapword  m;
+	int			x = 0;
+	int			i;
+	bitmapword	m;
 
-    for (i = BITS_PER_BITMAPWORD / 2; i; i >>= 1)
-    {                           /* i = 16, 8, 4, 2, 1 */
-        m = (1 << i) - 1;       /* m = 0xffff, 0xff, 0xf, 3, 1 */
-        if ((w & m) == 0)
-        {
-            w >>= i;
-            x += i;
-        }
-    }
-    if (w == 0)                 /* all 0 => return BITS_PER_BITMAPWORD */
-        x++;
-    return x;
+	for (i = BITS_PER_BITMAPWORD / 2; i; i >>= 1)
+	{							/* i = 16, 8, 4, 2, 1 */
+		m = (1 << i) - 1;		/* m = 0xffff, 0xff, 0xf, 3, 1 */
+		if ((w & m) == 0)
+		{
+			w >>= i;
+			x += i;
+		}
+	}
+	if (w == 0)					/* all 0 => return BITS_PER_BITMAPWORD */
+		x++;
+	return x;
 }
 
 
@@ -178,7 +179,7 @@ bms_equal(const Bitmapset *a, const Bitmapset *b)
 /*
  * bms_compare -- for sort to find groups of equal bitmapsets.
  *
- * See bms_equal for note on logical vs physical.  Note that the 
+ * See bms_equal for note on logical vs physical.  Note that the
  * arguments are pointers to Bitmapset -- a variable length structure,
  * thus this function is not directly usable by, e.g, qsort.
  */
@@ -194,18 +195,18 @@ bms_compare(const Bitmapset *a, const Bitmapset *b)
 	/* Handle cases where either input is NULL */
 	if (a == NULL)
 	{
-		if ( b == NULL || bms_is_empty(b) )
+		if (b == NULL || bms_is_empty(b))
 			return 0;
 		return -1;
 	}
 	else if (b == NULL)
 	{
-		if ( bms_is_empty(a) )
+		if (bms_is_empty(a))
 			return 0;
 		else
 			return 1;
 	}
-	
+
 	/* Identify shorter and longer input */
 	if (a->nwords <= b->nwords)
 	{
@@ -226,7 +227,7 @@ bms_compare(const Bitmapset *a, const Bitmapset *b)
 	{
 		if (a->words[i] < b->words[i])
 			return -1;
-		else if ( a->words[i] > b->words[i] )
+		else if (a->words[i] > b->words[i])
 			return 1;
 	}
 	for (; i < longlen; i++)
@@ -236,6 +237,7 @@ bms_compare(const Bitmapset *a, const Bitmapset *b)
 	}
 	return 0;
 }
+
 /*
  * bms_make_singleton - build a bitmapset containing a single member
  */
@@ -498,7 +500,7 @@ bms_singleton_member(const Bitmapset *a)
 		{
 			if (result >= 0 || HAS_MULTIPLE_ONES(w))
 				elog(ERROR, "bitmapset has multiple members");
-            result = num_low_order_zero_bits(w) + wordnum * BITS_PER_BITMAPWORD;
+			result = num_low_order_zero_bits(w) + wordnum * BITS_PER_BITMAPWORD;
 		}
 	}
 	if (result < 0)
@@ -597,30 +599,6 @@ bms_is_empty(const Bitmapset *a)
 
 
 /*
- * bms_assign - copy 'tgt' from 'src'
- *
- * 'tgt' set is modified or recycled!
- */
-Bitmapset *
-bms_assign(Bitmapset *tgt, const Bitmapset *src)
-{
-	int			i;
-
-	if (tgt == NULL)
-		return bms_copy(src);
-    if (tgt->nwords < src->nwords)
-    {
-        pfree(tgt);
-        return bms_copy(src);
-    }
-    for (i = 0; i < src->nwords; i++)
-        tgt->words[i] = src->words[i];
-    for (; i < tgt->nwords; i++)
-        tgt->words[i] = 0;
-    return tgt;
-}                               /* bms_assign */
-
-/*
  * bms_add_member - add a specified member to set
  *
  * Input set is modified or recycled!
@@ -659,7 +637,8 @@ bms_add_member(Bitmapset *a, int x)
 bool
 bms_covers_member(const Bitmapset *a, int x)
 {
-	int wordnum;
+	int			wordnum;
+
 	if (x < 0)
 		elog(ERROR, "negative bitmapset member not allowed");
 	if (a == NULL)
@@ -680,10 +659,10 @@ bms_resize(Bitmapset *a, int wc)
 	{
 		result = (Bitmapset *) repalloc(a, BITMAPSET_SIZE(wc));
 		/* do not access a again */
-		MemSet(result->words + result->nwords, 0, 
-				(wc - result->nwords) * sizeof(bitmapword));
+		MemSet(result->words + result->nwords, 0,
+			   (wc - result->nwords) * sizeof(bitmapword));
 		result->nwords = wc;
-	} 
+	}
 	else
 	{
 		result = palloc0(BITMAPSET_SIZE(wc));
@@ -855,21 +834,21 @@ int
 bms_first_from(const Bitmapset *a, int x)
 {
 	int			wordnum;
-    bitmapword  w;
+	bitmapword	w;
 
 	if (a == NULL)
-        return -1;
+		return -1;
 
-    wordnum = WORDNUM(x);
+	wordnum = WORDNUM(x);
 
-    if ((unsigned)wordnum >= (unsigned)a->nwords)
+	if ((unsigned) wordnum >= (unsigned) a->nwords)
 		return -1;
 
 	w = a->words[wordnum] >> BITNUM(x);
-    if (w & 1)
-        return x;
-    if (w)
-        return  x + num_low_order_zero_bits(w);
+	if (w & 1)
+		return x;
+	if (w)
+		return x + num_low_order_zero_bits(w);
 
 	for (wordnum++; wordnum < a->nwords; wordnum++)
 	{
@@ -923,36 +902,23 @@ bms_first_member(Bitmapset *a)
  *
  * Note: we must ensure that any two bitmapsets that are bms_equal() will
  * hash to the same value; in practice this means that trailing all-zero
- * words cannot affect the result.	The circular-shift-and-XOR hash method
- * used here has this property, so long as we work from back to front.
- *
- * Note: you might wonder why we bother with the circular shift; at first
- * glance a straight longitudinal XOR seems as good and much simpler.  The
- * reason is empirical: this gives a better distribution of hash values on
- * the bitmapsets actually generated by the planner.  A common way to have
- * multiword bitmapsets is "a JOIN b JOIN c JOIN d ...", which gives rise
- * to rangetables in which base tables and JOIN nodes alternate; so
- * bitmapsets of base table RT indexes tend to use only odd-numbered or only
- * even-numbered bits.	A straight longitudinal XOR would preserve this
- * property, leading to a much smaller set of possible outputs than if
- * we include a shift.
+ * words must not affect the result.  Hence we strip those before applying
+ * hash_any().
  */
 uint32
 bms_hash_value(const Bitmapset *a)
 {
-	bitmapword	result = 0;
-	int			wordnum;
+	int			lastword;
 
-	if (a == NULL || a->nwords <= 0)
+	if (a == NULL)
 		return 0;				/* All empty sets hash to 0 */
-	for (wordnum = a->nwords; --wordnum > 0;)
+	for (lastword = a->nwords; --lastword >= 0;)
 	{
-		result ^= a->words[wordnum];
-		if (result & ((bitmapword) 1 << (BITS_PER_BITMAPWORD - 1)))
-			result = (result << 1) | 1;
-		else
-			result = (result << 1);
+		if (a->words[lastword] != 0)
+			break;
 	}
-	result ^= a->words[0];
-	return (uint32) result;
+	if (lastword < 0)
+		return 0;				/* All empty sets hash to 0 */
+	return DatumGetUInt32(hash_any((const unsigned char *) a->words,
+								   (lastword + 1) * sizeof(bitmapword)));
 }

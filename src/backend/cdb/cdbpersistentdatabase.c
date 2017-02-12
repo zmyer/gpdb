@@ -9,7 +9,6 @@
 #include "postgres.h"
 #include "miscadmin.h"
 #include "pgstat.h"
-#include "utils/palloc.h"
 #include "storage/fd.h"
 #include "storage/relfilenode.h"
 
@@ -105,7 +104,6 @@ static bool PersistentDatabase_ScanTupleCallback(
 	int32					reserved;
 	TransactionId			parentXid;
 	int64					serialNum;
-	ItemPointerData			previousFreeTid;
 	
 	SharedOidSearchAddResult addResult;
 	DatabaseDirEntry databaseDirEntry;
@@ -119,19 +117,8 @@ static bool PersistentDatabase_ScanTupleCallback(
 									&mirrorExistenceState,
 									&reserved,
 									&parentXid,
-									&serialNum,
-									&previousFreeTid);
+									&serialNum);
 
-	if (state == PersistentFileSysState_Free)
-	{
-		if (Debug_persistent_print)
-			elog(Persistent_DebugPrintLevel(), 
-				 "PersistentDatabase_ScanTupleCallback: TID %s, serial number " INT64_FORMAT " is free",
-				 ItemPointerToString2(persistentTid),
-				 persistentSerialNum);
-		return true;	// Continue.
-	}
-	
 	addResult =
 			SharedOidSearch_Add(
 					&persistentDatabaseSharedData->databaseDirSearchTable,
@@ -419,11 +406,7 @@ static void PersistentDatabase_AddTuple(
 	Oid tablespaceOid = databaseDirEntry->header.oid2;
 	Oid databaseOid = databaseDirEntry->header.oid1;
 
-	ItemPointerData previousFreeTid;
-
 	Datum values[Natts_gp_persistent_database_node];
-
-	MemSet(&previousFreeTid, 0, sizeof(ItemPointerData));
 
 	GpPersistentDatabaseNode_SetDatumValues(
 								values,
@@ -434,8 +417,7 @@ static void PersistentDatabase_AddTuple(
 								mirrorExistenceState,
 								reserved,
 								parentXid,
-								/* persistentSerialNum */ 0,	// This will be set by PersistentFileSysObj_AddTuple.
-								&previousFreeTid);
+								/* persistentSerialNum */ 0);	// This will be set by PersistentFileSysObj_AddTuple.
 
 	PersistentFileSysObj_AddTuple(
 							PersistentFsObjType_DatabaseDir,
@@ -557,14 +539,7 @@ void PersistentDatabase_MarkCreatePending(
 	mmxlog_log_create_database(dbDirNode->tablespace, dbDirNode->database); 
 #endif
 
-
-	#ifdef FAULT_INJECTOR
-			FaultInjector_InjectFaultIfSet(
-										   FaultBeforePendingDeleteDatabaseEntry,
-										   DDLNotSpecified,
-										   "",  // databaseName
-										   ""); // tableName
-	#endif
+	SIMPLE_FAULT_INJECTOR(FaultBeforePendingDeleteDatabaseEntry);
 
 	/*
 	 * MPP-18228

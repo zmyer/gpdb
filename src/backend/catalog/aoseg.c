@@ -22,13 +22,11 @@
 
 
 void
-AlterTableCreateAoSegTableWithOid(Oid relOid, Oid newOid, Oid newIndexOid,
-								  Oid * comptypeOid, bool is_part_child)
+AlterTableCreateAoSegTable(Oid relOid, bool is_part_child)
 {
 	TupleDesc	tupdesc;
 	Relation	rel;
 	const char *prefix;
-	IndexInfo  *indexInfo;
 	Oid			classObjectId[1];
 	int16		coloptions[1];
 
@@ -47,32 +45,36 @@ AlterTableCreateAoSegTableWithOid(Oid relOid, Oid newOid, Oid newIndexOid,
 		prefix = "pg_aoseg";
 
 		/* this is pretty painful...  need a tuple descriptor */
-		tupdesc = CreateTemplateTupleDesc(7, false);
+		tupdesc = CreateTemplateTupleDesc(8, false);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 1,
 						"segno",
 						INT4OID,
 						-1, 0);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 2,
 						"eof",
-						FLOAT8OID,
+						INT8OID,
 						-1, 0);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 3,
 						"tupcount",
-						FLOAT8OID,
+						INT8OID,
 						-1, 0);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 4,
 						"varblockcount",
-						FLOAT8OID,
+						INT8OID,
 						-1, 0);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 5,
 						"eofuncompressed",
-						FLOAT8OID,
+						INT8OID,
 						-1, 0);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 6,
 						"modcount",
 						INT8OID,
 						-1, 0);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 7,
+						"formatversion",
+						INT2OID,
+						-1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 8,
 						"state",
 						INT2OID,
 						-1, 0);
@@ -111,7 +113,7 @@ AlterTableCreateAoSegTableWithOid(Oid relOid, Oid newOid, Oid newIndexOid,
 		 * state (smallint)         -- state of the segment file
 		 */
 
-		tupdesc = CreateTemplateTupleDesc(6, false);
+		tupdesc = CreateTemplateTupleDesc(7, false);
 
 		TupleDescInitEntry(tupdesc, (AttrNumber) 1,
 						   "segno",
@@ -134,6 +136,10 @@ AlterTableCreateAoSegTableWithOid(Oid relOid, Oid newOid, Oid newIndexOid,
 						INT8OID,
 						-1, 0);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 6,
+						   "formatversion",
+						   INT2OID,
+						   -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 7,
 						   "state",
 						   INT2OID,
 						   -1, 0);
@@ -144,23 +150,12 @@ AlterTableCreateAoSegTableWithOid(Oid relOid, Oid newOid, Oid newIndexOid,
 		return;
 	}
 
-	indexInfo = makeNode(IndexInfo);
-	indexInfo->ii_NumIndexAttrs = 1;
-	indexInfo->ii_KeyAttrNumbers[0] = 1;
-	indexInfo->ii_Expressions = NIL;
-	indexInfo->ii_ExpressionsState = NIL;
-	indexInfo->ii_Predicate = NIL;
-	indexInfo->ii_PredicateState = NIL;
-	indexInfo->ii_Unique = true;
-	indexInfo->ii_Concurrent = false;
-
 	classObjectId[0] = INT4_BTREE_OPS_OID;
 
 	coloptions[0] = 0;
 
 	(void) CreateAOAuxiliaryTable(rel, prefix, RELKIND_AOSEGMENTS,
-								  newOid, newIndexOid, comptypeOid,
-								  tupdesc, indexInfo, classObjectId, coloptions);
+								  tupdesc, NULL, classObjectId, coloptions);
 
 	heap_close(rel, NoLock);
 }

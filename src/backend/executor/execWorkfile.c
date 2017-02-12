@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * execworkfile.c
+ * execWorkfile.c
  *    Management of temporary work files used by the executor nodes.
  *
  * Copyright (c) 2010. Greenplum Inc.
@@ -19,6 +19,8 @@
 #include "cdb/cdbvars.h"
 #include "utils/workfile_mgr.h"
 #include "utils/memutils.h"
+
+#include "utils/faultinjector.h"
 
 /*
  * Number of temporary files opened during the current session;
@@ -43,8 +45,8 @@ ExecWorkFile_Create(const char *fileName,
 					bool delOnClose,
 					int compressType)
 {
-	ExecWorkFile *workfile = NULL;
-	void *file = NULL;
+	ExecWorkFile *workfile;
+	void	   *file;
 
 	/* Before creating a new file, let's check the limit on number of workfile created */
 	if (!WorkfileQueryspace_AddWorkfile())
@@ -52,14 +54,6 @@ ExecWorkFile_Create(const char *fileName,
 		/* Failed to reserve additional disk space, notify caller */
 		workfile_mgr_report_error();
 	}
-
-	/*
-	 * Create ExecWorkFile in the TopMemoryContext since this memory context
-	 * is still available when calling the transaction callback at the
-	 * time when the transaction aborts.
-	 */
-	 MemoryContext oldContext = MemoryContextSwitchTo(TopMemoryContext);
-
 
 	switch(fileType)
 	{
@@ -71,10 +65,10 @@ ExecWorkFile_Create(const char *fileName,
 			file = (void *)bfz_create(fileName, delOnClose, compressType);
 			break;
 		default:
-			ereport(LOG,
+			ereport(ERROR,
 					(errcode(ERRCODE_INTERNAL_ERROR),
 					 errmsg("invalid work file type: %d", fileType)));
-			Assert(false);
+			return NULL;		/* keep compiler quiet */
 	}
 
 	workfile = palloc0(sizeof(ExecWorkFile));
@@ -84,8 +78,6 @@ ExecWorkFile_Create(const char *fileName,
 	workfile->fileName = pstrdup(fileName);
 	workfile->size = 0;
 	ExecWorkFile_SetFlags(workfile, delOnClose, true /* created */);
-
-	MemoryContextSwitchTo(oldContext);
 
 	return workfile;
 }
@@ -141,16 +133,9 @@ ExecWorkFile_Open(const char *fileName,
 					bool delOnClose,
 					int compressType)
 {
-	ExecWorkFile *workfile = NULL;
-	void *file = NULL;
-	int64 file_size = 0;
-
-	/*
-	 * Create ExecWorkFile in the TopMemoryContext since this memory context
-	 * is still available when calling the transaction callback at the
-	 * time when the transaction aborts.
-	 */
-	MemoryContext oldContext = MemoryContextSwitchTo(TopMemoryContext);
+	ExecWorkFile *workfile;
+	void	   *file;
+	int64		file_size;
 
 	switch(fileType)
 	{
@@ -160,33 +145,30 @@ ExecWorkFile_Open(const char *fileName,
 					delOnClose,
 					true  /* interXact */ );
 			if (!file)
-			{
-				elog(ERROR, "could not open temporary file \"%s\": %m", fileName);
-			}
+				ereport(ERROR,
+						(errcode_for_file_access(),
+						 errmsg("could not open temporary file \"%s\": %m",
+								fileName)));
+
 			BufFileSetWorkfile(file);
 			file_size = BufFileGetSize(file);
-
 			break;
+
 		case BFZ:
 			file = (void *)bfz_open(fileName, delOnClose, compressType);
 			if (!file)
-			{
-				elog(ERROR, "could not open temporary file \"%s\": %m", fileName);
-			}
+				ereport(ERROR,
+						(errcode_for_file_access(),
+						 errmsg("could not open temporary file \"%s\": %m",
+								fileName)));
 			file_size = bfz_totalbytes((bfz_t *)file);
 			break;
+
 		default:
-			ereport(LOG,
+			ereport(ERROR,
 					(errcode(ERRCODE_INTERNAL_ERROR),
 					 errmsg("invalid work file type: %d", fileType)));
-			Assert(false);
-	}
-
-	/* Failed opening existing workfile. Inform the caller */
-	if (NULL == file)
-	{
-		MemoryContextSwitchTo(oldContext);
-		return NULL;
+			return NULL;		/* keep compiler quiet */
 	}
 
 	workfile = palloc0(sizeof(ExecWorkFile));
@@ -197,8 +179,6 @@ ExecWorkFile_Open(const char *fileName,
 	workfile->fileName = pstrdup(fileName);
 	workfile->size = file_size;
 	ExecWorkFile_SetFlags(workfile, delOnClose, false /* created */);
-
-	MemoryContextSwitchTo(oldContext);
 
 	return workfile;
 }
@@ -217,6 +197,8 @@ ExecWorkFile_Write(ExecWorkFile *workfile,
 {
 	Assert(workfile != NULL);
 	uint64 bytes;
+
+	SIMPLE_FAULT_INJECTOR(WorkfileWriteFail);
 
 	if (data == NULL || size == 0)
 	{
@@ -258,7 +240,7 @@ ExecWorkFile_Write(ExecWorkFile *workfile,
 			workfile->size = new_size;
 
 			WorkfileDiskspace_Commit( (new_size - current_size), size, true /* update_query_size */);
-			workfile_update_in_progress_size(workfile, new_size - current_size);
+			workfile_set_update_in_progress_size(workfile->work_set, new_size - current_size);
 
 			if (bytes != size)
 			{
@@ -287,7 +269,7 @@ ExecWorkFile_Write(ExecWorkFile *workfile,
 			{
 				WorkfileDiskspace_Commit(size, size, true /* update_query_size */);
 			}
-			workfile_update_in_progress_size(workfile, size);
+			workfile_set_update_in_progress_size(workfile->work_set, size);
 
 			break;
 		default:
@@ -450,7 +432,7 @@ ExecWorkFile_Close(ExecWorkFile *workfile)
 				ExecWorkFile_AdjustBFZSize(workfile, file_size);
 			}
 
-			bfz_close(bfz_file, true);
+			bfz_close(bfz_file);
 			break;
 		default:
 			insist_log(false, "invalid work file type: %d", workfile->fileType);
@@ -553,7 +535,7 @@ ExecWorkFile_Seek(ExecWorkFile *workfile, uint64 offset, int whence)
 	if (additional_size > 0)
 	{
 		WorkfileDiskspace_Commit(additional_size, additional_size, true /* update_query_size */);
-		workfile_update_in_progress_size(workfile, additional_size);
+		workfile_set_update_in_progress_size(workfile->work_set, additional_size);
 	}
 
 	return result;
@@ -717,7 +699,7 @@ ExecWorkFile_AdjustBFZSize(ExecWorkFile *workfile, int64 file_size)
 		 */
 		Assert(bfz_file->compression_index > 0 || WorkfileDiskspace_IsFull());
 		WorkfileDiskspace_Commit(file_size, workfile->size, true /* update_query_size */);
-		workfile_update_in_progress_size(workfile, file_size - workfile->size);
+		workfile_set_update_in_progress_size(workfile->work_set, file_size - workfile->size);
 		workfile->size = file_size;
 
 	}
@@ -748,7 +730,7 @@ ExecWorkFile_AdjustBFZSize(ExecWorkFile *workfile, int64 file_size)
 			}
 
 			WorkfileDiskspace_Commit(extra_bytes, extra_bytes, true /* update_query_size */);
-			workfile_update_in_progress_size(workfile, extra_bytes);
+			workfile_set_update_in_progress_size(workfile->work_set, extra_bytes);
 			workfile->size = file_size;
 		}
 	}

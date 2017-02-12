@@ -14,14 +14,14 @@
 
 #include "gp-libpq-fe.h"
 #include "access/transam.h"
-#include "catalog/catquery.h"
 #include "catalog/gp_policy.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_attribute.h"
 #include "catalog/pg_exttable.h"
 #include "catalog/pg_depend.h"
 #include "catalog/pg_type.h"
-#include "cdb/cdbdisp.h"
+#include "cdb/cdbdisp_query.h"
+#include "cdb/cdbdispatchresult.h"
 #include "cdb/cdbpartition.h"
 #include "cdb/cdbsreh.h"
 #include "cdb/cdbvars.h"
@@ -36,6 +36,7 @@
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
+#include "utils/bytea.h"
 #include "nodes/makefuncs.h"
 
 static int  GetNextSegid(CdbSreh *cdbsreh);
@@ -557,6 +558,7 @@ ErrorLogWrite(CdbSreh *cdbsreh)
 	char		filename[MAXPGPATH];
 	FILE	   *fp;
 	pg_crc32	crc;
+	int			ret;
 
 	Assert(OidIsValid(cdbsreh->relid));
 	ErrorLogFileName(filename, MyDatabaseId, cdbsreh->relid);
@@ -568,15 +570,20 @@ ErrorLogWrite(CdbSreh *cdbsreh)
 
 	LWLockAcquire(ErrorLogLock, LW_EXCLUSIVE);
 	fp = AllocateFile(filename, "a");
-	if (!fp)
-	{
-		mkdir(ErrorLogDir, S_IRWXU);
 
-		fp = AllocateFile(filename, "a");
+	if (!fp && (errno == EMFILE || errno == ENFILE))
+		ereport(ERROR, (errmsg("could not open \"%s\", too many open files: %m", filename)));
+
+	if (!fp && errno == ENOENT)
+	{
+		ret = mkdir(ErrorLogDir, S_IRWXU);
+		if (ret == 0)
+			fp = AllocateFile(filename, "a");
+		else
+			ereport(ERROR, (errmsg("could not create directory for errorlog \"%s\": %m", ErrorLogDir)));
 	}
 	if (!fp)
-		ereport(ERROR,
-				(errmsg("could not open \"%s\": %m", filename)));
+		ereport(ERROR, (errmsg("could not open \"%s\": %m", filename)));
 
 	/*
 	 * format:
@@ -616,7 +623,7 @@ ErrorLogRead(FILE *fp, pg_crc32 *crc)
 
 		/*
 		 * The tuple is "in-memory" format of HeapTuple.  Allocate
-		 * the whole chunk consectively.
+		 * the whole chunk consecutively.
 		 */
 		tuple = palloc(HEAPTUPLESIZE + t_len);
 		tuple->t_len = t_len;
@@ -701,15 +708,12 @@ gp_read_error_log(PG_FUNCTION_ARGS)
 		 */
 		if (Gp_role == GP_ROLE_DISPATCH)
 		{
-			int		resultCount = 0;
-			PGresult **results = NULL;
+			struct CdbPgResults cdb_pgresults = {NULL, 0};
 			StringInfoData sql;
-			StringInfoData errbuf;
+
 			int		i;
 
 			initStringInfo(&sql);
-			initStringInfo(&errbuf);
-
 			/*
 			 * construct SQL
 			 */
@@ -717,26 +721,23 @@ gp_read_error_log(PG_FUNCTION_ARGS)
 					"SELECT * FROM pg_catalog.gp_read_error_log(%s) ",
 							 quote_literal_internal(text_to_cstring(relname)));
 
-			results = cdbdisp_dispatchRMCommand(sql.data, true, &errbuf,
-												&resultCount);
+			CdbDispatchCommand(sql.data, DF_WITH_SNAPSHOT, &cdb_pgresults);
 
-			if (errbuf.len > 0)
-				elog(ERROR, "%s", errbuf.data);
-			Assert(resultCount > 0);
-
-			for (i = 0; i < resultCount; i++)
+			for (i = 0; i < cdb_pgresults.numResults; i++)
 			{
-				if (PQresultStatus(results[i]) != PGRES_TUPLES_OK)
+				if (PQresultStatus(cdb_pgresults.pg_results[i]) != PGRES_TUPLES_OK)
+				{
+					cdbdisp_clearCdbPgResults(&cdb_pgresults);
 					elog(ERROR, "unexpected result from segment: %d",
-								PQresultStatus(results[i]));
-				context->numTuples += PQntuples(results[i]);
+								PQresultStatus(cdb_pgresults.pg_results[i]));
+				}
+				context->numTuples += PQntuples(cdb_pgresults.pg_results[i]);
 			}
 
-			pfree(errbuf.data);
 			pfree(sql.data);
 
-			context->segResults = results;
-			context->numSegResults = resultCount;
+			context->segResults = cdb_pgresults.pg_results;
+			context->numSegResults = cdb_pgresults.numResults;
 		}
 		else
 		{
@@ -896,10 +897,11 @@ ErrorLogDelete(Oid databaseId, Oid relationId)
 
 	if (!OidIsValid(relationId))
 	{
-		DIR	   *dir;
-		struct dirent *de;
-		char   *dirpath = ErrorLogDir;
-		char	prefix[MAXPGPATH];
+		DIR			   *dir;
+		struct dirent  *de;
+		char   		   *dirpath = ErrorLogDir;
+		char			prefix[MAXPGPATH];
+		int				len;
 
 		if (OidIsValid(databaseId))
 			snprintf(prefix, sizeof(prefix), "%u_", databaseId);
@@ -924,8 +926,16 @@ ErrorLogDelete(Oid databaseId, Oid relationId)
 			 */
 			if (!OidIsValid(databaseId))
 			{
+				len = snprintf(filename, MAXPGPATH, "%s/%s", dirpath, de->d_name);
+				if (len >= (MAXPGPATH - 1))
+				{
+					ereport(WARNING,
+						(errcode(ERRCODE_GP_INTERNAL_ERROR),
+						(errmsg("log filename truncation on \"%s\", unable to delete error log",
+								de->d_name))));
+					continue;
+				}
 				LWLockAcquire(ErrorLogLock, LW_EXCLUSIVE);
-				sprintf(filename, "%s/%s", dirpath, de->d_name);
 				unlink(filename);
 				LWLockRelease(ErrorLogLock);
 				continue;
@@ -1029,40 +1039,37 @@ gp_truncate_error_log(PG_FUNCTION_ARGS)
 	 */
 	if (Gp_role == GP_ROLE_DISPATCH)
 	{
-		int			i, resultCount = 0;
-		StringInfoData	sql, errbuf;
-		PGresult  **results;
+		int			i = 0;
+		StringInfoData	sql;
+		CdbPgResults cdb_pgresults = {NULL, 0};
 
 		initStringInfo(&sql);
-		initStringInfo(&errbuf);
+
 
 		appendStringInfo(&sql,
 						 "SELECT pg_catalog.gp_truncate_error_log(%s)",
 						 quote_literal_internal(text_to_cstring(relname)));
 
-		results = cdbdisp_dispatchRMCommand(sql.data, true, &errbuf,
-											&resultCount);
+		CdbDispatchCommand(sql.data, DF_WITH_SNAPSHOT, &cdb_pgresults);
 
-		if (errbuf.len > 0)
-			elog(ERROR, "%s", errbuf.data);
-		Assert(resultCount > 0);
-
-		for (i = 0; i < resultCount; i++)
+		for (i = 0; i < cdb_pgresults.numResults; i++)
 		{
 			Datum		value;
 			bool		isnull;
+			struct pg_result *pgresult = cdb_pgresults.pg_results[i];
 
-			if (PQresultStatus(results[i]) != PGRES_TUPLES_OK)
+			if (PQresultStatus(pgresult) != PGRES_TUPLES_OK)
+			{
+				cdbdisp_clearCdbPgResults(&cdb_pgresults);
 				ereport(ERROR,
 						(errmsg("unexpected result from segment: %d",
-								PQresultStatus(results[i]))));
-
-			value = ResultToDatum(results[i], 0, 0, boolin, &isnull);
+								PQresultStatus(pgresult))));
+			}
+			value = ResultToDatum(pgresult, 0, 0, boolin, &isnull);
 			allResults &= (!isnull && DatumGetBool(value));
-			PQclear(results[i]);
 		}
 
-		pfree(errbuf.data);
+		cdbdisp_clearCdbPgResults(&cdb_pgresults);
 		pfree(sql.data);
 	}
 

@@ -16,6 +16,7 @@
 
 #include "access/xlogdefs.h"
 #include "access/xlogmm.h"
+#include "storage/backendid.h"
 #include "storage/proc.h"
 #include "utils/timestamp.h"
 
@@ -45,10 +46,8 @@ typedef struct prepared_transaction_agg_state
   prpt_map maps[0]; /* variable length */
 } prepared_transaction_agg_state;
 
-
-
 #define PREPARED_TRANSACTION_CHECKPOINT_BYTES(count) \
-  (SIZEOF_VARSTRUCT(count, prepared_transaction_agg_state, maps))
+	(offsetof(prepared_transaction_agg_state, maps) + sizeof(prpt_map) * (count))
 
 
 /*
@@ -67,9 +66,10 @@ extern void AtAbort_Twophase(void);
 extern void PostPrepare_Twophase(void);
 
 extern PGPROC *TwoPhaseGetDummyProc(TransactionId xid);
+extern BackendId TwoPhaseGetDummyBackendId(TransactionId xid);
 
 extern GlobalTransaction MarkAsPreparing(TransactionId xid, 
-				LocalDistribXactRef *distribToLocalXactRef,
+				LocalDistribXactData *localDistribXactRef,
 				const char *gid,
 				TimestampTz prepared_at,
 				Oid owner, Oid databaseid

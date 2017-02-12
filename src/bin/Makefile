@@ -11,7 +11,7 @@
 
 subdir = src/bin
 top_builddir = ../..
-nbu_libdir = $(shell cd ../../gpAux/ext/rhel5_x86_64/Netbackup/nbu75/lib; pwd)
+nbu_libdir = $(shell cd ../../gpAux/ext/$(BLD_ARCH)/Netbackup/nbu75/lib; pwd)
 include $(top_builddir)/src/Makefile.global
 
 ifeq "$(findstring -ftest-coverage,$(CFLAGS))" ""
@@ -27,8 +27,7 @@ DIRS = initdb ipcclean pg_basebackup pg_ctl pg_dump \
 	psql scripts pg_config pg_controldata pg_resetxlog \
 	gpmirrortransition \
 	gp_workfile_mgr \
-	gp_session_state \
-	gpoptutils
+	gp_session_state
 
 ifeq ($(PORTNAME), win32)
 DIRS+=pgevent

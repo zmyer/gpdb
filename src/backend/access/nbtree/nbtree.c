@@ -12,7 +12,7 @@
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/access/nbtree/nbtree.c,v 1.154 2007/01/05 22:19:23 momjian Exp $
+ *	  $PostgreSQL: pgsql/src/backend/access/nbtree/nbtree.c,v 1.156.2.2 2008/11/13 17:42:18 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -128,7 +128,7 @@ btbuild(PG_FUNCTION_ARGS)
 			buildstate.spool2 = _bt_spoolinit(index, false, true);
 
 		/* do the heap scan */
-		reltuples = IndexBuildScan(heap, index, indexInfo,
+		reltuples = IndexBuildScan(heap, index, indexInfo, false,
 				btbuildCallback, (void *) &buildstate);
 
 		/* okay, all heap tuples are indexed */
@@ -153,7 +153,6 @@ btbuild(PG_FUNCTION_ARGS)
 			_bt_spooldestroy(buildstate.spool2);
 			buildstate.spool2 = NULL;
 		}
-
 	}
 	PG_CATCH();
 	{
@@ -313,7 +312,7 @@ _bt_validate_vacuum(Relation irel, Relation hrel, TransactionId oldest_xmin)
 						 RelationGetRelationName(irel),
 						 RelationGetRelationName(hrel));
 				}
-				switch (HeapTupleSatisfiesVacuum(htup.t_data, oldest_xmin, hbuf))
+				switch (HeapTupleSatisfiesVacuum(hrel, htup.t_data, oldest_xmin, hbuf))
 				{
 					case HEAPTUPLE_RECENTLY_DEAD:
 					case HEAPTUPLE_LIVE:
@@ -588,10 +587,14 @@ btgetmulti(PG_FUNCTION_ARGS)
 
 	MIRROREDLOCK_BUFMGR_VERIFY_NO_LOCK_LEAK_ENTER;
 
-	if (n == NULL || IsA(n, StreamBitmap))
+	if (n == NULL)
 	{
 		/* XXX should we use less than work_mem for this? */
 		hashBitmap = tbm_create(work_mem * 1024L);
+	}
+	else if (!IsA(n, HashBitmap))
+	{
+		elog(ERROR, "non hash bitmap");
 	}
 	else
 	{
@@ -626,13 +629,6 @@ btgetmulti(PG_FUNCTION_ARGS)
 		tbm_add_tuples(hashBitmap,
 					   &(so->currPos.items[so->currPos.itemIndex].heapTid),
 					   1);
-	}
-
-	if(n && IsA(n, StreamBitmap))
-	{
-		stream_add_node((StreamBitmap *)n,
-			tbm_create_stream_node(hashBitmap), BMS_OR);
-		PG_RETURN_POINTER(n);
 	}
 
 	MIRROREDLOCK_BUFMGR_VERIFY_NO_LOCK_LEAK_EXIT;
@@ -1138,13 +1134,14 @@ restart:
 	/*
 	 * We can't use _bt_getbuf() here because it always applies
 	 * _bt_checkpage(), which will barf on an all-zero page. We want to
-	 * recycle all-zero pages, not fail.
+	 * recycle all-zero pages, not fail.  Also, we want to use a nondefault
+	 * buffer access strategy.
 	 */
 	
 	// -------- MirroredLock ----------
 	MIRROREDLOCK_BUFMGR_LOCK;
 	
-	buf = ReadBuffer(rel, blkno);
+	buf = ReadBufferWithStrategy(rel, blkno, info->strategy);
 	LockBuffer(buf, BT_READ);
 	page = BufferGetPage(buf);
 	opaque = (BTPageOpaque) PageGetSpecialPointer(page);

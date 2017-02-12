@@ -28,6 +28,7 @@
 #include "cdb/cdbvars.h"
 
 #include "access/xlogdefs.h"
+#include "access/slru.h"
 #include "cdb/cdbfilerepservice.h"
 #include "cdb/cdbfilerepmirror.h"
 #include "cdb/cdbfilerepmirrorack.h"
@@ -148,21 +149,6 @@ FileRepMirror_StartReceiver(void)
 	}
 	
 	Insist(fileRepRole == FileRepMirrorRole);
-	
-	if (filerep_inject_listener_fault)
-	{
-		status = STATUS_ERROR;
-		ereport(WARNING,
-				(errmsg("mirror failure, "
-						"injected fault by guc filerep_inject_listener_fault, "
-						"failover requested"), 
-				 FileRep_errcontext()));	
-		
-		FileRep_SetSegmentState(SegmentStateFault, FaultTypeMirror);
-		FileRepSubProcess_SetState(FileRepStateFault);
-		FileRepSubProcess_ProcessSignals();
-		return;
-	}
 	
 	status = FileRepConnServer_StartListener(
 								 fileRepMirrorHostAddress,
@@ -383,13 +369,8 @@ FileRepMirror_RunReceiver(void)
 									   spareField,
 									   FILEREP_UNDEFINED);	
 				
-#ifdef FAULT_INJECTOR
-				FaultInjector_InjectFaultIfSet(
-											   FileRepReceiver,
-											   DDLNotSpecified,
-											   "",	//databaseName
-											   ""); // tableName
-#endif				
+				SIMPLE_FAULT_INJECTOR(FileRepReceiver);
+
 				fileRepShmemMessageDescr = (FileRepShmemMessageDescr_s*) msgPositionInsert;	
 		
 				/* it is not in use */
@@ -701,13 +682,8 @@ FileRepMirror_RunConsumer(void)
 			break;
 		}
 			
-#ifdef FAULT_INJECTOR
-		FaultInjector_InjectFaultIfSet(
-									   FileRepConsumer,
-									   DDLNotSpecified,
-									   "",	//databaseName
-									   ""); // tableName
-#endif
+		SIMPLE_FAULT_INJECTOR(FileRepConsumer);
+
 		/* Calculate and compare FileRepMessageHeader_s Crc */
 		fileRepMessageHeader = (FileRepMessageHeader_s*) (fileRepShmem->positionConsume + 
 								  sizeof(FileRepShmemMessageDescr_s));
@@ -1334,13 +1310,8 @@ FileRepMirror_RunConsumer(void)
 						}
 				}
 				
-#ifdef FAULT_INJECTOR
-				FaultInjector_InjectFaultIfSet(
-											   FileRepFlush,
-											   DDLNotSpecified,
-											   "",	//databaseName
-											   ""); // tableName
-#endif								
+				SIMPLE_FAULT_INJECTOR(FileRepFlush);
+
 				gettimeofday(&currentTime, NULL);
 				beginTime = (pg_time_t) currentTime.tv_sec;
 				
@@ -1959,7 +1930,8 @@ FileRepMirror_RunConsumer(void)
 											   fileRepMessageHeader->messageCount),
 							 FileRep_errcontext()));		
 					
-					FileUnlink(fd);
+					SetDeleteOnExit(fd);
+					FileClose(fd);
 					FileRepMirror_RemoveFileName(newFileName);
 				}
 				fd = 0;
@@ -2053,6 +2025,41 @@ FileRepMirror_RunConsumer(void)
 				
 			case FileRepOperationHeartBeat:
 				/* NoOp. Just send ACK back. */
+				break;
+
+			case FileRepOperationStartSlruChecksum:
+				Assert(fileRepMessageHeader->fileRepRelationType == FileRepRelationTypeFlatFile);
+
+				ereport(LOG,
+						(errmsg("mirror beginning SLRU checksum file creation, dir: %s",
+								fileRepMessageHeader->fileRepIdentifier.fileRepFlatFileIdentifier.directorySimpleName)));
+
+				if (SlruCreateChecksumFile(
+						fileRepMessageHeader->fileRepIdentifier.fileRepFlatFileIdentifier.directorySimpleName) < 0)
+				{
+					fileRepMessageHeader->fileRepOperationDescription.startChecksum.mirrorStatus
+						= FileRepStatusSlruChecksumFailed;
+				}
+
+				break;
+
+			case FileRepOperationVerifySlruDirectoryChecksum:
+				Assert(fileRepMessageHeader->fileRepRelationType == FileRepRelationTypeFlatFile);
+
+				ereport(LOG,
+						(errmsg("mirror beginning checksum comparison, dir: %s, checksum file: %s",
+								fileRepMessageHeader->fileRepIdentifier.fileRepFlatFileIdentifier.directorySimpleName,
+								fileRepMessageHeader->fileRepIdentifier.fileRepFlatFileIdentifier.fileSimpleName)));
+
+				if (SlruMirrorVerifyDirectoryChecksum(
+						fileRepMessageHeader->fileRepIdentifier.fileRepFlatFileIdentifier.directorySimpleName,
+						fileRepMessageHeader->fileRepIdentifier.fileRepFlatFileIdentifier.fileSimpleName,
+						fileRepMessageHeader->fileRepOperationDescription.verifyDirectoryChecksum.md5) < 0)
+				{
+					fileRepMessageHeader->fileRepOperationDescription.verifyDirectoryChecksum.mirrorStatus
+						= FileRepStatusSlruChecksumFailed;
+				}
+
 				break;
 
 		    default:
@@ -2621,7 +2628,8 @@ FileRepMirror_Drop(FileName fileName)
 		FileRepMirror_RemoveFileName(fileName);
 	}
 
-	FileUnlink(fd);
+	SetDeleteOnExit(fd);
+	FileClose(fd);
 	
 	return status;
 }

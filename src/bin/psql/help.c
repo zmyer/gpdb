@@ -171,6 +171,11 @@ void
 slashUsage(unsigned short int pager)
 {
 	FILE	   *output;
+	char	   *currdb;
+
+	currdb = PQdb(pset.db);
+	if (currdb == NULL)
+		currdb = "";
 
 	output = PageOutput(90, pager);
 
@@ -222,6 +227,7 @@ slashUsage(unsigned short int pager)
 	fprintf(output, _("  \\dFp[+] [PATTERN]      list text search parsers\n"));
 	fprintf(output, _("  \\dFt[+] [PATTERN]      list text search templates\n"));
 	fprintf(output, _("  \\dg[+]  [PATTERN]      list roles (groups)\n"));
+	fprintf(output, _("  \\dx[+]  [PATTERN]      list extensions\n"));
 	fprintf(output, _("  \\di[S+] [PATTERN]      list indexes\n"));
 	fprintf(output, _("  \\dl                    list large objects, same as \\lo_list\n"));
 	fprintf(output, _("  \\dn[+]  [PATTERN]      list schemas\n"));
@@ -234,7 +240,7 @@ slashUsage(unsigned short int pager)
 	fprintf(output, _("  \\dT[S+] [PATTERN]      list data types\n"));
 	fprintf(output, _("  \\du[+]  [PATTERN]      list roles (users)\n"));
 	fprintf(output, _("  \\dv[S+] [PATTERN]      list views\n"));
-	fprintf(output, _("  \\dx     [PATTERN]      list external tables\n"));
+	fprintf(output, _("  \\dE     [PATTERN]      list external tables\n"));
 	fprintf(output, _("  \\l[+]                  list all databases\n"));
 	fprintf(output, _("  \\z      [PATTERN]      same as \\dp\n"));
 	fprintf(output, "\n");
@@ -456,7 +462,8 @@ print_copyright(void)
 {
 	puts("Greenplum Database version of PostgreSQL Database Management System\n"
 		 "(formerly known as Postgres, then as Postgres95)\n\n"
-		 "Portions Copyright (c) 2011 EMC\n\n"
+		 "Portions Copyright (c) 2014-Present Pivotal Software, Inc.\n\n"
+		 "Portions Copyright (c) 2011-2014 EMC\n\n"
 		 "Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group\n\n"
 		 "Portions Copyright (c) 1994, The Regents of the University of California\n\n"
 		 "Permission to use, copy, modify, and distribute this software and its\n"

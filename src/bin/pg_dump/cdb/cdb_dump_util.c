@@ -22,13 +22,16 @@
 #include "pqexpbuffer.h"
 #include "../dumputils.h"
 #include "cdb_dump_util.h"
+#include "cdb_lockbox.h"
 
 #define DDP_CL_DDP 1
 #define DEFAULT_STORAGE_UNIT "GPDB"
 
 static char predump_errmsg[1024];
 
-bool shouldDumpSchemaOnly(int g_role, bool incrementalBackup, void *list) {
+bool
+shouldDumpSchemaOnly(int g_role, bool incrementalBackup, void *list)
+{
     if (g_role != ROLE_SEGDB || !incrementalBackup)
         return false;
 
@@ -103,11 +106,6 @@ FreeInputOptions(InputOptions * pInputOpts)
 	if (pInputOpts->pszReportDirectory != NULL)
 		free(pInputOpts->pszReportDirectory);
 
-    /* hard coded as gzip for now, no need to free
-	if ( pInputOpts->pszCompressionProgram != NULL )
-		free( pInputOpts->pszCompressionProgram );
-	*/
-
 	if (pInputOpts->pszPassThroughParms != NULL)
 		free(pInputOpts->pszPassThroughParms);
 
@@ -119,8 +117,6 @@ FreeInputOptions(InputOptions * pInputOpts)
 
 	if (pInputOpts->pszMasterDBName != NULL)
 		free(pInputOpts->pszMasterDBName);
-
-	/* FreeCDBSet( &pInputOpts->set ); */
 }
 
 /*
@@ -302,6 +298,7 @@ GetMasterConnection(const char *progName,
 	{
 		mpp_err_msg_cache("ERROR", progName, "connection to database \"%s\" failed : %s",
 						  PQdb(pConn), PQerrorMessage(pConn));
+		PQfinish(pConn);
 		return (NULL);
 	}
 
@@ -426,6 +423,7 @@ MakeString(const char *fmt,...)
 
 		nBytes *= 2;
 		pszNew = (char *) realloc(pszRtn, nBytes);
+
 		if (pszNew == NULL)
 		{
 			free(pszRtn);
@@ -469,7 +467,7 @@ ParseCDBDumpInfo(const char *progName, char *pszCDBDumpInfo, char **ppCDBDumpKey
 		char		errbuf[1024];
 
 		regerror(rtn, &rCDBDumpInfo, errbuf, 1024);
-		mpp_err_msg_cache("Error parsing CDBDumpInfo %s: not valid : %s\n", pszCDBDumpInfo, errbuf);
+		mpp_err_msg_cache("Error", progName, "parsing CDBDumpInfo %s: not valid : %s\n", pszCDBDumpInfo, errbuf);
 		regfree(&rCDBDumpInfo);
 		return false;
 	}
@@ -617,6 +615,7 @@ mpp_err_msg_cache(const char *loglevel, const char *prog, const char *fmt,...)
 {
 	va_list		ap;
 	char		szTimeNow[18];
+	int			len;
 
 	va_start(ap, fmt);
 	fprintf(stderr, "%s|%s-[%s]:-", GetTimeNow(szTimeNow), prog, loglevel);
@@ -625,8 +624,19 @@ mpp_err_msg_cache(const char *loglevel, const char *prog, const char *fmt,...)
 
 	/* cache a copy of the message - we may need it for a report */
 	va_start(ap, fmt);
-	vsprintf(predump_errmsg, gettext(fmt), ap);
+	len = vsnprintf(predump_errmsg, sizeof(predump_errmsg), gettext(fmt), ap);
 	va_end(ap);
+
+	/*
+	 * If the passed error string exceeds the size of the buffer, indicate that
+	 * by suffixing the string with ".."
+	 */
+	if (len > sizeof(predump_errmsg))
+	{
+		int		i;
+		for (i = sizeof(predump_errmsg) - 3; predump_errmsg[i]; i++)
+			predump_errmsg[i] = '.';
+	}
 }
 
 /* Simple error logging to stdout  */
@@ -664,7 +674,7 @@ b64_dec_len(const char *src, unsigned srclen)
 	return (srclen * 3) >> 2;
 }
 
-static const unsigned char _base64[] =
+static const char _base64[] =
 "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 static const char b64lookup[128] = {
@@ -679,7 +689,7 @@ static const char b64lookup[128] = {
 };
 
 char *
-DataToBase64(char *pszIn, unsigned int InLen)
+DataToBase64(const char *pszIn, unsigned int InLen)
 {
 	char	   *p;
 	const char *s;
@@ -700,7 +710,7 @@ DataToBase64(char *pszIn, unsigned int InLen)
 
 	while (s < end)
 	{
-		buf |= *s << (pos << 3);
+		buf |= (unsigned char) *s << (pos << 3);
 		pos--;
 		s++;
 
@@ -728,12 +738,12 @@ DataToBase64(char *pszIn, unsigned int InLen)
 }
 
 char *
-Base64ToData(char *pszIn, unsigned int *pOutLen)
+Base64ToData(const char *pszIn, unsigned int *pOutLen)
 {
 	const char *srcend;
 	const char *s;
 	char	   *p;
-	unsigned	c;
+	char		c;
 	int			b = 0;
 	uint32		buf = 0;
 	int			pos = 0,
@@ -752,7 +762,6 @@ Base64ToData(char *pszIn, unsigned int *pOutLen)
 	srcend = pszIn + InLen;
 	s = pszIn;
 	p = pszOut;
-
 
 	while (s < srcend)
 	{
@@ -783,7 +792,7 @@ Base64ToData(char *pszIn, unsigned int *pOutLen)
 		{
 			b = -1;
 			if (c > 0 && c < 127)
-				b = b64lookup[c];
+				b = b64lookup[(unsigned char) c];
 			if (b < 0)
 			{
 				assert(false);
@@ -813,6 +822,7 @@ Base64ToData(char *pszIn, unsigned int *pOutLen)
 		return NULL;
 	}
 
+	*pOutLen = p - pszOut;
 	return pszOut;
 }
 
@@ -962,244 +972,7 @@ parseDbidSet(int *dbidset, char *dump_set)
 	return count;
 }
 
-const char*
-getBackupTypeString(bool incremental)
-{
-	if (incremental)
-	{
-		return "Backup Type: Incremental";
-	}
-	else
-	{
-		return "Backup Type: Full";
-	}
-}
-
-char*
-formCompressionProgramString(char* compPg)
-{
-	char extra[] = " -c ";
-	char* retVal = realloc(compPg, strlen(compPg) + sizeof(extra) + 2);
-	if (retVal)
-	{
-		strcat(retVal, extra);	/* decompress to stdout */
-	}
-	return retVal;
-}
-
-void
-formPostDataSchemaOnlyPsqlCommandLine(char** retVal, const char* inputFileSpec, bool compUsed, const char* compProg,
-									const char* post_data_filter_script, const char* table_filter_file,
-									const char* psqlPg, const char* catPg,
-									const char* gpNBURestorePg, const char* netbackupServiceHost, const char* netbackupBlockSize,
-									const char* change_schema_file, const char *schema_level_file)
-{
-	char* pszCmdLine = *retVal;
-	if (compUsed)
-	{
-		if (netbackupServiceHost)
-		{
-			strncpy(pszCmdLine, gpNBURestorePg, (1 + strlen(gpNBURestorePg)));
-			strncat(pszCmdLine, " --netbackup-service-host ", strlen(" --netbackup-service-host "));
-			strncat(pszCmdLine, netbackupServiceHost, strlen(netbackupServiceHost));
-			strncat(pszCmdLine, " --netbackup-filename ", strlen(" --netbackup-filename "));
-			strncat(pszCmdLine, inputFileSpec, strlen(inputFileSpec));
-			if (netbackupBlockSize)
-			{
-				strncat(pszCmdLine, " --netbackup-block-size ", strlen(" --netbackup-block-size "));
-				strncat(pszCmdLine, netbackupBlockSize, strlen(netbackupBlockSize));
-			}
-			strncat(pszCmdLine, " | ", strlen(" | "));
-			strncat(pszCmdLine, compProg, strlen(compProg));
-		}
-		else
-		{
-			strcpy(pszCmdLine, catPg);
-			strcat(pszCmdLine, " ");
-			strcat(pszCmdLine, inputFileSpec);
-			strcat(pszCmdLine, " | ");
-			strcat(pszCmdLine, compProg);
-		}
-
-		formPostDataFilterCommandLine(&pszCmdLine, post_data_filter_script, table_filter_file, change_schema_file, schema_level_file);
-
-		strcat(pszCmdLine, " | ");
-		strcat(pszCmdLine, psqlPg);
-	}
-	else
-	{
-		if (netbackupServiceHost)
-		{
-			strncpy(pszCmdLine, gpNBURestorePg, (1 + strlen(gpNBURestorePg)));
-			strncat(pszCmdLine, " --netbackup-service-host ", strlen(" --netbackup-service-host "));
-			strncat(pszCmdLine, netbackupServiceHost, strlen(netbackupServiceHost));
-			strncat(pszCmdLine, " --netbackup-filename ", strlen(" --netbackup-filename "));
-			strncat(pszCmdLine, inputFileSpec, strlen(inputFileSpec));
-			if (netbackupBlockSize)
-			{
-				strncat(pszCmdLine, " --netbackup-block-size ", strlen(" --netbackup-block-size "));
-				strncat(pszCmdLine, netbackupBlockSize, strlen(netbackupBlockSize));
-			}
-
-			formPostDataFilterCommandLine(&pszCmdLine, post_data_filter_script, table_filter_file, change_schema_file, schema_level_file);
-
-			strncat(pszCmdLine, " | ", strlen(" | "));
-			strncat(pszCmdLine, psqlPg, strlen(psqlPg));
-		}
-		else
-		{
-			strcpy(pszCmdLine, catPg);	/* add 'cat' command */
-			strcat(pszCmdLine, " ");
-			strcat(pszCmdLine, inputFileSpec);
-
-			formPostDataFilterCommandLine(&pszCmdLine, post_data_filter_script, table_filter_file, change_schema_file, schema_level_file);
-
-			strcat(pszCmdLine, " | ");
-			strcat(pszCmdLine, psqlPg);
-		}
-	}
-}
-
-
-/* Build command line for gp_restore_agent */
-void
-formSegmentPsqlCommandLine(char** retVal, const char* inputFileSpec, bool compUsed, const char* compProg,
-							const char* filter_script, const char* table_filter_file,
-							int role, const char* psqlPg, const char* catPg,
-							const char* gpNBURestorePg, const char* netbackupServiceHost, const char* netbackupBlockSize,
-							const char* change_schema_file, const char *schema_level_file)
-{
-	char* pszCmdLine = *retVal;
-	if (compUsed)
-	{
-		if (netbackupServiceHost)
-		{
-			strncpy(pszCmdLine, gpNBURestorePg, (1 + strlen(gpNBURestorePg)));
-			strncat(pszCmdLine, " --netbackup-service-host ", strlen(" --netbackup-service-host "));
-			strncat(pszCmdLine, netbackupServiceHost, strlen(netbackupServiceHost));
-			strncat(pszCmdLine, " --netbackup-filename ", strlen(" --netbackup-filename "));
-			strncat(pszCmdLine, inputFileSpec, strlen(inputFileSpec));
-			if (netbackupBlockSize)
-			{
-				strncat(pszCmdLine, " --netbackup-block-size ", strlen(" --netbackup-block-size "));
-				strncat(pszCmdLine, netbackupBlockSize, strlen(netbackupBlockSize));
-			}
-			strncat(pszCmdLine, " | ", strlen(" | "));
-			strncat(pszCmdLine, compProg, strlen(compProg));	/* add compression program */
-		}
-		else
-		{
-			strcpy(pszCmdLine, catPg);	/* add 'cat' command */
-			strcat(pszCmdLine, " ");
-			strcat(pszCmdLine, inputFileSpec);
-			strcat(pszCmdLine, " | ");
-			strcat(pszCmdLine, compProg);
-		}
-	}
-	else
-	{
-		if (netbackupServiceHost)
-		{
-			strncpy(pszCmdLine, gpNBURestorePg, (1 + strlen(gpNBURestorePg)));
-			strncat(pszCmdLine, " --netbackup-service-host ", strlen(" --netbackup-service-host "));
-			strncat(pszCmdLine, netbackupServiceHost, strlen(netbackupServiceHost));
-			strncat(pszCmdLine, " --netbackup-filename ", strlen(" --netbackup-filename "));
-			strncat(pszCmdLine, inputFileSpec, strlen(inputFileSpec));
-			if (netbackupBlockSize)
-			{
-				strncat(pszCmdLine, " --netbackup-block-size ", strlen(" --netbackup-block-size "));
-				strncat(pszCmdLine, netbackupBlockSize, strlen(netbackupBlockSize));
-			}
-		}
-		else
-		{
-			strcpy(pszCmdLine, catPg);
-			strcat(pszCmdLine, " ");
-			strcat(pszCmdLine, inputFileSpec);
-		}
-	}
-
-	formFilterCommandLine(&pszCmdLine, filter_script, table_filter_file, role, change_schema_file, schema_level_file);
-
-	strcat(pszCmdLine, " | ");
-	strcat(pszCmdLine, psqlPg);
-}
-
-/* Build command line with gprestore_filter.py and its passed through parameters */
-void
-formFilterCommandLine(char** retVal, const char* filter_script, const char* table_filter_file,
-			int role, const char* change_schema_file, const char *schema_level_file)
-{
-	char* pszCmdLine = *retVal;
-
-	if (table_filter_file || schema_level_file)
-	{
-		strcat(pszCmdLine, " | ");
-		strcat(pszCmdLine, filter_script);
-
-		/* Add filter option for gprestore_filter.py to
-		 * process schemas only (no data) on master.
-		 */
-		if (role == ROLE_MASTER)
-			strcat(pszCmdLine, " -m");
-
-		/* Add filter option with table file to filter specified tables. */
-		if (table_filter_file)
-		{
-			strcat(pszCmdLine, " -t ");
-			strcat(pszCmdLine, table_filter_file);
-		}
-		if (change_schema_file)
-		{
-			strcat(pszCmdLine, " -c ");
-			strcat(pszCmdLine, change_schema_file);
-		}
-		if (schema_level_file)
-		{
-			strcat(pszCmdLine, " -s ");
-			strcat(pszCmdLine, schema_level_file);
-		}
-	}
-}
-
-/* Build command line with gprestore_post_data_filter.py and its passed through parameters */
-void
-formPostDataFilterCommandLine(char** retVal, const char* post_data_filter_script, const char* table_filter_file,
-			const char* change_schema_file, const char *schema_level_file)
-{
-	char* pszCmdLine = *retVal;
-
-	if (table_filter_file || schema_level_file)
-	{
-		strcat(pszCmdLine, " | ");
-		strcat(pszCmdLine, post_data_filter_script);
-
-		/* Add filter option for gprestore_post_data_filter.py to
-		 * process schemas only (no data) on master.
-		 */
-
-		/* Add filter option with table file to filter specified tables. */
-		if (table_filter_file)
-		{
-			strcat(pszCmdLine, " -t ");
-			strcat(pszCmdLine, table_filter_file);
-		}
-		if (change_schema_file)
-		{
-			strcat(pszCmdLine, " -c ");
-			strcat(pszCmdLine, change_schema_file);
-		}
-		if (schema_level_file)
-		{
-			strcat(pszCmdLine, " -s ");
-			strcat(pszCmdLine, schema_level_file);
-		}
-	}
-}
-
 #ifdef USE_DDBOOST
-#include <dlfcn.h>
-#include "clb_base.h"
 
 #define	NO_ERR	0
 
@@ -1210,229 +983,7 @@ struct ddboost_logs
 	unsigned int logsSize ;
 } ddboost_logs_info;
 
-/* define function pointers in order to use the LB functions with dlsym */
-void (*clb_getErrorMessage)(int errorCode, char **errorMessage) = NULL;
-int (*clb_create)(const char* lockboxId, const char* passphrase, int overwrite, clbContext lbCntx, clbHandle *clbH) = NULL;
-int (*clb_open)(const char* lockboxId, const char* passphrase, clbContext lbCntx, clbHandle *clbH) = NULL;
-int (*clb_close)(clbHandle clbH) = NULL;
-void (*clb_free)(void *buffer) = NULL;
-int (*clb_setLockboxMode)(clbHandle clbH, clb_mode_e mode) = NULL;
-int (*clb_createItemAsText)(clbHandle clbH, const char* itemName, const char* secret) = NULL;
-int (*clb_retrieveItemAsText)(clbHandle clbH, const char* itemName, char** secret) = NULL;
-
-
-static int setItem(clbHandle* LB, char *key, char *value);
-static int getItem(clbHandle* LB, char *key, char **value);
-static int setLBEnv(void);
-static int createLB(clbHandle* LB,char* name);
-static int openLB(clbHandle* LB,char* name);
 static int validateDDBoostCredential(char *hostname, char *user, char *password, char* log_level ,char* log_size, char *default_backup_directory, bool remote);
-int getDDBoostCredential(char** hostname, char** user, char** password, char** log_level ,char** log_size, char **default_backup_directory, char **ddboost_storage_unit, bool remote);
-
-/*
- * Set the environment variable LD_LIBRARY_PATH in order to dynamically load LB's libraries.
- * Returns 0 in case of success, and -1 otherwise.
- */
-static int
-setLBEnv(void)
-{
-	void *hdl = NULL;
-	char *gphome = getenv("GPHOME");
-	char *ldpath = getenv("LD_LIBRARY_PATH");
-	char LBpath[PATH_MAX];
-	char *newldpath = NULL;
-	char libpath[PATH_MAX];
-	char *libdirname = "lib/rsa_csp";
-	char *libname = "libCSP-lb.so";
-	int  newldpath_len = 0;
-
-	if (NULL == gphome)
-	{
-		mpp_err_msg("ERROR", "ddboost", "GPHOME undefined, can't set ddboost credentials\n");
-		return -1;
-	}
-
-	if (NULL == ldpath)
-	{
-		mpp_err_msg("ERROR", "ddboost", "LD_LIBRARY_PATH undefined, can't set ddboost credentials\n");
-		return -1;
-	}
-
-	snprintf(LBpath, strlen(gphome) + strlen(libdirname) + 2, "%s/%s", gphome, libdirname);
-
-	newldpath_len = strlen(ldpath) + strlen(LBpath) + 2;
-	newldpath = malloc(newldpath_len);
-
-	if (NULL == newldpath)
-	{
-		mpp_err_msg("ERROR", "ddboost", "Memory allocation failed during DDBoost credentials initialization\n");
-		return -1;
-	}
-
-	snprintf(newldpath, newldpath_len, "%s:%s", LBpath, ldpath);
-	setenv("LD_LIBRARY_PATH", newldpath, 1);
-	free(newldpath);
-	newldpath = NULL;
-
-	snprintf(libpath, strlen(LBpath) + strlen(libname) + 2, "%s/%s", LBpath, libname);
-
-	if (NULL == (hdl = dlopen(libpath, RTLD_NOW | RTLD_LOCAL)))
-	{
-		mpp_err_msg("ERROR", "ddboost", "libCSP-lb.so was not found. Can't set ddboost credentials\n");
-		return -1;
-	}
-
-	if (NULL == (clb_getErrorMessage = dlsym(hdl, "clb_getErrorMessage")) ||
-			NULL == (clb_create = dlsym(hdl, "clb_create")) ||
-			NULL == (clb_open = dlsym(hdl, "clb_open")) ||
-			NULL == (clb_close = dlsym(hdl, "clb_close")) ||
-			NULL == (clb_free = dlsym(hdl, "clb_free")) ||
-			NULL == (clb_setLockboxMode = dlsym(hdl, "clb_setLockboxMode")) ||
-			NULL == (clb_createItemAsText = dlsym(hdl, "clb_createItemAsText")) ||
-			NULL == (clb_retrieveItemAsText = dlsym(hdl, "clb_retrieveItemAsText")))
-	{
-		mpp_err_msg("ERROR", "ddboost", "Failed to load dynamic libraries. Can't set ddboost credentials\n");
-		return -1;
-	}
-
-	mpp_err_msg("DEBUG", "ddboost", "Libraries were loaded successfully\n");
-	return 0;
-}
-
-static int
-setItem(clbHandle* LB, char *key, char *value)
-{
-	int iError = clb_createItemAsText(*LB, key, value);
-	if (iError != NO_ERR)
-	{
-		char* eMsg= NULL;;
-		clb_getErrorMessage(iError,&eMsg);
-		mpp_err_msg("ERROR", "ddboost", eMsg);
-		clb_free(eMsg);
-		clb_close(*LB);
-		return iError;
-	};
-
-	return 0;
-}
-
-static int
-setItemWithDefault(clbHandle *LB, char *key, char *value, char *defaultValue)
-{
-	return setItem(LB, key, value ?: defaultValue);
-}
-
-static int
-getItem(clbHandle* LB, char *key, char **value)
-{
-	int iError = clb_retrieveItemAsText(*LB, key, value);
-	if (iError != NO_ERR)
-	{
-		char* eMsg= NULL;;
-		clb_getErrorMessage(iError,&eMsg);
-		mpp_err_msg("ERROR", "ddboost", eMsg);
-		clb_free(eMsg);
-		clb_close(*LB);
-		return iError;
-	};
-
-	return 0;
-}
-
-static int
-createLB(clbHandle* LB,char* name)
-{
-	int iError, i;
-	char filepath[PATH_MAX];
-	char *home = getenv("HOME");
-	char* eMsg = NULL;
-	char clb_pass[35] = "1!qQ";
-	int _base64_len = sizeof(_base64)/sizeof(unsigned char) - 2;
-
-	if (NULL == home)
-	{
-		mpp_err_msg("ERROR", "ddboost", "HOME undefined, can't set ddboost credentials\n");
-		return -1;
-	}
-
-	memset(filepath, 0, PATH_MAX);
-	snprintf(filepath, strlen(home) + strlen(name) + 2, "%s/%s", home, name);
-
-	if (setLBEnv() < 0)
-	{
-		return -1;
-	}
-
-	/* generate random password to create the lockbox */
-	srand ((unsigned) time(NULL));
-
-	/* choose valid characters from _base64 for the lockbox password */
-	for (i=4; i < 34; i++)
-	{
-		clb_pass[i] = _base64[rand() % _base64_len];
-	}
-	clb_pass[34] = '\0';
-
-	/*
-	 * for creating the lockbox we should call to clb_create.
-	 * this function needs a password with at least 8 characters, with several constraints.
-	 * the password is set to optional few lines later, but we must initialize it during the LB creation.
-	 * of course we don't want to use fixed password, so we're using a random password
-	 */
-	mpp_err_msg("INFO", "ddboost", "creating LB on %s\n", filepath);
-	if ((iError = clb_create(filepath, clb_pass, 1 /*overwrite flag*/, 0 /*reserved*/,LB))!=NO_ERR)
-	{
-		clb_getErrorMessage(iError,&eMsg);
-		mpp_err_msg("ERROR", "ddboost", "%s\n", eMsg);
-		clb_free(eMsg);
-		return iError;
-	};
-
-	if ((iError = clb_setLockboxMode(*LB, CLB_PASSPHRASE_OPTIONAL))!=NO_ERR)
-	{
-		clb_getErrorMessage(iError,&eMsg);
-		mpp_err_msg("ERROR", "ddboost", "%s\n", eMsg);
-		clb_free(eMsg);
-		clb_close(*LB);
-
-		return iError;
-	};
-
-	return 0;
-}
-
-static int
-openLB(clbHandle* LB,char* name)
-{
-	int iError;
-	char filepath[PATH_MAX];
-	char *home = getenv("HOME");
-	char* eMsg = NULL;
-
-	if (NULL == home)
-	{
-		mpp_err_msg("ERROR", "ddboost", "HOME undefined, can't set ddboost credentials\n");
-		return -1;
-	}
-
-	memset(filepath, 0, PATH_MAX);
-	snprintf(filepath, strlen(home) + strlen(name) + 2, "%s/%s", home, name);
-
-	if (setLBEnv() < 0)
-	{
-		return -1;
-	}
-
-	mpp_err_msg("INFO", "ddboost", "opening LB on %s\n", filepath);
-	if ((iError = clb_open(filepath, NULL, 0 /*reserved*/,LB))!=NO_ERR)
-	{
-		clb_getErrorMessage(iError,&eMsg);
-		mpp_err_msg("ERROR", "ddboost", "%s\n", eMsg);
-		clb_free(eMsg);
-		return iError;
-	};
-	return 0;
-}
 
 /*
  * Write the hostname, user, password, log_level and log_size to the LB
@@ -1441,84 +992,169 @@ openLB(clbHandle* LB,char* name)
 int
 setDDBoostCredential(char *hostname, char *user, char *password, char* log_level ,char* log_size, char *default_backup_directory, char *ddboost_storage_unit, bool remote)
 {
-	/* TODO: validate default backup directory name if needed 
-	   TODO: validate storage unit
-	*/
-	if (validateDDBoostCredential(hostname, user, password, log_level , log_size, default_backup_directory, remote))
-		return -1;
+#define MAX_ITEMS 7
+	lockbox_content content;
+	lockbox_item items[MAX_ITEMS];
+	int			nitems;
+	char		filepath[MAXPGPATH];
+	char	   *filename;
+	char	   *home;
+	char	   *obfuscated_pw;
 
-	clbHandle LB;
-	if (remote)
-	{
-		if (createLB(&LB, "DDBOOST_MFR_CONFIG"))
-			return -1;
-	}
-	else
-	{
-		if (createLB(&LB, "DDBOOST_CONFIG"))
-			return -1;
-	}
-	if (setItem(&LB , "hostname",hostname))
-		return -1;
-	if (setItem(&LB , "user",user))
-		return -1;
-	if (setItem(&LB , "password",password))
-		return -1;
+	/*
+	 * TODO: validate default backup directory name if needed
+	 * TODO: validate storage unit
+	 */
+	if (validateDDBoostCredential(hostname, user, password,
+								  log_level, log_size,
+								  default_backup_directory, remote))
+		return -1;	/* validateDDBoostCredential() reported an error to user already */
 
-	int ret_code = 0;
+	obfuscated_pw = lb_obfuscate(password);
+	if (!obfuscated_pw)
+		return -1;	/* lb_obfuscate() reported an error to user already */
+
+	nitems = 0;
+
+	items[nitems].key = "hostname";
+	items[nitems].value = hostname;
+	nitems++;
+
+	items[nitems].key = "user";
+	items[nitems].value = user;
+	nitems++;
+
+	items[nitems].key = "password";
+	items[nitems].value = obfuscated_pw;
+	nitems++;
+
 	if (!remote)
 	{
-		ret_code |= setItem(&LB , "default_backup_directory",default_backup_directory);
-		ret_code |= setItemWithDefault(&LB, "ddboost_storage_unit", ddboost_storage_unit, DEFAULT_STORAGE_UNIT);
+		items[nitems].key = "default_backup_directory";
+		items[nitems].value = default_backup_directory;
+		nitems++;
+
+		items[nitems].key = "ddboost_storage_unit";
+		items[nitems].value = ddboost_storage_unit ? ddboost_storage_unit : DEFAULT_STORAGE_UNIT;
+		nitems++;
 	}
 
-	ret_code |= setItemWithDefault(&LB, "log_level", log_level, "WARNING");
-	ret_code |= setItemWithDefault(&LB, "log_size", log_size, "50");
+	items[nitems].key = "log_level";
+	items[nitems].value = log_level ? log_level : "WARNING";
+	nitems++;
 
-	clb_close(LB);
+	items[nitems].key = "log_size";
+	items[nitems].value = log_size ? log_size : "60";
+	nitems++;
 
-	return ret_code;
-}
+	assert(nitems <= MAX_ITEMS);
+	content.items = items;
+	content.nitems = nitems;
 
-int
-getDDBoostCredential(char** hostname, char** user, char** password, char **log_level ,char** log_size, char **default_backup_directory, char **ddboost_storage_unit, bool remote)
-{
-	clbHandle LB;
+	/* Store the credentials file to home directory */
+	home = getenv("HOME");
+	if (home == NULL)
+	{
+		mpp_err_msg("ERROR", "ddboost", "HOME undefined, can't set ddboost credentials\n");
+		return -1;
+	}
 
 	if (remote)
-	{
-		if (openLB(&LB,"DDBOOST_MFR_CONFIG"))
-			return -1;
-	}
+		filename = "DDBOOST_MFR_CONFIG";
 	else
+		filename = "DDBOOST_CONFIG";
+	if (snprintf(filepath, MAXPGPATH, "%s/%s", home, filename) >= MAXPGPATH)
 	{
-		if (openLB(&LB,"DDBOOST_CONFIG"))
-			return -1;
+		mpp_err_msg("ERROR", "ddboost", "path \"%s/%s\" is too long\n", home, filename);
+		return -1;
 	}
-	if (getItem(&LB , "hostname",hostname))
-		return -1;
-	if (getItem(&LB , "user",user))
-		return -1;
-	if (getItem(&LB , "password",password))
-		return -1;
-	if (!remote)
-	{
-		if (getItem(&LB , "default_backup_directory", default_backup_directory))
-			return -1;
 
-		if (getItem(&LB , "ddboost_storage_unit", ddboost_storage_unit))
-			return -1;
-	}
-	if (getItem(&LB , "log_level",log_level))
-		return -1;
-	if (getItem(&LB , "log_size",log_size))
-		return -1;
+	if (lb_store(filepath, &content))
+		return -1;	/* lb_store() reported an error to user already */
 
-	clb_close(LB);
 	return 0;
 }
 
+
 int
+getDDBoostCredential(char **hostname, char **user, char **password,
+					 char **log_level, char **log_size,
+					 char **default_backup_directory,
+					 char **ddboost_storage_unit,
+					 bool remote)
+{
+	char		filepath[MAXPGPATH];
+	char	   *home;
+	char	   *filename;
+	char	   *obfuscated_pw;
+	lockbox_content *content;
+
+
+	/* Load the credentials file from home directory */
+	home = getenv("HOME");
+	if (home == NULL)
+	{
+		mpp_err_msg("ERROR", "ddboost", "HOME undefined, can't set ddboost credentials\n");
+		return -1;
+	}
+
+	if (remote)
+		filename = "DDBOOST_MFR_CONFIG";
+	else
+		filename = "DDBOOST_CONFIG";
+	if (snprintf(filepath, MAXPGPATH, "%s/%s", home, filename) >= MAXPGPATH)
+	{
+		mpp_err_msg("ERROR", "ddboost", "path \"%s/%s\" is too long\n", home, filename);
+		return -1;
+	}
+
+	mpp_err_msg("INFO", "ddboost", "opening LB on %s\n", filepath);
+
+	content = lb_load(filepath);
+	if (!content)
+		return -1;	/* lb_load() reported an error already */
+
+	/* Extract the fields we expect the file to contain. */
+
+	*hostname = lb_get_item_or_error(content, "hostname", filepath);
+	if (*hostname == NULL)
+		return -1;	/* lb_get_item_or_error() reported an error already */
+
+	*user = lb_get_item_or_error(content, "user", filepath);
+	if (*user == NULL)
+		return -1;	/* lb_get_item_or_error() reported an error already */
+
+	obfuscated_pw = lb_get_item_or_error(content, "password", filepath);
+	if (obfuscated_pw == NULL)
+		return -1;	/* lb_get_item_or_error() reported an error already */
+
+	*password = lb_deobfuscate(obfuscated_pw);
+	if (*password == NULL)
+		return -1;	/* lb_deobfuscate() reported an error already */
+
+	if (!remote)
+	{
+		*default_backup_directory = lb_get_item_or_error(content, "default_backup_directory", filepath);
+		if (*default_backup_directory == NULL)
+			return -1;	/* lb_get_item_or_error() reported an error already */
+
+		*ddboost_storage_unit = lb_get_item_or_error(content, "ddboost_storage_unit", filepath);
+		if (*ddboost_storage_unit == NULL)
+			return -1;	/* lb_get_item_or_error() reported an error already */
+	}
+
+	*log_level = lb_get_item_or_error(content, "log_level", filepath);
+	if (*log_level == NULL)
+		return -1;	/* lb_get_item_or_error() reported an error already */
+
+	*log_size = lb_get_item_or_error(content, "log_size", filepath);
+	if (*log_size == NULL)
+		return -1;	/* lb_get_item_or_error() reported an error already */
+
+	return 0;
+}
+
+static int
 validateDDBoostCredential(char *hostname, char *user, char *password, char* log_level ,char* log_size, char * default_backup_directory, bool remote)
 {
 	if (!user)
@@ -1576,111 +1212,9 @@ validateDDBoostCredential(char *hostname, char *user, char *password, char* log_
 	return 0;
 }
 
-int
-parseDDBoostCredential(char *hostname, char *user, char *password, const char *progName)
-{
-	char filepath[PATH_MAX];
-	char *home = getenv("HOME");
-	char line[PATH_MAX];
-
-	if (NULL == home)
-	{
-		mpp_err_msg("ERROR", progName, "HOME undefined, can't set ddboost credentials\n");
-		return -1;
-	}
-
-	memset(filepath, 0, PATH_MAX);
-	snprintf(filepath, strlen(home) + strlen(DDBOOST_CONFIG_FILE) + 2, "%s/%s", home, DDBOOST_CONFIG_FILE);
-
-	memset(line, 0, PATH_MAX);
-	memset(hostname, 0, PATH_MAX);
-	memset(user, 0, PATH_MAX);
-	memset(password, 0, PATH_MAX);
-
-	FILE *fp = fopen(filepath, "r");
-	if (!fp)
-	{
-		mpp_err_msg("ERROR", progName, "error opening DD Boost credential config file %s\n", filepath);
-		return -1;
-	}
-
-	if (!fgets(line, PATH_MAX, fp))
-	{
-		mpp_err_msg("ERROR", progName, "end of DD Boost config file, missing hostname\n");
-		return -1;
-	}
-	strncpy(hostname, line, strlen(line) - 1);
-	memset(line, 0, PATH_MAX);
-
-	if (!fgets(line, PATH_MAX, fp))
-	{
-		mpp_err_msg("ERROR", progName, "end of DD Boost config file, missing user name \n");
-		return -1;
-	}
-	if (strlen(line) > (DDBOOST_USERNAME_MAXLENGTH + 1) || strlen(line) < 2)
-	{
-		mpp_err_msg("ERROR", progName, "username too long or too short, user name is limited to 30 characters\n");
-		return -1;
-	}
-	strncpy(user, line, strlen(line) - 1);
-	memset(line, 0, PATH_MAX);
-
-	if (!fgets(line, PATH_MAX, fp))
-	{
-		mpp_err_msg("ERROR", progName, "end of DD Boost config file, missing password\n");
-		return -1;
-	}
-	if (strlen(line) > (DDBOOST_PASSWORD_MAXLENGTH + 1) || strlen(line) < 2)
-	{
-		mpp_err_msg("ERROR", progName, "password too long or too short, password is limited to 40 characters\n");
-		return -1;
-	}
-	strncpy(password, line, strlen(line) - 1);
-
-
-	if (!fgets(line, PATH_MAX, fp))
-	{
-		mpp_err_msg("INFO", progName, "end of DD Boost config file, using defaults log param (level = WARN, size = 50MB) \n");
-		ddboost_logs_info.logLevel = DDP_SEV_WARN;
-		ddboost_logs_info.logsSize = 50*1024*1024;
-		return 0;
-	}
-	if (!strncmp("INFO",line,4))
-		ddboost_logs_info.logLevel = DDP_SEV_INFO;
-	else if (!strncmp("WARN",line,4))
-		ddboost_logs_info.logLevel = DDP_SEV_WARN;
-	else if (!strncmp("DEBUG",line,5))
-		ddboost_logs_info.logLevel = DDP_SEV_DEBUG;
-	else if (!strncmp("ERROR",line,5))
-		ddboost_logs_info.logLevel = DDP_SEV_ERROR;
-	else if (!strncmp("NONE",line,4))
-		ddboost_logs_info.logLevel = DDP_SEV_NONE;
-	else
-	{
-		mpp_err_msg("ERROR", progName, "Illegal value for log level: %s, please use INFO, WARN, DEBUG, ERROR or NONE\n",line);
-		return -1;
-	}
-	mpp_err_msg("INFO", progName, "DD log level = %u \n",ddboost_logs_info.logLevel);
-
-
-	if (!fgets(line, PATH_MAX, fp))
-	{
-		mpp_err_msg("INFO", progName, "end of DD Boost config file, using defaults log size = 50(MB) \n");
-		return 0;
-	}
-	int size = atoi(line);
-	if (size < 1 || size > 1000)
-	{
-		mpp_err_msg("ERROR", progName, "Illegal value for log size(MB): %s, please use size between 1 and 1000\n",line);
-		return -1;
-	}
-	ddboost_logs_info.logsSize = size * 1024 * 1024;
-	mpp_err_msg("INFO", progName, "DD log size = %u(bytes) \n",ddboost_logs_info.logsSize);
-	return 0;
-}
-
 /* if the file too long this will rotate the files_name to file_name_0 - .._10 . the last file is deleted*/
-void rotate_dd_logs(const char *file_name, unsigned int num_of_files, unsigned int log_size)
+void
+rotate_dd_logs(const char *file_name, unsigned int num_of_files, unsigned int log_size)
 {
     struct stat st;
 
@@ -1713,6 +1247,7 @@ void rotate_dd_logs(const char *file_name, unsigned int num_of_files, unsigned i
     else
         mpp_err_msg("INFO","rotate_dd_logs","failed to find size");
 }
+
 /* Initialize the file for logging DDboost related information */
 void
 _ddp_test_log(const void *session_ptr, const ddp_char_t *log_msg, ddp_severity_t severity)
@@ -1820,48 +1355,6 @@ initDDSystem(ddp_inst_desc_t *ddp_inst, ddp_conn_desc_t *ddp_conn, ddp_client_in
 	return 0;
 }
 
-void
-formDDBoostPsqlCommandLine(char** retVal, bool compUsed, const char* ddboostPg, const char* compProg,
-							const char* ddp_file_name, const char* dd_boost_buf_size,
-							const char* filter_script, const char* table_filter_file,
-							int role, const char* psqlPg, bool postSchemaOnly,
-							const char* change_schema_file, const char *schema_level_file,
-							const char* ddboost_storage_unit)
-{
-	char* pszCmdLine = *retVal;
-
-	strcpy(pszCmdLine, ddboostPg);
-	strcat(pszCmdLine, " --readFile");
-	strcat(pszCmdLine, " --from-file=");
-	strcat(pszCmdLine, ddp_file_name);
-	if(compUsed)
-	{
-		strcat(pszCmdLine, ".gz");
-	}
-
-	if (ddboost_storage_unit)
-	{
-		strcat(pszCmdLine, " --ddboost-storage-unit=");
-		strcat(pszCmdLine, ddboost_storage_unit);
-	}
-
-	strcat(pszCmdLine, " --dd_boost_buf_size=");
-	strcat(pszCmdLine, dd_boost_buf_size);
-
-	if(compUsed)
-	{
-		strcat(pszCmdLine, " | ");
-		strcat(pszCmdLine, compProg);
-	}
-
-	if (postSchemaOnly)
-		formPostDataFilterCommandLine(&pszCmdLine, filter_script, table_filter_file, change_schema_file, schema_level_file);
-	else
-		formFilterCommandLine(&pszCmdLine, filter_script, table_filter_file, role, change_schema_file, schema_level_file);
-
-	strcat(pszCmdLine, " | ");
-	strcat(pszCmdLine, psqlPg);
-}
 
 #endif
 
@@ -1935,12 +1428,14 @@ insertIntoHashTable(Oid o, char t)
     return 0;
 }
 
-int hashFunc(Oid k)
+int
+hashFunc(Oid k)
 {
     return k % HASH_TABLE_SIZE;
 }
 
-char getTypstorage(Oid o)
+char
+getTypstorage(Oid o)
 {
     int index  = hashFunc(o);
     Node *temp = hash_table[index];
@@ -1955,7 +1450,8 @@ char getTypstorage(Oid o)
     return EMPTY_TYPSTORAGE;
 }
 
-int removeNode(Oid o)
+int
+removeNode(Oid o)
 {
     int index = hashFunc(o);
 
@@ -1987,7 +1483,8 @@ int removeNode(Oid o)
     return -1;
 }
 
-void cleanUpTable()
+void
+cleanUpTable()
 {
 
     int i = 0;
@@ -2022,31 +1519,37 @@ void cleanUpTable()
  * The return value of this function is the data area from excapeBuf.
  */
 char *
-shellEscape(const char *shellArg, PQExpBuffer escapeBuf)
+shellEscape(const char *shellArg, PQExpBuffer escapeBuf, bool addQuote, bool reset)
 {
-        const char *s = shellArg;
-        const char      escape = '\\';
+	const char *s = shellArg;
+	const char	escape = '\\';
 
-        resetPQExpBuffer(escapeBuf);
+	if (reset)
+		resetPQExpBuffer(escapeBuf);
 
-        /*
-         * Copy the shellArg into the escapeBuf prepending any characters
-         * requiring an escape with the escape character.
-         */
-        while (*s != '\0')
-        {
-                switch (*s)
-                {
-                        case '"':
-                        case '$':
-                        case '\\':
-                        case '`':
-                        case '!':
-                                appendPQExpBufferChar(escapeBuf, escape);
-                }
-                appendPQExpBufferChar(escapeBuf, *s);
-                s++;
-        }
+	if (addQuote)
+		appendPQExpBufferChar(escapeBuf, '\"');
+	/*
+	 * Copy the shellArg into the escapeBuf prepending any characters
+	 * requiring an escape with the escape character.
+	 */
+	while (*s != '\0')
+	{
+		switch (*s)
+		{
+			case '"':
+			case '$':
+			case '\\':
+			case '`':
+			case '!':
+				appendPQExpBufferChar(escapeBuf, escape);
+		}
+		appendPQExpBufferChar(escapeBuf, *s);
+		s++;
+	}
 
-        return escapeBuf->data;
+	if (addQuote)
+		appendPQExpBufferChar(escapeBuf, '\"');
+
+	return escapeBuf->data;
 }

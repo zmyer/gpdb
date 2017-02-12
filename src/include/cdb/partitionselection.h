@@ -44,10 +44,14 @@ typedef struct SelectedParts
 	List *scanIds;
 } SelectedParts;
 
-extern PartitionSelectorState *initPartitionSelection(bool isRunTime, PartitionSelector *node, EState *estate);
+extern PartitionSelectorState *initPartitionSelection(PartitionSelector *node, EState *estate);
 extern void getPartitionNodeAndAccessMethod(Oid rootOid, List *partsMetadata, MemoryContext memoryContext,
 											PartitionNode **partsAndRules, PartitionAccessMethods **accessMethods);
 extern SelectedParts *processLevel(PartitionSelectorState *node, int level, TupleTableSlot *inputTuple);
 extern SelectedParts *static_part_selection(PartitionSelector *ps);
+
+extern AttrNumber *varattnos_map(TupleDesc oldtd, TupleDesc newtd);
+extern void change_varattnos_of_a_node(Node *node, const AttrNumber *newattno);
+extern void change_varattnos_of_a_varno(Node *node, const AttrNumber *newattno, Index varno);
 
 #endif   /* PARTITIONSELECTION_H */

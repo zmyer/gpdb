@@ -157,8 +157,10 @@ typedef struct AOSegfileStatus
 	 * transaction id
 	 */
 	DistributedTransactionId latestWriteXid;
-	
+
 	AOSegfileState state;
+
+	int16			formatversion;
 
 	/* if true - never insert into this segno anymore */ 	
 	bool			isfull;	   	
@@ -205,12 +207,12 @@ extern AppendOnlyWriterData	*AppendOnlyWriter;
 extern Size AppendOnlyWriterShmemSize(void);
 extern void InitAppendOnlyWriter(void);
 extern Size AppendOnlyWriterShmemSize(void);
-extern int  SetSegnoForWrite(int existingsegno, Oid relid);
+extern int  SetSegnoForWrite(Relation rel, int existingsegno);
 extern void RegisterSegnoForCompactionDrop(Oid relid, List *compactedSegmentFileList);
 extern void DeregisterSegnoForCompactionDrop(Oid relid, List *compactedSegmentFileList);
-extern List *SetSegnoForCompaction(Oid relid, List *compactedSegmentFileList,
+extern List *SetSegnoForCompaction(Relation rel, List *compactedSegmentFileList,
 		List *insertedSegmentFileList, bool *isdrop);
-extern int SetSegnoForCompactionInsert(Oid relid, List *compacted_segno,
+extern int SetSegnoForCompactionInsert(Relation rel, List *compacted_segno,
 		List *compactedSegmentFileList,
 		List *insertedSegmentFileList);
 extern List *assignPerRelSegno(List *all_rels);

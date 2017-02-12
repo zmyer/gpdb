@@ -121,7 +121,7 @@ class MockFile(object):
         self.outname = self.output_filename()
 
     def output_filename(self):
-        """outname is cdb-pg/src/test/unit/mock/backend/{path}/{stem}_mock.c
+        """outname is src/test/unit/mock/backend/{path}/{stem}_mock.c
         """
         src_dir = self.options.src_dir
         relpath = os.path.relpath(self.cfile.path, src_dir)
@@ -250,7 +250,10 @@ class FuncSignature(object):
                 continue
             elif not self.is_pointer_type(arg[0]):
                 continue
+            argtype = arg[0]
+            argname = arg[1]
             ref = '&' if special.ByValStructs.has(argtype) else ''
+            argname = subscript.sub('', argname)
             buf.append('\toptional_assignment({ref}{arg});'.format(ref=ref, arg=argname))
 
         # Currently, local function doesn't check arguments.

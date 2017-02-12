@@ -12,6 +12,8 @@
 #ifndef CODEGEN_WRAPPER_H_
 #define CODEGEN_WRAPPER_H_
 
+#include <stddef.h>
+
 #include "pg_config.h"
 #include "c.h"
 
@@ -26,19 +28,36 @@ typedef int64 Datum;
  */
 struct TupleTableSlot;
 struct ProjectionInfo;
+struct ExprContext;
+struct ExprState;
+struct PlanState;
+struct AggState;
+struct MemoryManagerContainer;
+struct AggStatePerGroupData;
+/*
+ * Enum used to mimic ExprDoneCond in ExecEvalExpr function pointer.
+ */
+typedef enum tmp_enum{
+	TmpResult
+}tmp_enum;
 
+typedef void (*AdvanceAggregatesFn) (struct AggState *aggstate, /*struct AggStatePerGroup*/struct AggStatePerGroupData *pergroup, struct MemoryManagerContainer *mem_manager);
 typedef void (*ExecVariableListFn) (struct ProjectionInfo *projInfo, Datum *values, bool *isnull);
+typedef Datum (*ExecEvalExprFn) (struct ExprState *expression, struct ExprContext *econtext, bool *isNull, /*ExprDoneCond*/ tmp_enum *isDone);
+typedef Datum (*SlotGetAttrFn) (struct TupleTableSlot *slot, int attnum, bool *isnull);
 
 #ifndef USE_CODEGEN
 
-#define InitCodegen();
-#define CodeGeneratorManagerCreate(module_name) NULL
-#define CodeGeneratorManagerGenerateCode(manager);
-#define CodeGeneratorManagerPrepareGeneratedFunctions(manager) 1
-#define CodeGeneratorManagerNotifyParameterChange(manager) 1
-#define CodeGeneratorManagerDestroy(manager);
-#define GetActiveCodeGeneratorManager() NULL
-#define SetActiveCodeGeneratorManager(manager);
+#define InitCodegen() ((void) 1)
+#define CodeGeneratorManagerCreate(module_name) ((void *) NULL)
+#define CodeGeneratorManagerGenerateCode(manager) ((unsigned int) 1)
+#define CodeGeneratorManagerPrepareGeneratedFunctions(manager) ((unsigned int) 1)
+#define CodeGeneratorManagerNotifyParameterChange(manager) ((unsigned int) 1)
+#define CodeGeneratorManagerAccumulateExplainString(manager) ((void) 1)
+#define CodeGeneratorManagerGetExplainString(manager) ((char *) NULL)
+#define CodeGeneratorManagerDestroy(manager) ((void) 1)
+#define GetActiveCodeGeneratorManager() ((void *) NULL)
+#define SetActiveCodeGeneratorManager(manager) ((void) 1)
 
 #define START_CODE_GENERATOR_MANAGER(newManager)
 #define END_CODE_GENERATOR_MANAGER()
@@ -46,7 +65,8 @@ typedef void (*ExecVariableListFn) (struct ProjectionInfo *projInfo, Datum *valu
 #define init_codegen()
 #define call_ExecVariableList(projInfo, values, isnull) ExecVariableList(projInfo, values, isnull)
 #define enroll_ExecVariableList_codegen(regular_func, ptr_to_chosen_func, proj_info, slot)
-
+#define call_AdvanceAggregates(aggstate, pergroup, mem_manager) advance_aggregates(aggstate, pergroup, mem_manager)
+#define enroll_AdvanceAggregates_codegen(regular_func, ptr_to_chosen_func, aggstate)
 #else
 
 /*
@@ -117,6 +137,19 @@ void
 CodeGeneratorManagerDestroy(void* manager);
 
 /*
+ * Accumulate the explain string with a dump of all the underlying LLVM modules
+ */
+void
+CodeGeneratorManagerAccumulateExplainString(void* manager);
+
+/*
+ * Return a copy in CurrentMemoryContext of the previously accumulated explain
+ * string
+ */
+char*
+CodeGeneratorManagerGetExplainString(void* manager);
+
+/*
  * Get the active code generator manager
  */
 void*
@@ -129,6 +162,30 @@ void
 SetActiveCodeGeneratorManager(void* manager);
 
 /*
+ * Wrapper function for slot_getattr.
+ */
+Datum
+slot_getattr_regular(struct TupleTableSlot *slot, int attnum, bool *isnull);
+
+/*
+ * Wrapper function for att_align_nominal.
+ */
+int
+att_align_nominal_regular(int cur_offset, char attalign);
+
+/*
+ * Wrapper function for SET_VARSIZE.
+ */
+void
+SET_VARSIZE_regular(void* ptr, size_t len);
+
+/*
+ * Wrapper function for VARSIZE.
+ */
+uint32
+VARSIZE_regular(void* ptr);
+
+/*
  * returns the pointer to the ExecVariableList
  */
 void*
@@ -136,6 +193,24 @@ ExecVariableListCodegenEnroll(ExecVariableListFn regular_func_ptr,
                               ExecVariableListFn* ptr_to_regular_func_ptr,
                               struct ProjectionInfo* proj_info,
                               struct TupleTableSlot* slot);
+
+/*
+ * Enroll and returns the pointer to ExecEvalExprGenerator
+ */
+void*
+ExecEvalExprCodegenEnroll(ExecEvalExprFn regular_func_ptr,
+                          ExecEvalExprFn* ptr_to_regular_func_ptr,
+                          struct ExprState *exprstate,
+                          struct ExprContext *econtext,
+                          struct PlanState* plan_state);
+
+/*
+ * Enroll and returns the pointer to AdvanceAggregateGenerator
+ */
+void*
+AdvanceAggregatesCodegenEnroll(AdvanceAggregatesFn regular_func_ptr,
+		AdvanceAggregatesFn* ptr_to_regular_func_ptr,
+		struct AggState *aggstate);
 
 #ifdef __cplusplus
 }  // extern "C"
@@ -186,6 +261,14 @@ ExecVariableListCodegenEnroll(ExecVariableListFn regular_func_ptr,
  */
 #define call_ExecVariableList(projInfo, values, isnull) \
 		projInfo->ExecVariableList_gen_info.ExecVariableList_fn(projInfo, values, isnull)
+
+/*
+ * Call AdvanceAggregates using function pointer AdvanceAggregates_fn.
+ * Function pointer may point to regular version or generated function
+ */
+#define call_AdvanceAggregates(aggstate, pergroup, mem_manager) \
+		aggstate->AdvanceAggregates_gen_info.AdvanceAggregates_fn(aggstate, pergroup, mem_manager)
+
 /*
  * Enrollment macros
  * The enrollment process also ensures that the generated function pointer
@@ -195,6 +278,16 @@ ExecVariableListCodegenEnroll(ExecVariableListFn regular_func_ptr,
 		proj_info->ExecVariableList_gen_info.code_generator = ExecVariableListCodegenEnroll( \
 				regular_func, ptr_to_regular_func_ptr, proj_info, slot); \
 		Assert(proj_info->ExecVariableList_gen_info.ExecVariableList_fn == regular_func); \
+
+#define enroll_ExecEvalExpr_codegen(regular_func, ptr_to_regular_func_ptr, exprstate, econtext, plan_state) \
+		exprstate->ExecEvalExpr_code_generator = ExecEvalExprCodegenEnroll( \
+        (ExecEvalExprFn)regular_func, (ExecEvalExprFn*)ptr_to_regular_func_ptr, exprstate, econtext, plan_state); \
+        Assert(exprstate->evalfunc == regular_func); \
+
+#define enroll_AdvanceAggregates_codegen(regular_func, ptr_to_regular_func_ptr, aggstate) \
+		aggstate->AdvanceAggregates_gen_info.code_generator = AdvanceAggregatesCodegenEnroll( \
+				regular_func, ptr_to_regular_func_ptr, aggstate); \
+				Assert(aggstate->AdvanceAggregates_gen_info.AdvanceAggregates_fn == regular_func); \
 
 #endif //USE_CODEGEN
 

@@ -19,11 +19,14 @@
 #include "catalog/gp_segment_config.h"
 #include "cdb/cdbvars.h"
 #include "cdb/cdbfts.h"
+#include "cdb/cdbdisp.h"
 #include "cdb/cdbutil.h"
+#include "cdb/cdbdisp.h"
 #include "lib/stringinfo.h"
 #include "libpq/libpq-be.h"
 #include "utils/memutils.h"
 #include "storage/bfz.h"
+#include "storage/proc.h"
 #include "cdb/memquota.h"
 
 /*
@@ -37,82 +40,85 @@
 
 
 
-GpRoleValue Gp_role;			/* Role paid by this Greenplum Database backend */
-char	   *gp_role_string;	/* Staging area for guc.c */
-char	   *gp_fault_action_string;	/* Staging area for guc.c */
+GpRoleValue Gp_role;			/* Role paid by this Greenplum Database
+								 * backend */
+char	   *gp_role_string;		/* Staging area for guc.c */
+char	   *gp_fault_action_string;		/* Staging area for guc.c */
 bool		gp_set_read_only;	/* Staging area for guc.c */
 
-GpRoleValue Gp_session_role;	/* Role paid by this Greenplum Database backend */
-char	   *gp_session_role_string;	/* Staging area for guc.c */
+GpRoleValue Gp_session_role;	/* Role paid by this Greenplum Database
+								 * backend */
+char	   *gp_session_role_string;		/* Staging area for guc.c */
 
-bool		Gp_is_writer; 		/* is this qExec a "writer" process. */
+bool		Gp_is_writer;		/* is this qExec a "writer" process. */
 
-int 		gp_session_id;    /* global unique id for session. */
+int			gp_session_id;		/* global unique id for session. */
 
+char	   *qdHostname;			/* QD hostname */
+int			qdPostmasterPort;	/* Master Segment Postmaster port. */
 
-char		*qdHostname;		/*QD hostname */
-int			qdPostmasterPort;	/*Master Segment Postmaster port. */
-char       *gp_qd_callback_info;	/* info for QE to call back to QD */
+int			gp_command_count;	/* num of commands from client */
 
-bool 		gp_is_callback;		/* are we executing a callback query? */
-
-bool		gp_use_dispatch_agent;	/* Use experimental code for Query Dispatch Agent */
-
-int         gp_command_count;          /* num of commands from client */
-
-bool        gp_debug_pgproc;           /* print debug info for PGPROC */
+bool		gp_debug_pgproc;	/* print debug info for PGPROC */
 bool		Debug_print_prelim_plan;	/* Shall we log argument of
 										 * cdbparallelize? */
 
 bool		Debug_print_slice_table;	/* Shall we log the slice table? */
 
-bool		Debug_print_dispatch_plan;	/* Shall we log the plan we'll dispatch? */
+bool		gp_backup_directIO = false; /* disable\enable direct I/O dump */
 
-bool		Debug_print_plannedstmt;	/* Shall we log the final planned statement? */
+int			gp_backup_directIO_read_chunk_mb = 20;		/* size of readChunk
+														 * buffer for directIO
+														 * dump */
 
-bool            gp_backup_directIO = false;     /* disable\enable direct I/O dump */
+bool		gp_external_enable_exec = true;		/* allow ext tables with
+												 * EXECUTE */
 
-int             gp_backup_directIO_read_chunk_mb = 20; /* size of readChunk buffer for directIO dump */
+bool		gp_external_grant_privileges = false;		/* allow creating
+														 * http/gpfdist/gpfdists
+														 * for non-su */
 
-bool		gp_external_enable_exec = true; /* allow ext tables with EXECUTE */
+int			gp_external_max_segs;		/* max segdbs per gpfdist/gpfdists URI */
 
-bool		gp_external_grant_privileges = false; /* allow creating http/gpfdist/gpfdists for non-su */
+int			gp_safefswritesize; /* set for safe AO writes in non-mature fs */
 
-int			gp_external_max_segs;      /* max segdbs per gpfdist/gpfdists URI */
-
-int			gp_safefswritesize;  /* set for safe AO writes in non-mature fs */
-
-int			gp_connections_per_thread; /* How many libpq connections are
+int			gp_connections_per_thread;	/* How many libpq connections are
 										 * handled in each thread */
 
-int			gp_cached_gang_threshold; /*How many gangs to keep around from stmt to stmt.*/
+int			gp_cached_gang_threshold;	/* How many gangs to keep around from
+										 * stmt to stmt. */
 
-int			Gp_segment = UNDEF_SEGMENT;		/* What content this QE is
-												 * handling. */
+int			Gp_segment = UNDEF_SEGMENT; /* What content this QE is handling. */
 
 bool		Gp_write_shared_snapshot;	/* tell the writer QE to write the
 										 * shared snapshot */
 
-bool		gp_reraise_signal=false;	/* try to dump core when we get SIGABRT & SIGSEGV */
+bool		gp_reraise_signal = false;	/* try to dump core when we get
+										 * SIGABRT & SIGSEGV */
 
-bool		gp_version_mismatch_error=true;	/* Enforce same-version on QD&QE. */
+bool		gp_set_proc_affinity = false;		/* set processor affinity (if
+												 * platform supports it) */
 
-bool		gp_set_proc_affinity=false; /* set processor affinity (if platform supports it) */
+int			gp_reject_percent_threshold;		/* SREH reject % kicks off
+												 * only after * <num> records
+												 * have been processed	*/
 
-int			gp_reject_percent_threshold; /* SREH reject % kicks off only after *
-										  * <num> records have been processed  */
+int			gp_max_csv_line_length;		/* max allowed len for csv data line
+										 * in bytes */
 
-int			gp_max_csv_line_length;		/* max allowed len for csv data line in bytes */
+bool		gp_select_invisible = false;		/* debug mode to allow select
+												 * to see "invisible" rows */
 
-bool          gp_select_invisible=false; /* debug mode to allow select to see "invisible" rows */
-
-int			pgstat_track_activity_query_size=INT_MAX; /* max allowed len for displaying the query in pg_stat_activity table */
+int			pgstat_track_activity_query_size = INT_MAX; /* max allowed len for
+														 * displaying the query
+														 * in pg_stat_activity
+														 * table */
 
 /*
  * Configurable timeout for snapshot add: exceptionally busy systems may take
  * longer than our old hard-coded version -- so here is a tuneable version.
  */
-int			gp_snapshotadd_timeout=10;
+int			gp_snapshotadd_timeout = 10;
 
 
 /*
@@ -129,13 +135,13 @@ int			gp_fts_probe_timeout = 20;
  * Polling interval for the fts prober. A scan of the entire system starts
  * every time this expires.
  */
-int			gp_fts_probe_interval=60;
+int			gp_fts_probe_interval = 60;
 
 /*
  * Number of threads to use for probe of segments (it is a good idea to have this
  * larger than the number of segments per host.
  */
-int			gp_fts_probe_threadcount=16;
+int			gp_fts_probe_threadcount = 16;
 
 /*
  * Controls parallel segment transition (failover).
@@ -143,18 +149,18 @@ int			gp_fts_probe_threadcount=16;
 bool		gp_fts_transition_parallel = true;
 
 /* The number of retries to request a segment state transition. */
-int gp_fts_transition_retries = 5;
+int			gp_fts_transition_retries = 5;
 
 /* Timeout to request a segment state transition. */
-int gp_fts_transition_timeout = 3600;
+int			gp_fts_transition_timeout = 3600;
 
 
 /*
  * When we have certain types of failures during gang creation which indicate
  * that a segment is in recovery mode we may be able to retry.
  */
-int		gp_gang_creation_retry_count = 5; /* disable by default */
-int		gp_gang_creation_retry_timer = 2000; /* 2000ms */
+int			gp_gang_creation_retry_count = 5;	/* disable by default */
+int			gp_gang_creation_retry_timer = 2000;		/* 2000ms */
 
 /*
  * gp_enable_slow_writer_testmode
@@ -162,7 +168,7 @@ int		gp_gang_creation_retry_timer = 2000; /* 2000ms */
  * In order facilitate testing of reader-gang/writer-gang synchronization,
  * this inserts a pg_usleep call at the start of writer-gang processing.
  */
-bool	gp_enable_slow_writer_testmode = false;
+bool		gp_enable_slow_writer_testmode = false;
 
 /*
  * gp_enable_slow_cursor_testmode
@@ -170,25 +176,12 @@ bool	gp_enable_slow_writer_testmode = false;
  * In order facilitate testing of reader-gang/writer-gang synchronization,
  * this inserts a pg_usleep call at the start of cursor-gang processing.
  */
-bool	gp_enable_slow_cursor_testmode = false;
-
-/*
- * gp_enable_delete_as_truncate
- *
- * piggy-back a truncate on simple delete statements (statements
- * without qualifiers "delete from foo").
- */
-bool	gp_enable_delete_as_truncate = false;
+bool		gp_enable_slow_cursor_testmode = false;
 
 /**
  * Hash-join node releases hash table when it returns last tuple.
  */
-bool gp_eager_hashtable_release = true;
-
-/*
- * Debug_print_combocid_detail: request details when we hit combocid limits.
- */
-bool	Debug_print_combocid_detail = false;
+bool		gp_eager_hashtable_release = true;
 
 /*
  * TCP port the Interconnect listens on for incoming connections from other
@@ -197,37 +190,35 @@ bool	Debug_print_combocid_detail = false;
  */
 int			Gp_listener_port;
 
-int			Gp_max_packet_size;	/* max Interconnect packet size */
+int			Gp_max_packet_size; /* max Interconnect packet size */
 
-int			Gp_interconnect_queue_depth=4;	/* max number of messages
-											 * waiting in rx-queue
-											 * before we drop.*/
-int			Gp_interconnect_snd_queue_depth=2;
-int			Gp_interconnect_timer_period=5;
-int			Gp_interconnect_timer_checking_period=20;
-int			Gp_interconnect_default_rtt=20;
-int			Gp_interconnect_min_rto=20;
-int			Gp_interconnect_fc_method=INTERCONNECT_FC_METHOD_LOSS;
-int			Gp_interconnect_transmit_timeout=3600;
-int			Gp_interconnect_min_retries_before_timeout=100;
+int			Gp_interconnect_queue_depth = 4;	/* max number of messages
+												 * waiting in rx-queue before
+												 * we drop. */
+int			Gp_interconnect_snd_queue_depth = 2;
+int			Gp_interconnect_timer_period = 5;
+int			Gp_interconnect_timer_checking_period = 20;
+int			Gp_interconnect_default_rtt = 20;
+int			Gp_interconnect_min_rto = 20;
+int			Gp_interconnect_fc_method = INTERCONNECT_FC_METHOD_LOSS;
+int			Gp_interconnect_transmit_timeout = 3600;
+int			Gp_interconnect_min_retries_before_timeout = 100;
 
-int			Gp_interconnect_hash_multiplier=2;	/* sets the size of the hash table used by the UDP-IC */
+int			Gp_interconnect_hash_multiplier = 2;		/* sets the size of the
+														 * hash table used by
+														 * the UDP-IC */
 
-int			interconnect_setup_timeout=7200;
+int			interconnect_setup_timeout = 7200;
 
 int			Gp_interconnect_type = INTERCONNECT_TYPE_UDPIFC;
 
-bool		gp_interconnect_aggressive_retry=true; /* fast-track app-level retry */
+bool		gp_interconnect_full_crc = false;	/* sanity check UDP data. */
 
-bool gp_interconnect_full_crc=false; /* sanity check UDP data. */
+bool		gp_interconnect_log_stats = false;	/* emit stats at log-level */
 
-bool gp_interconnect_elide_setup=true; /* under some conditions we can eliminate the setup */
+bool		gp_interconnect_cache_future_packets = true;
 
-bool gp_interconnect_log_stats=false; /* emit stats at log-level */
-
-bool gp_interconnect_cache_future_packets=true;
-
-int			Gp_udp_bufsize_k; /* UPD recv buf size, in KB */
+int			Gp_udp_bufsize_k;	/* UPD recv buf size, in KB */
 
 #ifdef USE_ASSERT_CHECKING
 /*
@@ -235,42 +226,34 @@ int			Gp_udp_bufsize_k; /* UPD recv buf size, in KB */
  *
  * Dropseg: specifies which segment to apply the drop_percent to.
  */
-int gp_udpic_dropseg = UNDEF_SEGMENT;
-int gp_udpic_dropxmit_percent = 0;
-int gp_udpic_dropacks_percent = 0;
-int gp_udpic_fault_inject_percent = 0;
-int gp_udpic_fault_inject_bitmap = 0;
-int gp_udpic_network_disable_ipv6 = 0;
+int			gp_udpic_dropseg = UNDEF_SEGMENT;
+int			gp_udpic_dropxmit_percent = 0;
+int			gp_udpic_dropacks_percent = 0;
+int			gp_udpic_fault_inject_percent = 0;
+int			gp_udpic_fault_inject_bitmap = 0;
+int			gp_udpic_network_disable_ipv6 = 0;
 #endif
 
 /*
  * Each slice table has a unique ID (certain commands like "vacuum analyze"
  * run many many slice-tables for each gp_command_id).
  */
-uint32 gp_interconnect_id=0;
+uint32		gp_interconnect_id = 0;
 
 /* --------------------------------------------------------------------------------------------------
  * Resource management
  */
 
-/*
- * gp_process_memory_cutoff (real)
- * Deprecated.  Will remove in next release.
- */
-double  gp_process_memory_cutoff;           /* SET/SHOW in units of kB */
-
-
-double gp_hashagg_respill_bias = 1;
+double		gp_hashagg_respill_bias = 1;
 
 /* --------------------------------------------------------------------------------------------------
  * Greenplum Optimizer GUCs
  */
 
-bool        enable_adaptive_nestloop = true;
-double      gp_motion_cost_per_row = 0;
-int         gp_segments_for_planner = 0;
+double		gp_motion_cost_per_row = 0;
+int			gp_segments_for_planner = 0;
 
-int         gp_hashagg_default_nbatches = 32;
+int			gp_hashagg_default_nbatches = 32;
 
 bool		gp_adjust_selectivity_for_outerjoins = TRUE;
 bool		gp_selectivity_damping_for_scans = false;
@@ -284,16 +267,16 @@ int			gp_hashjoin_metadata_memory_percent = 20;
 
 
 /* default value to 0, which means we do not try to control number of spill batches */
-int 		gp_hashagg_spillbatch_min = 0;
-int 		gp_hashagg_spillbatch_max = 0;
+int			gp_hashagg_spillbatch_min = 0;
+int			gp_hashagg_spillbatch_max = 0;
 
 /* hash join to use bloom filter: default to 0, means not used */
-int 	 	gp_hashjoin_bloomfilter = 0;
+int			gp_hashjoin_bloomfilter = 0;
 
 /* Analyzing aid */
-int 		gp_motion_slice_noop = 0;
+int			gp_motion_slice_noop = 0;
 #ifdef ENABLE_LTRACE
-int 		gp_ltrace_flag = 0;
+int			gp_ltrace_flag = 0;
 #endif
 
 /* Internal Features */
@@ -303,17 +286,17 @@ bool		gp_enable_alter_table_inherit_cols = false;
 bool		gp_parquet_insert_sort = true;
 
 /* Greenplum Database Experimental Feature GUCs */
-int         gp_distinct_grouping_sets_threshold = 32;
+int			gp_distinct_grouping_sets_threshold = 32;
 bool		gp_enable_explain_allstat = FALSE;
-bool		gp_enable_motion_deadlock_sanity = FALSE; /* planning time sanity check */
+bool		gp_enable_motion_deadlock_sanity = FALSE;	/* planning time sanity
+														 * check */
 
 #ifdef USE_ASSERT_CHECKING
 bool		gp_mk_sort_check = false;
 #endif
-bool 		trace_sort = false;
 int			gp_sort_flags = 0;
 int			gp_dbg_flags = 0;
-int 		gp_sort_max_distinct = 20000;
+int			gp_sort_max_distinct = 20000;
 
 bool		gp_enable_hash_partitioned_tables = FALSE;
 bool		gp_setwith_alter_storage = FALSE;
@@ -324,69 +307,70 @@ bool		gp_enable_tablespace_auto_mkdir = FALSE;
 bool		gp_create_index_concurrently = FALSE;
 
 /* Enable check for compatibility of encoding and locale in createdb */
-bool gp_encoding_check_locale_compatibility = true;
+bool		gp_encoding_check_locale_compatibility = true;
 
 /* Priority for the segworkers relative to the postmaster's priority */
-int gp_segworker_relative_priority = PRIO_MAX;
+int			gp_segworker_relative_priority = PRIO_MAX;
 
 /* Max size of dispatched plans; 0 if no limit */
 int			gp_max_plan_size = 0;
 
 /* Disable setting of tuple hints while reading */
 bool		gp_disable_tuple_hints = false;
-int		gp_hashagg_compress_spill_files = 0;
+int			gp_hashagg_compress_spill_files = 0;
 
-int gp_workfile_compress_algorithm = 0;
-bool gp_workfile_checksumming = false;
-int gp_workfile_caching_loglevel = DEBUG1;
-int gp_sessionstate_loglevel = DEBUG1;
+int			gp_workfile_compress_algorithm = 0;
+bool		gp_workfile_checksumming = false;
+int			gp_workfile_caching_loglevel = DEBUG1;
+int			gp_sessionstate_loglevel = DEBUG1;
+
 /* Maximum disk space to use for workfiles on a segment, in kilobytes */
-double gp_workfile_limit_per_segment = 0;
+double		gp_workfile_limit_per_segment = 0;
+
 /* Maximum disk space to use for workfiles per query on a segment, in kilobytes */
-double gp_workfile_limit_per_query = 0;
+double		gp_workfile_limit_per_query = 0;
+
 /* Maximum number of workfiles to be created by a query */
-int gp_workfile_limit_files_per_query = 0;
-bool gp_workfile_faultinject = false;
-int gp_workfile_bytes_to_checksum = 16;
+int			gp_workfile_limit_files_per_query = 0;
+bool		gp_workfile_faultinject = false;
+int			gp_workfile_bytes_to_checksum = 16;
 
 /* The type of work files that HashJoin should use */
-int gp_workfile_type_hashjoin = 0;
+int			gp_workfile_type_hashjoin = 0;
 
 /* Gpmon */
-bool gp_enable_gpperfmon = false;
-int gp_gpperfmon_send_interval = 1;
+bool		gp_enable_gpperfmon = false;
+int			gp_gpperfmon_send_interval = 1;
 GpperfmonLogAlertLevel gpperfmon_log_alert_level = GPPERFMON_LOG_ALERT_LEVEL_NONE;
 
 /* Enable single-slice single-row inserts ?*/
-bool		gp_enable_fast_sri=true;
+bool		gp_enable_fast_sri = true;
 
 /* Enable single-mirror pair dispatch. */
-bool		gp_enable_direct_dispatch=true;
+bool		gp_enable_direct_dispatch = true;
 
 /* Disable logging while creating mapreduce objects */
-bool        gp_mapreduce_define=false;
+bool		gp_mapreduce_define = false;
 
 /* request fault-prober pause */
-bool		gp_fts_probe_pause=false;
+bool		gp_fts_probe_pause = false;
 
 /* Force core dump on memory context error */
-bool 		coredump_on_memerror=false;
-
-/* if catquery.c is built with the logquery option, allow caql logging */
-bool		gp_enable_caql_logging = true;
+bool		coredump_on_memerror = false;
 
 /* Experimental feature for MPP-4082. Please read doc before setting this guc */
 GpAutoStatsModeValue gp_autostats_mode;
-char                *gp_autostats_mode_string;
+char	   *gp_autostats_mode_string;
 GpAutoStatsModeValue gp_autostats_mode_in_functions;
-char                *gp_autostats_mode_in_functions_string;
-int                  gp_autostats_on_change_threshold = 100000;
-bool				 log_autostats=true;
+char	   *gp_autostats_mode_in_functions_string;
+int			gp_autostats_on_change_threshold = 100000;
+bool		log_autostats = true;
+
 /* --------------------------------------------------------------------------------------------------
  * Miscellaneous developer use
  */
 
-bool	gp_dev_notice_agg_cost = false;
+bool		gp_dev_notice_agg_cost = false;
 
 /* --------------------------------------------------------------------------------------------------
  * Server debugging
@@ -399,7 +383,7 @@ bool	gp_dev_notice_agg_cost = false;
  * errfinish() will sleep() for the specified number of seconds before
  * termination, to let the user attach a debugger.
  */
-int  gp_debug_linger = 30;
+int			gp_debug_linger = 30;
 
 /* ----------------
  * Non-GUC globals
@@ -411,9 +395,9 @@ int			currentSliceId = UNSET_SLICE_ID;	/* used by elog to show the
 SeqServerControlBlock *seqServerCtl;
 
 /* Segment id where singleton gangs are to be dispatched. */
-int         gp_singleton_segindex;
+int			gp_singleton_segindex;
 
-bool        gp_cost_hashjoin_chainwalk = false;
+bool		gp_cost_hashjoin_chainwalk = false;
 
 /* ----------------
  * This variable is initialized by the postmaster from command line arguments
@@ -421,7 +405,7 @@ bool        gp_cost_hashjoin_chainwalk = false;
  * Any code needing the "numsegments"
  * can simply #include cdbvars.h, and use GpIdentity.numsegments
  */
-GpId GpIdentity = {UNINITIALIZED_GP_IDENTITY_VALUE, UNINITIALIZED_GP_IDENTITY_VALUE, UNINITIALIZED_GP_IDENTITY_VALUE};
+GpId		GpIdentity = {UNINITIALIZED_GP_IDENTITY_VALUE, UNINITIALIZED_GP_IDENTITY_VALUE, UNINITIALIZED_GP_IDENTITY_VALUE};
 
 /*
  * This has to be int because of guc.c stupidity :(
@@ -430,24 +414,25 @@ GpId GpIdentity = {UNINITIALIZED_GP_IDENTITY_VALUE, UNINITIALIZED_GP_IDENTITY_VA
  * from the catalog but the value is too fundamental and accessed too early
  * to fetch it from catalog.
  */
-int GpStandbyDbid = InvalidDbid;
+int			GpStandbyDbid = InvalidDbid;
 
-void verifyGpIdentityIsSet(void)
+void
+verifyGpIdentityIsSet(void)
 {
-    if ( GpIdentity.numsegments == UNINITIALIZED_GP_IDENTITY_VALUE ||
-         GpIdentity.dbid == UNINITIALIZED_GP_IDENTITY_VALUE ||
-         GpIdentity.segindex == UNINITIALIZED_GP_IDENTITY_VALUE)
-     {
-        elog(ERROR, "GpIdentity is not set");
-     }
+	if (GpIdentity.numsegments == UNINITIALIZED_GP_IDENTITY_VALUE ||
+		GpIdentity.dbid == UNINITIALIZED_GP_IDENTITY_VALUE ||
+		GpIdentity.segindex == UNINITIALIZED_GP_IDENTITY_VALUE)
+	{
+		elog(ERROR, "GpIdentity is not set");
+	}
 }
 
 /*
  * Keep track of a few dispatch-related  statistics:
  */
-int cdb_total_slices = 0;
-int cdb_total_plans = 0;
-int cdb_max_slices = 0;
+int			cdb_total_slices = 0;
+int			cdb_total_plans = 0;
+int			cdb_max_slices = 0;
 
 /*
  * Local macro to provide string values of numeric defines.
@@ -479,10 +464,6 @@ string_to_role(const char *string)
 	{
 		role = GP_ROLE_EXECUTE;
 	}
-	else if (pg_strcasecmp(string, "dispatchagent") == 0 || pg_strcasecmp(string, "qda") == 0)
-	{
-		role = GP_ROLE_DISPATCHAGENT;
-	}
 	else if (pg_strcasecmp(string, "utility") == 0)
 	{
 		role = GP_ROLE_UTILITY;
@@ -505,8 +486,6 @@ role_to_string(GpRoleValue role)
 			return "dispatch";
 		case GP_ROLE_EXECUTE:
 			return "execute";
-		case GP_ROLE_DISPATCHAGENT:
-			return "dispatchagent";
 		case GP_ROLE_UTILITY:
 			return "utility";
 		case GP_ROLE_UNDEFINED:
@@ -525,9 +504,8 @@ role_to_string(GpRoleValue role)
  * See src/backend/util/misc/guc.c for option definition.
  */
 const char *
-assign_gp_session_role(const char *newval, bool doit, GucSource source __attribute__((unused)) )
+assign_gp_session_role(const char *newval, bool doit, GucSource source __attribute__((unused)))
 {
-
 #if FALSE
 	elog(DEBUG1, "assign_gp_session_role: gp_session_role=%s, newval=%s, doit=%s",
 		 show_gp_session_role(), newval, (doit ? "true" : "false"));
@@ -547,6 +525,9 @@ assign_gp_session_role(const char *newval, bool doit, GucSource source __attribu
 
 		if (Gp_role == GP_ROLE_DISPATCH)
 			Gp_segment = -1;
+
+		if (Gp_role == GP_ROLE_UTILITY && MyProc != NULL)
+			MyProc->mppIsWriter = false;
 	}
 	return newval;
 }
@@ -554,7 +535,7 @@ assign_gp_session_role(const char *newval, bool doit, GucSource source __attribu
 
 
 /*
- * Assign hook routine for "gp_role" option.  This variablle has context
+ * Assign hook routine for "gp_role" option.  This variable has context
  * PGC_SUSET so that is can only be set by a superuser via the SET command.
  * (It can also be set using an option on postmaster start, but this isn't
  * interesting beccause the derived global CdbRole is always set (along with
@@ -565,7 +546,6 @@ assign_gp_session_role(const char *newval, bool doit, GucSource source __attribu
 const char *
 assign_gp_role(const char *newval, bool doit, GucSource source)
 {
-
 #if FALSE
 	elog(DEBUG1, "assign_gp_role: gp_role=%s, newval=%s, doit=%s",
 		 show_gp_role(), newval, (doit ? "true" : "false"));
@@ -583,9 +563,8 @@ assign_gp_role(const char *newval, bool doit, GucSource source)
 	if (doit)
 	{
 		/*
-		 * When changing between roles, we must
-		 * call cdb_cleanup and then cdb_setup to get
-		 * setup and connections appropriate to the new role.
+		 * When changing between roles, we must call cdb_cleanup and then
+		 * cdb_setup to get setup and connections appropriate to the new role.
 		 */
 		bool		do_disconnect = false;
 		bool		do_connect = false;
@@ -600,7 +579,7 @@ assign_gp_role(const char *newval, bool doit, GucSource source)
 		}
 
 		if (do_disconnect)
-			cdb_cleanup(0,0);
+			cdb_cleanup(0, 0);
 
 		Gp_role = newrole;
 
@@ -609,10 +588,11 @@ assign_gp_role(const char *newval, bool doit, GucSource source)
 			if (do_connect)
 			{
 				/*
-				 * In case there are problems with the Greenplum Database tables or data,
-				 * we catch any error coming out of cdblink_setup so we can set the
-				 * gp_role back to what it was.  Otherwise we may be left with
-				 * inappropriate connections for the new role.
+				 * In case there are problems with the Greenplum Database
+				 * tables or data, we catch any error coming out of
+				 * cdblink_setup so we can set the gp_role back to what it
+				 * was.  Otherwise we may be left with inappropriate
+				 * connections for the new role.
 				 */
 				PG_TRY();
 				{
@@ -620,7 +600,7 @@ assign_gp_role(const char *newval, bool doit, GucSource source)
 				}
 				PG_CATCH();
 				{
-					cdb_cleanup(0,0);
+					cdb_cleanup(0, 0);
 					Gp_role = oldrole;
 					if (Gp_role != GP_ROLE_UTILITY)
 						cdb_setup();
@@ -636,19 +616,18 @@ assign_gp_role(const char *newval, bool doit, GucSource source)
 
 
 /*
- * Assign hook routine for "gp_connections_per_thread" option.  This variablle has context
+ * Assign hook routine for "gp_connections_per_thread" option.  This variable has context
  * PGC_SUSET so that is can only be set by a superuser via the SET command.
  * (It can also be set in config file, but not inside of PGOPTIONS.)
  *
  * See src/backend/util/misc/guc.c for option definition.
  */
 bool
-assign_gp_connections_per_thread(int newval, bool doit, GucSource source __attribute__((unused)) )
+assign_gp_connections_per_thread(int newval, bool doit, GucSource source __attribute__((unused)))
 {
-
 #if FALSE
 	elog(DEBUG1, "assign_gp_connections_per_thread: gp_connections_per_thread=%s, newval=%d, doit=%s",
-	   show_gp_connections_per_thread(), newval, (doit ? "true" : "false"));
+		 show_gp_connections_per_thread(), newval, (doit ? "true" : "false"));
 #endif
 
 	if (doit)
@@ -656,46 +635,13 @@ assign_gp_connections_per_thread(int newval, bool doit, GucSource source __attri
 		if (newval < 0)
 			return false;
 
+		cdbdisp_setAsync(newval == 0);
+		cdbgang_setAsync(newval == 0);
 		gp_connections_per_thread = newval;
 	}
 
 	return true;
 }
-
-/*
- * Assign hook routine for "assign_gp_use_dispatch_agent" option.  This variable has context
- * PGC_USERSET
- *
- * See src/backend/util/misc/guc.c for option definition.
- */
-void disconnectAndDestroyAllGangs(void);
-
-bool
-assign_gp_use_dispatch_agent(bool newval, bool doit, GucSource source __attribute__((unused)) )
-{
-
-
-	if (newval != gp_use_dispatch_agent && doit)
-		elog(LOG, "assign_gp_use_dispatch_agent: gp_use_dispatch_agent old=%s, newval=%s, doit=%s",
-			(gp_use_dispatch_agent ? "true" : "false"), (newval ? "true" : "false"), (doit ? "true" : "false"));
-
-
-	if (doit)
-	{
-		/*
-		 * If we are switching, we must get rid of all existing gangs.
-		 * TODO: check for being in a transaction, or owning temp tables, as disconnecting all gangs
-		 * will wipe them out.
-		 */
-		if (newval != gp_use_dispatch_agent && Gp_role != GP_ROLE_UTILITY)
-			disconnectAndDestroyAllGangs();
-		gp_use_dispatch_agent = newval;
-	}
-
-	return true;
-}
-
-
 
 /*
  * Show hook routine for "gp_session_role" option.
@@ -752,43 +698,43 @@ show_gp_connections_per_thread(void)
  * gp_log_gangs (string)
  *
  * Should creation, reallocation and cleanup of gangs of QE processes be logged?
- * "OFF"     -> only errors are logged
- * "TERSE"   -> terse logging of routine events, e.g. creation of new qExecs
+ * "OFF"	 -> only errors are logged
+ * "TERSE"	 -> terse logging of routine events, e.g. creation of new qExecs
  * "VERBOSE" -> gang allocation per command is logged
- * "DEBUG"   -> additional events are logged at severity level DEBUG1 to DEBUG5
+ * "DEBUG"	 -> additional events are logged at severity level DEBUG1 to DEBUG5
  *
  * The messages that are enabled by the TERSE and VERBOSE settings are
  * written with a severity level of LOG.
  */
-GpVars_Verbosity   gp_log_gang;
+GpVars_Verbosity gp_log_gang;
 
 /*
  * gp_log_fts (string)
  *
  * What kind of messages should the fault-prober log ?
- * "OFF"     -> only errors are logged
- * "TERSE"   -> terse logging of routine events
+ * "OFF"	 -> only errors are logged
+ * "TERSE"	 -> terse logging of routine events
  * "VERBOSE" -> gang allocation per command is logged
- * "DEBUG"   -> additional events are logged at severity level DEBUG1 to DEBUG5
+ * "DEBUG"	 -> additional events are logged at severity level DEBUG1 to DEBUG5
  *
  * The messages that are enabled by the TERSE and VERBOSE settings are
  * written with a severity level of LOG.
  */
-GpVars_Verbosity   gp_log_fts;
+GpVars_Verbosity gp_log_fts;
 
 /*
  * gp_log_interconnect (string)
  *
  * Should connections between internal processes be logged?  (qDisp/qExec/etc)
- * "OFF"     -> connection errors are logged
- * "TERSE"   -> terse logging of routine events, e.g. successful connections
+ * "OFF"	 -> connection errors are logged
+ * "TERSE"	 -> terse logging of routine events, e.g. successful connections
  * "VERBOSE" -> most interconnect setup events are logged
- * "DEBUG"   -> additional events are logged at severity level DEBUG1 to DEBUG5.
+ * "DEBUG"	 -> additional events are logged at severity level DEBUG1 to DEBUG5.
  *
  * The messages that are enabled by the TERSE and VERBOSE settings are
  * written with a severity level of LOG.
  */
-GpVars_Verbosity   gp_log_interconnect;
+GpVars_Verbosity gp_log_interconnect;
 
 /*
  * gpvars_string_to_verbosity
@@ -799,8 +745,8 @@ gpvars_string_to_verbosity(const char *s)
 	GpVars_Verbosity result;
 
 	if (!s ||
-        !s[0] ||
-        !pg_strcasecmp("terse", s))
+		!s[0] ||
+		!pg_strcasecmp("terse", s))
 		result = GPVARS_VERBOSITY_TERSE;
 	else if (!pg_strcasecmp("off", s))
 		result = GPVARS_VERBOSITY_OFF;
@@ -808,10 +754,10 @@ gpvars_string_to_verbosity(const char *s)
 		result = GPVARS_VERBOSITY_VERBOSE;
 	else if (!pg_strcasecmp("debug", s))
 		result = GPVARS_VERBOSITY_DEBUG;
-    else
-        result = GPVARS_VERBOSITY_UNDEFINED;
+	else
+		result = GPVARS_VERBOSITY_UNDEFINED;
 	return result;
-}                               /* gpvars_string_to_verbosity */
+}	/* gpvars_string_to_verbosity */
 
 /*
  * gpvars_verbosity_to_string
@@ -832,49 +778,54 @@ gpvars_verbosity_to_string(GpVars_Verbosity verbosity)
 		default:
 			return "*undefined*";
 	}
-}                               /* gpvars_verbosity_to_string */
+}	/* gpvars_verbosity_to_string */
 
 /*
- * gpperfmon_log_alert_level_to_string 
+ * gpperfmon_log_alert_level_to_string
  */
 const char *
 gpperfmon_log_alert_level_to_string(GpperfmonLogAlertLevel level)
 {
 	switch (level)
 	{
-		case GPPERFMON_LOG_ALERT_LEVEL_NONE : 
+		case GPPERFMON_LOG_ALERT_LEVEL_NONE:
 			return "none";
-		case GPPERFMON_LOG_ALERT_LEVEL_WARNING : 
+		case GPPERFMON_LOG_ALERT_LEVEL_WARNING:
 			return "warning";
-		case GPPERFMON_LOG_ALERT_LEVEL_ERROR : 
+		case GPPERFMON_LOG_ALERT_LEVEL_ERROR:
 			return "error";
-		case GPPERFMON_LOG_ALERT_LEVEL_FATAL : 
+		case GPPERFMON_LOG_ALERT_LEVEL_FATAL:
 			return "fatal";
-		case GPPERFMON_LOG_ALERT_LEVEL_PANIC : 
+		case GPPERFMON_LOG_ALERT_LEVEL_PANIC:
 			return "panic";
 		default:
-			return "*undefined*"; 
+			return "*undefined*";
 	}
-}                               
+}
 
 /*
  * gpperfmon_log_alert_level_from_string
  */
 GpperfmonLogAlertLevel
-gpperfmon_log_alert_level_from_string(const char *level_string) {
-    if (strcasecmp(level_string, "warning") == 0) {
-        return GPPERFMON_LOG_ALERT_LEVEL_WARNING;
-    }
-    if (strcasecmp(level_string, "error") == 0) {
-        return GPPERFMON_LOG_ALERT_LEVEL_ERROR;
-    }
-    if (strcasecmp(level_string, "fatal") == 0) {
-        return GPPERFMON_LOG_ALERT_LEVEL_FATAL;
-    }
-    if (strcasecmp(level_string, "panic") == 0) {
-        return GPPERFMON_LOG_ALERT_LEVEL_PANIC;
-    }
-    return GPPERFMON_LOG_ALERT_LEVEL_NONE;
+gpperfmon_log_alert_level_from_string(const char *level_string)
+{
+	if (strcasecmp(level_string, "warning") == 0)
+	{
+		return GPPERFMON_LOG_ALERT_LEVEL_WARNING;
+	}
+	if (strcasecmp(level_string, "error") == 0)
+	{
+		return GPPERFMON_LOG_ALERT_LEVEL_ERROR;
+	}
+	if (strcasecmp(level_string, "fatal") == 0)
+	{
+		return GPPERFMON_LOG_ALERT_LEVEL_FATAL;
+	}
+	if (strcasecmp(level_string, "panic") == 0)
+	{
+		return GPPERFMON_LOG_ALERT_LEVEL_PANIC;
+	}
+	return GPPERFMON_LOG_ALERT_LEVEL_NONE;
 }
 
 /*
@@ -882,66 +833,66 @@ gpperfmon_log_alert_level_from_string(const char *level_string) {
  * gpvars_show_gp_log_gangs
  */
 const char *
-gpvars_assign_gp_log_gang(const char *newval, bool doit, GucSource source __attribute__((unused)) )
+gpvars_assign_gp_log_gang(const char *newval, bool doit, GucSource source __attribute__((unused)))
 {
 	GpVars_Verbosity v = gpvars_string_to_verbosity(newval);
 
 	if (v == GPVARS_VERBOSITY_UNDEFINED)
-        return NULL;
+		return NULL;
 	if (doit)
 		gp_log_gang = v;
 	return newval;
-}                               /* gpvars_assign_gp_log_gangs */
+}	/* gpvars_assign_gp_log_gangs */
 
 const char *
 gpvars_show_gp_log_gang(void)
 {
 	return gpvars_verbosity_to_string(gp_log_gang);
-}                               /* gpvars_show_gp_log_gangs */
+}	/* gpvars_show_gp_log_gangs */
 
 /*
  * gpvars_assign_gp_log_fts
  * gpvars_show_gp_log_fts
  */
 const char *
-gpvars_assign_gp_log_fts(const char *newval, bool doit, GucSource source __attribute__((unused)) )
+gpvars_assign_gp_log_fts(const char *newval, bool doit, GucSource source __attribute__((unused)))
 {
 	GpVars_Verbosity v = gpvars_string_to_verbosity(newval);
 
 	if (v == GPVARS_VERBOSITY_UNDEFINED)
-        return NULL;
+		return NULL;
 	if (doit)
 		gp_log_fts = v;
 	return newval;
-}                               /* gpvars_assign_gp_log_fts */
+}	/* gpvars_assign_gp_log_fts */
 
 const char *
 gpvars_show_gp_log_fts(void)
 {
 	return gpvars_verbosity_to_string(gp_log_fts);
-}                               /* gpvars_show_gp_log_fts */
+}	/* gpvars_show_gp_log_fts */
 
 /*
  * gpvars_assign_gp_log_interconnect
  * gpvars_show_gp_log_interconnect
  */
 const char *
-gpvars_assign_gp_log_interconnect(const char *newval, bool doit, GucSource source __attribute__((unused)) )
+gpvars_assign_gp_log_interconnect(const char *newval, bool doit, GucSource source __attribute__((unused)))
 {
 	GpVars_Verbosity v = gpvars_string_to_verbosity(newval);
 
 	if (v == GPVARS_VERBOSITY_UNDEFINED)
-        return NULL;
+		return NULL;
 	if (doit)
 		gp_log_interconnect = v;
 	return newval;
-}                               /* gpvars_assign_gp_log_interconnect */
+}	/* gpvars_assign_gp_log_interconnect */
 
 const char *
 gpvars_show_gp_log_interconnect(void)
 {
 	return gpvars_verbosity_to_string(gp_log_interconnect);
-}                               /* gpvars_show_gp_log_interconnect */
+}	/* gpvars_show_gp_log_interconnect */
 
 
 /*
@@ -949,9 +900,9 @@ gpvars_show_gp_log_interconnect(void)
  * gpvars_show_gp_interconnect_type
  */
 const char *
-gpvars_assign_gp_interconnect_type(const char *newval, bool doit, GucSource source __attribute__((unused)) )
+gpvars_assign_gp_interconnect_type(const char *newval, bool doit, GucSource source __attribute__((unused)))
 {
-	int newtype = 0;
+	int			newtype = 0;
 
 	if (newval == NULL || newval[0] == 0)
 		newtype = INTERCONNECT_TYPE_UDPIFC;
@@ -966,22 +917,22 @@ gpvars_assign_gp_interconnect_type(const char *newval, bool doit, GucSource sour
 	}
 
 	return newval;
-}                               /* gpvars_assign_gp_log_interconnect */
+}	/* gpvars_assign_gp_log_interconnect */
 
 const char *
 gpvars_show_gp_interconnect_type(void)
 {
 	return "UDPIFC";
-}                               /* gpvars_show_gp_log_interconnect */
+}	/* gpvars_show_gp_log_interconnect */
 
 /*
  * gpvars_assign_gp_interconnect_fc_method
  * gpvars_show_gp_interconnect_fc_method
  */
 const char *
-gpvars_assign_gp_interconnect_fc_method(const char *newval, bool doit, GucSource source __attribute__((unused)) )
+gpvars_assign_gp_interconnect_fc_method(const char *newval, bool doit, GucSource source __attribute__((unused)))
 {
-	int newmethod = 0;
+	int			newmethod = 0;
 
 	if (newval == NULL || newval[0] == 0 ||
 		!pg_strcasecmp("capacity", newval))
@@ -997,12 +948,12 @@ gpvars_assign_gp_interconnect_fc_method(const char *newval, bool doit, GucSource
 	}
 
 	return newval;
-}                               /* gpvars_assign_gp_interconnect_fc_method */
+}	/* gpvars_assign_gp_interconnect_fc_method */
 
 const char *
 gpvars_show_gp_interconnect_fc_method(void)
 {
-	switch(Gp_interconnect_fc_method)
+	switch (Gp_interconnect_fc_method)
 	{
 		case INTERCONNECT_FC_METHOD_CAPACITY:
 			return "CAPACITY";
@@ -1011,7 +962,7 @@ gpvars_show_gp_interconnect_fc_method(void)
 		default:
 			return "CAPACITY";
 	}
-}                               /* gpvars_show_gp_interconnect_fc_method */
+}	/* gpvars_show_gp_interconnect_fc_method */
 
 /*
  * Parse the string value of gp_autostats_mode and gp_autostats_mode_in_functions
@@ -1019,7 +970,7 @@ gpvars_show_gp_interconnect_fc_method(void)
 static int
 gpvars_parse_gp_autostats_mode(const char *newval, bool inFunctions)
 {
-	int newtype = 0;
+	int			newtype = 0;
 
 	if (newval == NULL || newval[0] == 0 ||
 		!pg_strcasecmp("none", newval))
@@ -1037,6 +988,7 @@ gpvars_parse_gp_autostats_mode(const char *newval, bool inFunctions)
 	else
 	{
 		const char *autostats_mode_string;
+
 		if (inFunctions)
 		{
 			autostats_mode_string = gpvars_show_gp_autostats_mode_in_functions();
@@ -1056,9 +1008,9 @@ gpvars_parse_gp_autostats_mode(const char *newval, bool inFunctions)
  * gpvars_show_gp_autostats_mode
  */
 const char *
-gpvars_assign_gp_autostats_mode(const char *newval, bool doit, GucSource source __attribute__((unused)) )
+gpvars_assign_gp_autostats_mode(const char *newval, bool doit, GucSource source __attribute__((unused)))
 {
-	int newtype = gpvars_parse_gp_autostats_mode(newval, false /* inFunctions */);
+	int			newtype = gpvars_parse_gp_autostats_mode(newval, false /* inFunctions */ );
 
 	if (doit)
 	{
@@ -1076,6 +1028,7 @@ static const char *
 gpvars_show_gp_autostats_mode_common(bool inFunctions)
 {
 	GpAutoStatsModeValue autostats_mode;
+
 	if (inFunctions)
 	{
 		autostats_mode = gp_autostats_mode_in_functions;
@@ -1084,7 +1037,7 @@ gpvars_show_gp_autostats_mode_common(bool inFunctions)
 	{
 		autostats_mode = gp_autostats_mode;
 	}
-	switch(autostats_mode)
+	switch (autostats_mode)
 	{
 		case GP_AUTOSTATS_NONE:
 			return "NONE";
@@ -1100,7 +1053,7 @@ gpvars_show_gp_autostats_mode_common(bool inFunctions)
 const char *
 gpvars_show_gp_autostats_mode(void)
 {
-	return gpvars_show_gp_autostats_mode_common(false /* inFunctions */);
+	return gpvars_show_gp_autostats_mode_common(false /* inFunctions */ );
 }
 
 /*
@@ -1109,10 +1062,10 @@ gpvars_show_gp_autostats_mode(void)
  */
 
 const char *
-gpvars_assign_gp_autostats_mode_in_functions(const char *newval, bool doit, GucSource source __attribute__((unused)) )
+gpvars_assign_gp_autostats_mode_in_functions(const char *newval, bool doit, GucSource source __attribute__((unused)))
 {
-	bool inFunctions = true;
-	int newtype = gpvars_parse_gp_autostats_mode(newval, inFunctions);
+	bool		inFunctions = true;
+	int			newtype = gpvars_parse_gp_autostats_mode(newval, inFunctions);
 
 	if (doit)
 	{
@@ -1126,7 +1079,7 @@ gpvars_assign_gp_autostats_mode_in_functions(const char *newval, bool doit, GucS
 const char *
 gpvars_show_gp_autostats_mode_in_functions(void)
 {
-	return gpvars_show_gp_autostats_mode_common(true /* inFunctions */);
+	return gpvars_show_gp_autostats_mode_common(true /* inFunctions */ );
 }
 
 /* gp_enable_gpperfmon and gp_gpperfmon_send_interval are GUCs that we'd like
@@ -1147,12 +1100,12 @@ gpvars_assign_gp_enable_gpperfmon(bool newval, bool doit, GucSource source)
 		if (Gp_role == GP_ROLE_DISPATCH && IsUnderPostmaster && GetCurrentRoleId() != InvalidOid && !superuser())
 		{
 			ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be superuser to set gp_enable_gpperfmon")));
+					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+					 errmsg("must be superuser to set gp_enable_gpperfmon")));
 		}
 		else
 		{
-			gp_enable_gpperfmon=newval;
+			gp_enable_gpperfmon = newval;
 		}
 	}
 
@@ -1168,11 +1121,11 @@ gpvars_assign_gp_gpperfmon_send_interval(int newval, bool doit, GucSource source
 		{
 			ereport(ERROR,
 					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-					 errmsg("must be superuser to set gp_gpperfmon_send_interval")));
+			 errmsg("must be superuser to set gp_gpperfmon_send_interval")));
 		}
 		else
 		{
-			gp_gpperfmon_send_interval=newval;
+			gp_gpperfmon_send_interval = newval;
 		}
 	}
 
@@ -1184,29 +1137,29 @@ gpvars_assign_gp_gpperfmon_log_alert_level(const char *newval, bool doit, GucSou
 {
 	if (doit)
 	{
-		if (!pg_strcasecmp(newval, "none")) 
+		if (!pg_strcasecmp(newval, "none"))
 		{
 			gpperfmon_log_alert_level = GPPERFMON_LOG_ALERT_LEVEL_NONE;
 		}
-		else if (!pg_strcasecmp(newval, "warning")) 
+		else if (!pg_strcasecmp(newval, "warning"))
 		{
 			gpperfmon_log_alert_level = GPPERFMON_LOG_ALERT_LEVEL_WARNING;
 		}
-		else if (!pg_strcasecmp(newval, "error")) 
+		else if (!pg_strcasecmp(newval, "error"))
 		{
 			gpperfmon_log_alert_level = GPPERFMON_LOG_ALERT_LEVEL_ERROR;
 		}
-		else if (!pg_strcasecmp(newval, "fatal")) 
+		else if (!pg_strcasecmp(newval, "fatal"))
 		{
 			gpperfmon_log_alert_level = GPPERFMON_LOG_ALERT_LEVEL_FATAL;
 		}
-		else if (!pg_strcasecmp(newval, "panic")) 
+		else if (!pg_strcasecmp(newval, "panic"))
 		{
 			gpperfmon_log_alert_level = GPPERFMON_LOG_ALERT_LEVEL_PANIC;
 		}
 		else
 		{
-			elog(ERROR, "Unknown log alert level '%s'. (current value is '%s')", newval, gpperfmon_log_alert_level_to_string(gpperfmon_log_alert_level)); 
+			elog(ERROR, "Unknown log alert level '%s'. (current value is '%s')", newval, gpperfmon_log_alert_level_to_string(gpperfmon_log_alert_level));
 		}
 	}
 
@@ -1216,8 +1169,9 @@ gpvars_assign_gp_gpperfmon_log_alert_level(const char *newval, bool doit, GucSou
 const char *
 gpvars_show_gp_gpperfmon_log_alert_level(void)
 {
-        return gpperfmon_log_alert_level_to_string(gpperfmon_log_alert_level); 
+	return gpperfmon_log_alert_level_to_string(gpperfmon_log_alert_level);
 }
+
 /*
  * Request the fault-prober to suspend probes -- no fault actions will
  * be taken based on in-flight probes until the prober is unpaused.
@@ -1228,13 +1182,14 @@ gpvars_assign_gp_fts_probe_pause(bool newval, bool doit, GucSource source)
 	if (doit)
 	{
 		/*
-		 * We only want to do fancy stuff on the master (where we have a prober).
+		 * We only want to do fancy stuff on the master (where we have a
+		 * prober).
 		 */
 		if (ftsProbeInfo && Gp_segment == -1)
 		{
 			/*
-			 * fts_pauseProbes is externally set/cleared;
-			 * fts_cancelProbes is externally set and cleared by FTS
+			 * fts_pauseProbes is externally set/cleared; fts_cancelProbes is
+			 * externally set and cleared by FTS
 			 */
 			ftsLock();
 			ftsProbeInfo->fts_pauseProbes = newval;
@@ -1242,8 +1197,8 @@ gpvars_assign_gp_fts_probe_pause(bool newval, bool doit, GucSource source)
 			ftsUnlock();
 
 			/*
-			 * If we're unpausing, we want to force the prober to
-			 * re-read everything. (we want FtsNotifyProber()).
+			 * If we're unpausing, we want to force the prober to re-read
+			 * everything. (we want FtsNotifyProber()).
 			 */
 			if (!newval)
 			{
@@ -1261,10 +1216,10 @@ gpvars_assign_gp_hash_index(bool newval, bool doit, GucSource source)
 {
 	if (doit && newval)
 	{
-		if(Gp_role == GP_ROLE_DISPATCH)
+		if (Gp_role == GP_ROLE_DISPATCH)
 			ereport(WARNING,
-						(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-						 errmsg("gp_hash_index is deprecated and has no effect")));
+					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				   errmsg("gp_hash_index is deprecated and has no effect")));
 	}
 
 	return true;
@@ -1275,7 +1230,7 @@ gpvars_assign_gp_hash_index(bool newval, bool doit, GucSource source)
  * gpvars_show_gp_resqueue_memory_policy
  */
 const char *
-gpvars_assign_gp_resqueue_memory_policy(const char *newval, bool doit, GucSource source __attribute__((unused)) )
+gpvars_assign_gp_resqueue_memory_policy(const char *newval, bool doit, GucSource source __attribute__((unused)))
 {
 	ResQueueMemoryPolicy newtype = RESQUEUE_MEMORY_POLICY_NONE;
 
@@ -1300,7 +1255,7 @@ gpvars_assign_gp_resqueue_memory_policy(const char *newval, bool doit, GucSource
 const char *
 gpvars_show_gp_resqueue_memory_policy(void)
 {
-	switch(gp_resqueue_memory_policy)
+	switch (gp_resqueue_memory_policy)
 	{
 		case RESQUEUE_MEMORY_POLICY_NONE:
 			return "none";
@@ -1317,7 +1272,7 @@ gpvars_show_gp_resqueue_memory_policy(void)
  * gpvars_assign_statement_mem
  */
 bool
-gpvars_assign_statement_mem(int newval, bool doit, GucSource source __attribute__((unused)) )
+gpvars_assign_statement_mem(int newval, bool doit, GucSource source __attribute__((unused)))
 {
 	if (newval >= max_statement_mem)
 	{
@@ -1334,18 +1289,17 @@ gpvars_assign_statement_mem(int newval, bool doit, GucSource source __attribute_
 
 /*
  * increment_command_count
- *    Increment gp_command_count. If the new command count is 0 or a negative number, reset it to 1.
+ *	  Increment gp_command_count. If the new command count is 0 or a negative number, reset it to 1.
  */
 void
 increment_command_count()
 {
-
 	if (gp_cancel_query_print_log)
 	{
 		ereport(LOG,
 				(errmsg("Incrementing command count from %d to %d",
-						gp_command_count, gp_command_count+1),
-						errprintstack(true)));
+						gp_command_count, gp_command_count + 1),
+				 errprintstack(true)));
 	}
 
 	gp_command_count++;

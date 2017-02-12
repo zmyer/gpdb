@@ -42,7 +42,7 @@ declare -a TABLESQD=(segment_configuration pgdatabase version_at_initdb)
 #***********************************************************
 declare -a PORTS=(5432 10001 10002 10003)
 ((PORT_MIN=0))
-((PORT_MAX=3))
+((PORT_MAX=$NUM_PRIMARY_MIRROR_PAIRS))
 
 if [ -z $MASTER_DEMO_PORT ] ; then
     echo "set MASTER_DEMO_PORT"
@@ -76,7 +76,7 @@ for ((i=PORT_MIN; i<PORT_MAX+1; i++)); do
             echo "----------------------------------------"
             echo "Table: gp_$table"
             echo "----------------------------------------"
-            PGOPTIONS="-c gp_session_role=utility" $GPPATH/psql -p ${PORTS[$i]} -d template1 -c  "select * from gp_"$table
+            PGOPTIONS="-c gp_session_role=utility" $GPPATH/psql --pset pager=off -p ${PORTS[$i]} -d template1 -c  "select * from gp_"$table
             RETVAL=$?
             if [ $RETVAL -ne 0 ]; then
                 echo "$0 failed."
@@ -89,7 +89,7 @@ for ((i=PORT_MIN; i<PORT_MAX+1; i++)); do
             echo "----------------------------------------"
             echo "Table: gp_$table"
             echo "----------------------------------------"
-            PGOPTIONS="-c gp_session_role=utility" $GPPATH/psql -p ${PORTS[$i]} -d template1 -c \
+            PGOPTIONS="-c gp_session_role=utility" $GPPATH/psql --pset pager=off -p ${PORTS[$i]} -d template1 -c \
                 "select * from gp_"$table
             RETVAL=$?
             if [ $RETVAL -ne 0 ]; then

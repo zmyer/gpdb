@@ -10,7 +10,7 @@
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/optimizer/path/indxpath.c,v 1.216 2007/01/20 20:45:39 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/optimizer/path/indxpath.c,v 1.227.2.2 2009/04/16 20:42:28 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -33,6 +33,7 @@
 #include "optimizer/var.h"
 #include "parser/parsetree.h"
 #include "utils/builtins.h"
+#include "utils/bytea.h"
 #include "utils/lsyscache.h"
 #include "utils/pg_locale.h"
 #include "utils/selfuncs.h"
@@ -41,7 +42,7 @@
 /*
  * DoneMatchingIndexKeys() - MACRO
  */
-#define DoneMatchingIndexKeys(families)	(families[0] == InvalidOid)
+#define DoneMatchingIndexKeys(families) (families[0] == InvalidOid)
 
 #define IsBooleanOpfamily(opfamily) \
 	((opfamily) == BOOL_BTREE_FAM_OID || (opfamily) == BOOL_HASH_FAM_OID)
@@ -72,7 +73,7 @@ static Cost bitmap_scan_cost_est(PlannerInfo *root, RelOptInfo *rel,
 static Cost bitmap_and_cost_est(PlannerInfo *root, RelOptInfo *rel,
 					List *paths, RelOptInfo *outer_rel);
 static PathClauseUsage *classify_index_clause_usage(Path *path,
-													List **clauselist);
+							List **clauselist);
 static void find_indexpath_quals(Path *bitmapqual, List **quals, List **preds);
 static int	find_list_position(Node *node, List **nodelist);
 static bool match_clause_to_indexcol(IndexOptInfo *index,
@@ -115,28 +116,27 @@ static Const *string_to_const(const char *str, Oid datatype);
  *   on the given relation storage option.
  */
 static Path *
-create_bitmap_scan_path(char relstorage,
-						PlannerInfo *root,
+create_bitmap_scan_path(PlannerInfo *root,
 						RelOptInfo *rel,
 						Path *bitmapqual,
 						RelOptInfo *outer_rel)
 {
-	Path *path = NULL;
-	
-	switch(relstorage)
+	Path	   *path = NULL;
+
+	switch (rel->relstorage)
 	{
 		case RELSTORAGE_HEAP:
-			path = (Path *)create_bitmap_heap_path(root, rel, bitmapqual, outer_rel);
+			path = (Path *) create_bitmap_heap_path(root, rel, bitmapqual, outer_rel);
 			break;
 		case RELSTORAGE_AOROWS:
-			path = (Path *)create_bitmap_appendonly_path(root, rel, bitmapqual, outer_rel, true);
+			path = (Path *) create_bitmap_appendonly_path(root, rel, bitmapqual, outer_rel, true);
 			break;
 		case RELSTORAGE_AOCOLS:
-			path = (Path *)create_bitmap_appendonly_path(root, rel, bitmapqual, outer_rel, false);
+			path = (Path *) create_bitmap_appendonly_path(root, rel, bitmapqual, outer_rel, false);
 			break;
 		default:
 			elog(ERROR, "unrecognized relstorage type %d for using bitmap scan path",
-				 relstorage);
+				 rel->relstorage);
 	}
 
 	return path;
@@ -178,9 +178,8 @@ create_bitmap_scan_path(char relstorage,
  * (*pindexpathlist or *pbitmappathlist) belonging to the caller.
  */
 void
-create_index_paths(PlannerInfo *root, RelOptInfo *rel, 
-				   char relstorage,
-                   List **pindexpathlist, List **pbitmappathlist)
+create_index_paths(PlannerInfo *root, RelOptInfo *rel,
+				   List **pindexpathlist, List **pbitmappathlist)
 {
 	List	   *indexpaths;
 	List	   *bitindexpaths;
@@ -220,14 +219,14 @@ create_index_paths(PlannerInfo *root, RelOptInfo *rel,
 	{
 		IndexPath  *ipath = (IndexPath *) lfirst(l);
 
-        /* CDB: Flag RelOptInfo if at most one row can satisfy index quals. */
-        if (ipath->num_leading_eq > 0 &&
-            ipath->num_leading_eq == ipath->indexinfo->ncolumns &&
-            ipath->indexinfo->unique)
-            rel->onerow = true;
+		/* CDB: Flag RelOptInfo if at most one row can satisfy index quals. */
+		if (ipath->num_leading_eq > 0 &&
+			ipath->num_leading_eq == ipath->indexinfo->ncolumns &&
+			ipath->indexinfo->unique)
+			rel->onerow = true;
 
-        /* Add index path to caller's list. */
-        *pindexpathlist = lappend(*pindexpathlist, ipath);
+		/* Add index path to caller's list. */
+		*pindexpathlist = lappend(*pindexpathlist, ipath);
 
 		if (!root->config->enable_seqscan ||
 			(ipath->indexselectivity < 1.0 &&
@@ -260,10 +259,10 @@ create_index_paths(PlannerInfo *root, RelOptInfo *rel,
 	if (bitindexpaths != NIL)
 	{
 		Path	   *bitmapqual;
-		Path       *path = NULL;
+		Path	   *path = NULL;
 
 		bitmapqual = choose_bitmap_and(root, rel, bitindexpaths, NULL);
-		path = create_bitmap_scan_path(relstorage, root, rel, bitmapqual, NULL);
+		path = create_bitmap_scan_path(root, rel, bitmapqual, NULL);
 		*pbitmappathlist = lappend(*pbitmappathlist, path);
 	}
 }
@@ -312,6 +311,7 @@ find_usable_indexes(PlannerInfo *root, RelOptInfo *rel,
 					SaOpControl saop_control)
 {
 	Relids		outer_relids = outer_rel ? outer_rel->relids : NULL;
+	bool		possibly_useful_pathkeys = has_useful_pathkeys(root, rel);
 	List	   *result = NIL;
 	List	   *all_clauses = NIL;		/* not computed till needed */
 	ListCell   *ilist;
@@ -398,52 +398,54 @@ find_usable_indexes(PlannerInfo *root, RelOptInfo *rel,
 		 * relevant unless we are at top level.
 		 */
 		index_is_ordered = OidIsValid(index->fwdsortop[0]);
-		if (index_is_ordered && istoplevel && outer_rel == NULL)
+		if (index_is_ordered && possibly_useful_pathkeys &&
+			istoplevel && outer_rel == NULL)
 		{
 			index_pathkeys = build_index_pathkeys(root, index,
 												  ForwardScanDirection);
-            /*
-             * CDB: For appendrel child, pathkeys contain Var nodes in terms 
-             * of the child's baserel.  Transform the pathkey list to refer to 
-             * columns of the appendrel.  
-             */
-            if (rel->reloptkind == RELOPT_OTHER_MEMBER_REL)
-            {
-                AppendRelInfo  *appinfo = NULL;
-                RelOptInfo     *appendrel = NULL;
-		        ListCell       *appcell;
-                CdbPathLocus    notalocus;
 
-		        /* Find the appendrel of which this baserel is a child. */
-                foreach(appcell, root->append_rel_list)
-		        {
-			        appinfo = (AppendRelInfo *)lfirst(appcell);
-			        if (appinfo->child_relid == rel->relid)
-                        break;
-		        }
-                Assert(appinfo);
-                appendrel = find_base_rel(root, appinfo->parent_relid);
+			/*
+			 * CDB: For appendrel child, pathkeys contain Var nodes in terms
+			 * of the child's baserel.  Transform the pathkey list to refer to
+			 * columns of the appendrel.
+			 */
+			if (rel->reloptkind == RELOPT_OTHER_MEMBER_REL)
+			{
+				AppendRelInfo *appinfo = NULL;
+				RelOptInfo *appendrel = NULL;
+				ListCell   *appcell;
+				CdbPathLocus notalocus;
 
-                /*
-                 * The pathkey list happens to have the same format as the 
-                 * partitioning key of a Hashed locus, so by disguising it 
-                 * we can use cdbpathlocus_pull_above_projection() to do the 
-                 * transformation.
-                 */
-                CdbPathLocus_MakeHashed(&notalocus, index_pathkeys);
-                notalocus =
-                    cdbpathlocus_pull_above_projection(root,
-                                                       notalocus,
-                                                       rel->relids,
-                                                       rel->reltargetlist,
-                                                       appendrel->reltargetlist,
-                                                       appendrel->relid);
-                if (CdbPathLocus_IsHashed(notalocus))
-                    index_pathkeys = truncate_useless_pathkeys(root, appendrel,
-														       notalocus.partkey_h);
-                else
-                    index_pathkeys = NULL;
-            }
+				/* Find the appendrel of which this baserel is a child. */
+				foreach(appcell, root->append_rel_list)
+				{
+					appinfo = (AppendRelInfo *) lfirst(appcell);
+					if (appinfo->child_relid == rel->relid)
+						break;
+				}
+				Assert(appinfo);
+				appendrel = find_base_rel(root, appinfo->parent_relid);
+
+				/*
+				 * The pathkey list happens to have the same format as the
+				 * partitioning key of a Hashed locus, so by disguising it we
+				 * can use cdbpathlocus_pull_above_projection() to do the
+				 * transformation.
+				 */
+				CdbPathLocus_MakeHashed(&notalocus, index_pathkeys);
+				notalocus =
+					cdbpathlocus_pull_above_projection(root,
+													   notalocus,
+													   rel->relids,
+													   rel->reltargetlist,
+													appendrel->reltargetlist,
+													   appendrel->relid);
+				if (CdbPathLocus_IsHashed(notalocus))
+					index_pathkeys = truncate_useless_pathkeys(root, appendrel,
+														notalocus.partkey_h);
+				else
+					index_pathkeys = NULL;
+			}
 
 			useful_pathkeys = truncate_useless_pathkeys(root, rel,
 														index_pathkeys);
@@ -470,10 +472,11 @@ find_usable_indexes(PlannerInfo *root, RelOptInfo *rel,
 		}
 
 		/*
-		 * 4. If the index is ordered, a backwards scan might be
-		 * interesting.  Again, this is only interesting at top level.
+		 * 4. If the index is ordered, a backwards scan might be interesting.
+		 * Again, this is only interesting at top level.
 		 */
-		if (index_is_ordered && istoplevel && outer_rel == NULL)
+		if (index_is_ordered && possibly_useful_pathkeys &&
+			istoplevel && outer_rel == NULL)
 		{
 			index_pathkeys = build_index_pathkeys(root, index,
 												  BackwardScanDirection);
@@ -668,7 +671,8 @@ choose_bitmap_and(PlannerInfo *root, RelOptInfo *rel,
 	List	   *clauselist;
 	List	   *bestpaths = NIL;
 	Cost		bestcost = 0;
-	int			i, j;
+	int			i,
+				j;
 	ListCell   *l;
 
 	Assert(npaths > 0);			/* else caller error */
@@ -679,40 +683,39 @@ choose_bitmap_and(PlannerInfo *root, RelOptInfo *rel,
 	 * In theory we should consider every nonempty subset of the given paths.
 	 * In practice that seems like overkill, given the crude nature of the
 	 * estimates, not to mention the possible effects of higher-level AND and
-	 * OR clauses.  Moreover, it's completely impractical if there are a large
+	 * OR clauses.	Moreover, it's completely impractical if there are a large
 	 * number of paths, since the work would grow as O(2^N).
 	 *
-	 * As a heuristic, we first check for paths using exactly the same
-	 * sets of WHERE clauses + index predicate conditions, and reject all
-	 * but the cheapest-to-scan in any such group.  This primarily gets rid
-	 * of indexes that include the interesting columns but also irrelevant
-	 * columns.  (In situations where the DBA has gone overboard on creating
-	 * variant indexes, this can make for a very large reduction in the number
-	 * of paths considered further.)
+	 * As a heuristic, we first check for paths using exactly the same sets of
+	 * WHERE clauses + index predicate conditions, and reject all but the
+	 * cheapest-to-scan in any such group.	This primarily gets rid of indexes
+	 * that include the interesting columns but also irrelevant columns.  (In
+	 * situations where the DBA has gone overboard on creating variant
+	 * indexes, this can make for a very large reduction in the number of
+	 * paths considered further.)
 	 *
-	 * We then sort the surviving paths with the cheapest-to-scan first,
-	 * and for each path, consider using that path alone as the basis for
-	 * a bitmap scan.  Then we consider bitmap AND scans formed from that
-	 * path plus each subsequent (higher-cost) path, adding on a subsequent
-	 * path if it results in a reduction in the estimated total scan cost.
-	 * This means we consider about O(N^2) rather than O(2^N) path
-	 * combinations, which is quite tolerable, especially given than N is
-	 * usually reasonably small because of the prefiltering step.  The
-	 * cheapest of these is returned.
+	 * We then sort the surviving paths with the cheapest-to-scan first, and
+	 * for each path, consider using that path alone as the basis for a bitmap
+	 * scan.  Then we consider bitmap AND scans formed from that path plus
+	 * each subsequent (higher-cost) path, adding on a subsequent path if it
+	 * results in a reduction in the estimated total scan cost. This means we
+	 * consider about O(N^2) rather than O(2^N) path combinations, which is
+	 * quite tolerable, especially given than N is usually reasonably small
+	 * because of the prefiltering step.  The cheapest of these is returned.
 	 *
-	 * We will only consider AND combinations in which no two indexes use
-	 * the same WHERE clause.  This is a bit of a kluge: it's needed because
+	 * We will only consider AND combinations in which no two indexes use the
+	 * same WHERE clause.  This is a bit of a kluge: it's needed because
 	 * costsize.c and clausesel.c aren't very smart about redundant clauses.
 	 * They will usually double-count the redundant clauses, producing a
 	 * too-small selectivity that makes a redundant AND step look like it
-	 * reduces the total cost.  Perhaps someday that code will be smarter and
+	 * reduces the total cost.	Perhaps someday that code will be smarter and
 	 * we can remove this limitation.  (But note that this also defends
 	 * against flat-out duplicate input paths, which can happen because
 	 * best_inner_indexscan will find the same OR join clauses that
 	 * create_or_index_quals has pulled OR restriction clauses out of.)
 	 *
 	 * For the same reason, we reject AND combinations in which an index
-	 * predicate clause duplicates another clause.  Here we find it necessary
+	 * predicate clause duplicates another clause.	Here we find it necessary
 	 * to be even stricter: we'll reject a partial index if any of its
 	 * predicate clauses are implied by the set of WHERE clauses and predicate
 	 * clauses used so far.  This covers cases such as a condition "x = 42"
@@ -726,9 +729,9 @@ choose_bitmap_and(PlannerInfo *root, RelOptInfo *rel,
 	 */
 
 	/*
-	 * Extract clause usage info and detect any paths that use exactly
-	 * the same set of clauses; keep only the cheapest-to-scan of any such
-	 * groups.  The surviving paths are put into an array for qsort'ing.
+	 * Extract clause usage info and detect any paths that use exactly the
+	 * same set of clauses; keep only the cheapest-to-scan of any such groups.
+	 * The surviving paths are put into an array for qsort'ing.
 	 */
 	pathinfoarray = (PathClauseUsage **)
 		palloc(npaths * sizeof(PathClauseUsage *));
@@ -736,7 +739,7 @@ choose_bitmap_and(PlannerInfo *root, RelOptInfo *rel,
 	npaths = 0;
 	foreach(l, paths)
 	{
-		Path   *ipath = (Path *) lfirst(l);
+		Path	   *ipath = (Path *) lfirst(l);
 
 		pathinfo = classify_index_clause_usage(ipath, &clauselist);
 		for (i = 0; i < npaths; i++)
@@ -773,9 +776,9 @@ choose_bitmap_and(PlannerInfo *root, RelOptInfo *rel,
 		  path_usage_comparator);
 
 	/*
-	 * For each surviving index, consider it as an "AND group leader", and
-	 * see whether adding on any of the later indexes results in an AND path
-	 * with cheaper total cost than before.  Then take the cheapest AND group.
+	 * For each surviving index, consider it as an "AND group leader", and see
+	 * whether adding on any of the later indexes results in an AND path with
+	 * cheaper total cost than before.	Then take the cheapest AND group.
 	 */
 	for (i = 0; i < npaths; i++)
 	{
@@ -792,17 +795,17 @@ choose_bitmap_and(PlannerInfo *root, RelOptInfo *rel,
 		clauseidsofar = bms_copy(pathinfo->clauseids);
 		lastcell = list_head(paths);	/* for quick deletions */
 
-		for (j = i+1; j < npaths; j++)
+		for (j = i + 1; j < npaths; j++)
 		{
 			Cost		newcost;
 
 			pathinfo = pathinfoarray[j];
 			/* Check for redundancy */
 			if (bms_overlap(pathinfo->clauseids, clauseidsofar))
-				continue;			/* consider it redundant */
+				continue;		/* consider it redundant */
 			if (pathinfo->preds)
 			{
-				bool	redundant = false;
+				bool		redundant = false;
 
 				/* we check each predicate clause separately */
 				foreach(l, pathinfo->preds)
@@ -812,7 +815,7 @@ choose_bitmap_and(PlannerInfo *root, RelOptInfo *rel,
 					if (predicate_implied_by(list_make1(np), qualsofar))
 					{
 						redundant = true;
-						break;		/* out of inner foreach loop */
+						break;	/* out of inner foreach loop */
 					}
 				}
 				if (redundant)
@@ -853,7 +856,7 @@ choose_bitmap_and(PlannerInfo *root, RelOptInfo *rel,
 	}
 
 	if (list_length(bestpaths) == 1)
-		return (Path *) linitial(bestpaths);		/* no need for AND */
+		return (Path *) linitial(bestpaths);	/* no need for AND */
 	return (Path *) create_bitmap_and_path(root, rel, bestpaths);
 }
 
@@ -959,14 +962,14 @@ classify_index_clause_usage(Path *path, List **clauselist)
 	clauseids = NULL;
 	foreach(lc, result->quals)
 	{
-		Node   *node = (Node *) lfirst(lc);
+		Node	   *node = (Node *) lfirst(lc);
 
 		clauseids = bms_add_member(clauseids,
 								   find_list_position(node, clauselist));
 	}
 	foreach(lc, result->preds)
 	{
-		Node   *node = (Node *) lfirst(lc);
+		Node	   *node = (Node *) lfirst(lc);
 
 		clauseids = bms_add_member(clauseids,
 								   find_list_position(node, clauselist));
@@ -1031,7 +1034,7 @@ find_indexpath_quals(Path *bitmapqual, List **quals, List **preds)
 /*
  * find_list_position
  *		Return the given node's position (counting from 0) in the given
- *		list of nodes.  If it's not equal() to any existing list member,
+ *		list of nodes.	If it's not equal() to any existing list member,
  *		add it at the end, and return that position.
  */
 static int
@@ -1043,7 +1046,7 @@ find_list_position(Node *node, List **nodelist)
 	i = 0;
 	foreach(lc, *nodelist)
 	{
-		Node   *oldnode = (Node *) lfirst(lc);
+		Node	   *oldnode = (Node *) lfirst(lc);
 
 		if (equal(node, oldnode))
 			return i;
@@ -1269,6 +1272,7 @@ match_clause_to_indexcol(IndexOptInfo *index,
 	 * Clause must be a binary opclause, or possibly a ScalarArrayOpExpr
 	 * (which is always binary, by definition).  Or it could be a
 	 * RowCompareExpr, which we pass off to match_rowcompare_to_indexcol().
+	 * Or, if the index supports it, we can handle IS NULL clauses.
 	 */
 	if (is_opclause(clause))
 	{
@@ -1301,6 +1305,15 @@ match_clause_to_indexcol(IndexOptInfo *index,
 		return match_rowcompare_to_indexcol(index, indexcol, opfamily,
 											(RowCompareExpr *) clause,
 											outer_relids);
+	}
+	else if (index->amsearchnulls && IsA(clause, NullTest))
+	{
+		NullTest   *nt = (NullTest *) clause;
+
+		if (nt->nulltesttype == IS_NULL &&
+			match_index_to_operand((Node *) nt->arg, indexcol, index))
+			return true;
+		return false;
 	}
 	else
 		return false;
@@ -1392,12 +1405,12 @@ match_rowcompare_to_indexcol(IndexOptInfo *index,
 	/*
 	 * We could do the matching on the basis of insisting that the opfamily
 	 * shown in the RowCompareExpr be the same as the index column's opfamily,
-	 * but that could fail in the presence of reverse-sort opfamilies: it'd
-	 * be a matter of chance whether RowCompareExpr had picked the forward
-	 * or reverse-sort family.  So look only at the operator, and match
-	 * if it is a member of the index's opfamily (after commutation, if the
-	 * indexkey is on the right).  We'll worry later about whether any
-	 * additional operators are matchable to the index.
+	 * but that could fail in the presence of reverse-sort opfamilies: it'd be
+	 * a matter of chance whether RowCompareExpr had picked the forward or
+	 * reverse-sort family.  So look only at the operator, and match if it is
+	 * a member of the index's opfamily (after commutation, if the indexkey is
+	 * on the right).  We'll worry later about whether any additional
+	 * operators are matchable to the index.
 	 */
 	leftop = (Node *) linitial(clause->largs);
 	rightop = (Node *) linitial(clause->rargs);
@@ -1498,8 +1511,8 @@ indexable_outerrelids(PlannerInfo *root, RelOptInfo *rel)
 	}
 
 	/*
-	 * We also have to look through the query's EquivalenceClasses to see
-	 * if any of them could generate indexable join conditions for this rel.
+	 * We also have to look through the query's EquivalenceClasses to see if
+	 * any of them could generate indexable join conditions for this rel.
 	 */
 	if (rel->has_eclass_joins)
 	{
@@ -1511,8 +1524,8 @@ indexable_outerrelids(PlannerInfo *root, RelOptInfo *rel)
 			ListCell   *lc2;
 
 			/*
-			 * Won't generate joinclauses if const or single-member (the latter
-			 * test covers the volatile case too)
+			 * Won't generate joinclauses if const or single-member (the
+			 * latter test covers the volatile case too)
 			 */
 			if (cur_ec->ec_has_const || list_length(cur_ec->ec_members) <= 1)
 				continue;
@@ -1661,7 +1674,18 @@ eclass_matches_any_index(EquivalenceClass *ec, EquivalenceMember *em,
 		{
 			Oid			curFamily = families[0];
 
-			if (list_member_oid(ec->ec_opfamilies, curFamily) &&
+			/*
+			 * If it's a btree index, we can reject it if its opfamily isn't
+			 * compatible with the EC, since no clause generated from the
+			 * EC could be used with the index.  For non-btree indexes,
+			 * we can't easily tell whether clauses generated from the EC
+			 * could be used with the index, so only check for expression
+			 * match.  This might mean we return "true" for a useless index,
+			 * but that will just cause some wasted planner cycles; it's
+			 * better than ignoring useful indexes.
+			 */
+			if ((index->relam != BTREE_AM_OID ||
+				 list_member_oid(ec->ec_opfamilies, curFamily)) &&
 				match_index_to_operand((Node *) em->em_expr, indexcol, index))
 				return true;
 
@@ -1704,9 +1728,11 @@ best_inner_indexscan(PlannerInfo *root, RelOptInfo *rel,
 	InnerIndexscanInfo *info;
 	MemoryContext oldcontext;
 	RangeTblEntry *rte;
-	char relstorage;
 
 	Assert(rel->rtekind == RTE_RELATION);
+
+	/* Initialize results for failure returns */
+	*cheapest_startup = *cheapest_total = NULL;
 
 	/* Initialize results for failure returns */
 	*cheapest_startup = *cheapest_total = NULL;
@@ -1825,16 +1851,15 @@ best_inner_indexscan(PlannerInfo *root, RelOptInfo *rel,
 	bitindexpaths = list_concat(bitindexpaths, list_copy(indexpaths));
 
 	rte = rt_fetch(rel->relid, root->parse->rtable);
-	relstorage = get_rel_relstorage(rte->relid);
-	Assert(relstorage != '\0');
+	Assert(rel->relstorage != '\0');
 
-    /* Exclude plain index paths if user doesn't want them. */
-    if (!root->config->enable_indexscan && !root->config->mpp_trying_fallback_plan)
-        indexpaths = NIL;
+	/* Exclude plain index paths if user doesn't want them. */
+	if (!root->config->enable_indexscan && !root->config->mpp_trying_fallback_plan)
+		indexpaths = NIL;
 
 	/* Exclude plain index paths if the relation is an append-only relation. */
-	if (relstorage == RELSTORAGE_AOROWS ||
-		relstorage == RELSTORAGE_AOCOLS)
+	if (rel->relstorage == RELSTORAGE_AOROWS ||
+		rel->relstorage == RELSTORAGE_AOCOLS)
 		indexpaths = NIL;
 
 	/*
@@ -1842,13 +1867,13 @@ best_inner_indexscan(PlannerInfo *root, RelOptInfo *rel,
 	 * promising combination of bitmap index paths.
 	 */
 	if (bitindexpaths != NIL &&
-        (root->config->enable_bitmapscan || root->config->mpp_trying_fallback_plan))
+		(root->config->enable_bitmapscan || root->config->mpp_trying_fallback_plan))
 	{
 		Path	   *bitmapqual;
 		Path	   *bpath;
 
 		bitmapqual = choose_bitmap_and(root, rel, bitindexpaths, outer_rel);
-		bpath = create_bitmap_scan_path(relstorage, root, rel, bitmapqual, outer_rel);
+		bpath = create_bitmap_scan_path(root, rel, bitmapqual, outer_rel);
 		indexpaths = lappend(indexpaths, bpath);
 	}
 
@@ -1924,14 +1949,14 @@ find_clauses_for_join(PlannerInfo *root, RelOptInfo *rel,
 
 	/*
 	 * Also check to see if any EquivalenceClasses can produce a relevant
-	 * joinclause.  Since all such clauses are effectively pushed-down,
-	 * this doesn't apply to outer joins.
+	 * joinclause.	Since all such clauses are effectively pushed-down, this
+	 * doesn't apply to outer joins.
 	 */
 	if (!isouterjoin && rel->has_eclass_joins)
 		clause_list = list_concat(clause_list,
 								  find_eclass_clauses_for_index_join(root,
 																	 rel,
-															   outer_relids));
+															  outer_relids));
 
 	/* If no join clause was matched then forget it, per comments above */
 	if (clause_list == NIL)
@@ -2163,7 +2188,6 @@ match_special_index_operator(Expr *clause, Oid opfamily,
 	Oid			expr_op;
 	Const	   *patt;
 	Const	   *prefix = NULL;
-	Const	   *rest = NULL;
 
 	/*
 	 * Currently, all known special operators require the indexkey on the
@@ -2190,12 +2214,12 @@ match_special_index_operator(Expr *clause, Oid opfamily,
 		case OID_NAME_LIKE_OP:
 			/* the right-hand const is type text for all of these */
 			isIndexable = pattern_fixed_prefix(patt, Pattern_Type_Like,
-									  &prefix, &rest) != Pattern_Prefix_None;
+									  &prefix, NULL) != Pattern_Prefix_None;
 			break;
 
 		case OID_BYTEA_LIKE_OP:
 			isIndexable = pattern_fixed_prefix(patt, Pattern_Type_Like,
-									  &prefix, &rest) != Pattern_Prefix_None;
+									  &prefix, NULL) != Pattern_Prefix_None;
 			break;
 
 		case OID_TEXT_ICLIKE_OP:
@@ -2203,7 +2227,7 @@ match_special_index_operator(Expr *clause, Oid opfamily,
 		case OID_NAME_ICLIKE_OP:
 			/* the right-hand const is type text for all of these */
 			isIndexable = pattern_fixed_prefix(patt, Pattern_Type_Like_IC,
-									  &prefix, &rest) != Pattern_Prefix_None;
+									  &prefix, NULL) != Pattern_Prefix_None;
 			break;
 
 		case OID_TEXT_REGEXEQ_OP:
@@ -2211,7 +2235,7 @@ match_special_index_operator(Expr *clause, Oid opfamily,
 		case OID_NAME_REGEXEQ_OP:
 			/* the right-hand const is type text for all of these */
 			isIndexable = pattern_fixed_prefix(patt, Pattern_Type_Regex,
-									  &prefix, &rest) != Pattern_Prefix_None;
+									  &prefix, NULL) != Pattern_Prefix_None;
 			break;
 
 		case OID_TEXT_ICREGEXEQ_OP:
@@ -2219,7 +2243,7 @@ match_special_index_operator(Expr *clause, Oid opfamily,
 		case OID_NAME_ICREGEXEQ_OP:
 			/* the right-hand const is type text for all of these */
 			isIndexable = pattern_fixed_prefix(patt, Pattern_Type_Regex_IC,
-									  &prefix, &rest) != Pattern_Prefix_None;
+									  &prefix, NULL) != Pattern_Prefix_None;
 			break;
 
 		case OID_INET_SUB_OP:
@@ -2243,9 +2267,9 @@ match_special_index_operator(Expr *clause, Oid opfamily,
 	 * want to apply.  (A hash index, for example, will not support ">=".)
 	 * Currently, only btree supports the operators we need.
 	 *
-	 * We insist on the opfamily being the specific one we expect, else we'd do
-	 * the wrong thing if someone were to make a reverse-sort opfamily with the
-	 * same operators.
+	 * We insist on the opfamily being the specific one we expect, else we'd
+	 * do the wrong thing if someone were to make a reverse-sort opfamily with
+	 * the same operators.
 	 */
 	switch (expr_op)
 	{
@@ -2336,24 +2360,20 @@ expand_indexqual_conditions(IndexOptInfo *index, List *clausegroups)
 				if (boolqual)
 				{
 					resultquals = lappend(resultquals,
-										  make_restrictinfo(boolqual,
-															true,
-															false,
-															false,
-															NULL));
+										  make_simple_restrictinfo(boolqual));
 					continue;
 				}
 			}
 
 			/*
-			 * Else it must be an opclause (usual case), ScalarArrayOp, or
-			 * RowCompare
+			 * Else it must be an opclause (usual case), ScalarArrayOp,
+			 * RowCompare, or NullTest
 			 */
 			if (is_opclause(clause))
 			{
 				resultquals = list_concat(resultquals,
 										  expand_indexqual_opclause(rinfo,
-																  curFamily));
+																 curFamily));
 			}
 			else if (IsA(clause, ScalarArrayOpExpr))
 			{
@@ -2366,6 +2386,12 @@ expand_indexqual_conditions(IndexOptInfo *index, List *clausegroups)
 									  expand_indexqual_rowcompare(rinfo,
 																  index,
 																  indexcol));
+			}
+			else if (IsA(clause, NullTest))
+			{
+				Assert(index->amsearchnulls);
+				resultquals = lappend(resultquals,
+									  make_simple_restrictinfo(clause));
 			}
 			else
 				elog(ERROR, "unsupported indexqual type: %d",
@@ -2460,7 +2486,6 @@ expand_indexqual_opclause(RestrictInfo *rinfo, Oid opfamily)
 	Oid			expr_op = ((OpExpr *) clause)->opno;
 	Const	   *patt = (Const *) rightop;
 	Const	   *prefix = NULL;
-	Const	   *rest = NULL;
 	Pattern_Prefix_Status pstatus;
 	List	   *result;
 
@@ -2476,7 +2501,7 @@ expand_indexqual_opclause(RestrictInfo *rinfo, Oid opfamily)
 		case OID_NAME_LIKE_OP:
 		case OID_BYTEA_LIKE_OP:
 			pstatus = pattern_fixed_prefix(patt, Pattern_Type_Like,
-										   &prefix, &rest);
+										   &prefix, NULL);
 			result = prefix_quals(leftop, opfamily, prefix, pstatus);
 			break;
 
@@ -2485,7 +2510,7 @@ expand_indexqual_opclause(RestrictInfo *rinfo, Oid opfamily)
 		case OID_NAME_ICLIKE_OP:
 			/* the right-hand const is type text for all of these */
 			pstatus = pattern_fixed_prefix(patt, Pattern_Type_Like_IC,
-										   &prefix, &rest);
+										   &prefix, NULL);
 			result = prefix_quals(leftop, opfamily, prefix, pstatus);
 			break;
 
@@ -2494,7 +2519,7 @@ expand_indexqual_opclause(RestrictInfo *rinfo, Oid opfamily)
 		case OID_NAME_REGEXEQ_OP:
 			/* the right-hand const is type text for all of these */
 			pstatus = pattern_fixed_prefix(patt, Pattern_Type_Regex,
-										   &prefix, &rest);
+										   &prefix, NULL);
 			result = prefix_quals(leftop, opfamily, prefix, pstatus);
 			break;
 
@@ -2503,7 +2528,7 @@ expand_indexqual_opclause(RestrictInfo *rinfo, Oid opfamily)
 		case OID_NAME_ICREGEXEQ_OP:
 			/* the right-hand const is type text for all of these */
 			pstatus = pattern_fixed_prefix(patt, Pattern_Type_Regex_IC,
-										   &prefix, &rest);
+										   &prefix, NULL);
 			result = prefix_quals(leftop, opfamily, prefix, pstatus);
 			break;
 
@@ -2685,9 +2710,9 @@ expand_indexqual_rowcompare(RestrictInfo *rinfo,
 		righttypes_cell = list_head(righttypes);
 		foreach(opfamilies_cell, opfamilies)
 		{
-			Oid		opfam = lfirst_oid(opfamilies_cell);
-			Oid		lefttype = lfirst_oid(lefttypes_cell);
-			Oid		righttype = lfirst_oid(righttypes_cell);
+			Oid			opfam = lfirst_oid(opfamilies_cell);
+			Oid			lefttype = lfirst_oid(lefttypes_cell);
+			Oid			righttype = lfirst_oid(righttypes_cell);
 
 			expr_op = get_opfamily_member(opfam, lefttype, righttype,
 										  op_strategy);
@@ -2702,9 +2727,9 @@ expand_indexqual_rowcompare(RestrictInfo *rinfo,
 						 op_strategy, lefttype, righttype, opfam);
 			}
 			new_ops = lappend_oid(new_ops, expr_op);
+			lefttypes_cell = lnext(lefttypes_cell);
+			righttypes_cell = lnext(righttypes_cell);
 		}
-		lefttypes_cell = lnext(lefttypes_cell);
-		righttypes_cell = lnext(righttypes_cell);
 	}
 
 	/* If we have more than one matching col, create a subset rowcompare */
@@ -2724,7 +2749,7 @@ expand_indexqual_rowcompare(RestrictInfo *rinfo,
 								  matching_cols);
 		rc->rargs = list_truncate((List *) copyObject(clause->rargs),
 								  matching_cols);
-		return make_restrictinfo((Expr *) rc, true, false, false, NULL);
+		return make_simple_restrictinfo((Expr *) rc);
 	}
 	else
 	{
@@ -2733,7 +2758,7 @@ expand_indexqual_rowcompare(RestrictInfo *rinfo,
 		opexpr = make_opclause(linitial_oid(new_ops), BOOLOID, false,
 							   copyObject(linitial(clause->largs)),
 							   copyObject(linitial(clause->rargs)));
-		return make_restrictinfo(opexpr, true, false, false, NULL);
+		return make_simple_restrictinfo(opexpr);
 	}
 }
 
@@ -2821,7 +2846,7 @@ prefix_quals(Node *leftop, Oid opfamily,
 			elog(ERROR, "no = operator for opfamily %u", opfamily);
 		expr = make_opclause(oproid, BOOLOID, false,
 							 (Expr *) leftop, (Expr *) prefix_const);
-		result = list_make1(make_restrictinfo(expr, true, false, false, NULL));
+		result = list_make1(make_simple_restrictinfo(expr));
 		return result;
 	}
 
@@ -2836,7 +2861,7 @@ prefix_quals(Node *leftop, Oid opfamily,
 		elog(ERROR, "no >= operator for opfamily %u", opfamily);
 	expr = make_opclause(oproid, BOOLOID, false,
 						 (Expr *) leftop, (Expr *) prefix_const);
-	result = list_make1(make_restrictinfo(expr, true, false, false, NULL));
+	result = list_make1(make_simple_restrictinfo(expr));
 
 	/*-------
 	 * If we can create a string larger than the prefix, we can say
@@ -2844,21 +2869,16 @@ prefix_quals(Node *leftop, Oid opfamily,
 	 *-------
 	 */
 	oproid = get_opfamily_member(opfamily, datatype, datatype,
-								BTLessStrategyNumber);
+								 BTLessStrategyNumber);
 	if (oproid == InvalidOid)
 		elog(ERROR, "no < operator for opfamily %u", opfamily);
 	fmgr_info(get_opcode(oproid), &ltproc);
 	greaterstr = make_greater_string(prefix_const, &ltproc);
 	if (greaterstr)
 	{
-		oproid = get_opfamily_member(opfamily, datatype, datatype,
-									 BTLessStrategyNumber);
-		if (oproid == InvalidOid)
-			elog(ERROR, "no < operator for opfamily %u", opfamily);
 		expr = make_opclause(oproid, BOOLOID, false,
 							 (Expr *) leftop, (Expr *) greaterstr);
-		result = lappend(result,
-						 make_restrictinfo(expr, true, false, false, NULL));
+		result = lappend(result, make_simple_restrictinfo(expr));
 	}
 
 	return result;
@@ -2921,7 +2941,7 @@ network_prefix_quals(Node *leftop, Oid expr_op, Oid opfamily, Datum rightop)
 						 (Expr *) leftop,
 						 (Expr *) makeConst(datatype, -1, -1, opr1right,
 											false, false));
-	result = list_make1(make_restrictinfo(expr, true, false, false, NULL));
+	result = list_make1(make_simple_restrictinfo(expr));
 
 	/* create clause "key <= network_scan_last( rightop )" */
 
@@ -2936,8 +2956,7 @@ network_prefix_quals(Node *leftop, Oid expr_op, Oid opfamily, Datum rightop)
 						 (Expr *) leftop,
 						 (Expr *) makeConst(datatype, -1, -1, opr2right,
 											false, false));
-	result = lappend(result,
-					 make_restrictinfo(expr, true, false, false, NULL));
+	result = lappend(result, make_simple_restrictinfo(expr));
 
 	return result;
 }
@@ -2974,6 +2993,7 @@ string_to_const(const char *str, Oid datatype)
 {
 	Datum		conval = string_to_datum(str, datatype);
 
-	return makeConst(datatype, -1, ((datatype == NAMEOID) ? NAMEDATALEN : -1),
+	return makeConst(datatype, -1,
+					 ((datatype == NAMEOID) ? NAMEDATALEN : -1),
 					 conval, false, false);
 }

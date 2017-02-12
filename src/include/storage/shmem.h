@@ -14,7 +14,7 @@
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- * $PostgreSQL: pgsql/src/include/storage/shmem.h,v 1.50 2007/01/05 22:19:58 momjian Exp $
+ * $PostgreSQL: pgsql/src/include/storage/shmem.h,v 1.53 2008/01/01 19:45:59 momjian Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -22,7 +22,6 @@
 #define SHMEM_H
 
 #include "utils/hsearch.h"
-#include "utils/size.h"
 
 /*
  * The shared memory region can start at a different address
@@ -35,7 +34,6 @@
 typedef unsigned long SHMEM_OFFSET;
 
 #define INVALID_OFFSET	(-1)
-#define BAD_LOCATION	(-1)
 
 /*
  * Start of the primary shared memory region, in this process' address space.
@@ -76,6 +74,8 @@ extern void InitShmemIndex(void);
 extern HTAB *ShmemInitHash(const char *name, long init_size, long max_size,
 			  HASHCTL *infoP, int hash_flags);
 extern void *ShmemInitStruct(const char *name, Size size, bool *foundPtr);
+extern Size add_size(Size s1, Size s2);
+extern Size mul_size(Size s1, Size s2);
 
 /* ipci.c */
 extern void RequestAddinShmemSpace(Size size);

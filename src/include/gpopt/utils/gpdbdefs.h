@@ -30,6 +30,7 @@ extern "C" {
 #include "parser/parsetree.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
+#include "utils/syscache.h"
 #include "utils/datum.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
@@ -64,6 +65,7 @@ extern "C" {
 #include "parser/parse_coerce.h"
 #include "utils/selfuncs.h"
 #include "utils/faultinjector.h"
+#include "funcapi.h"
 
 extern
 Query *preprocess_query_optimizer(Query *pquery, ParamListInfo boundParams);
@@ -97,6 +99,12 @@ TupleTableSlot *ExecutorRun(QueryDesc *pqueryDesc, ScanDirection direction, long
 
 extern
 void ExecutorEnd(QueryDesc *pqueryDesc);
+
+extern
+void ExecCheckRTPerms(List *rangeTable);
+
+extern
+void ExecCheckRTEPerms(RangeTblEntry *rte);
 
 } // end extern C
 

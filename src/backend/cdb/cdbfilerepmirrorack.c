@@ -132,6 +132,8 @@ FileRepAckMirror_ConstructAndInsertMessage(
 		case FileRepOperationReconcileXLogEof:
 		case FileRepOperationValidation:
 		case FileRepOperationCreate:
+		case FileRepOperationStartSlruChecksum:
+		case FileRepOperationVerifySlruDirectoryChecksum:
 			fileRepMessageHeader->fileRepOperationDescription = fileRepOperationDescription;
 			break;
 			
@@ -417,13 +419,7 @@ FileRepAckMirror_RunSender(void)
 							   FILEREP_UNDEFINED,
 							   FILEREP_UNDEFINED);		
 				
-#ifdef FAULT_INJECTOR
-		FaultInjector_InjectFaultIfSet(
-									   FileRepSender,
-									   DDLNotSpecified,
-									   "",	//databaseName
-									   ""); // tableName
-#endif						
+		SIMPLE_FAULT_INJECTOR(FileRepSender);
 		
 		fileRepMessage = (char*) (fileRepAckShmem->positionConsume + 
 								  sizeof(FileRepShmemMessageDescr_s));

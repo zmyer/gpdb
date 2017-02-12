@@ -206,7 +206,7 @@ nb_classify_accum(PG_FUNCTION_ARGS)
 		 * Since the ln(0) is undefined we want to increment the count 
 		 * for all classes. 
 		 *
-		 * This get's a bit more complicated for the denominator which
+		 * This gets a bit more complicated for the denominator which
 		 * needs to know how many values there are for this attribute
 		 * so that we keep the total probability for the attribute = 1.
 		 * To handle this the aggregation function should be passed the
@@ -347,11 +347,15 @@ nb_classify_final(PG_FUNCTION_ARGS)
 	 * beginning and walk adding the length of the current element until
 	 * you get to the index you are interested in.
 	 */
+	/*
+	 * GPDB_83_MERGE_FIXME: is it guaranteed that there are no short varlenas
+	 * in the array?
+	 */
 	class_data = (char*) ARR_DATA_PTR(state.classes);
 	for (i = 0; i < maxi; i++)
 	{
 		class_data += VARSIZE(class_data);
-		class_data = (char*) att_align(class_data, 'i');
+		class_data = (char*) att_align_nominal(class_data, 'i');
 	}
 	PG_RETURN_TEXT_P(class_data);
 }
@@ -447,14 +451,14 @@ static void get_nb_state(HeapTupleHeader tuple,
 		ARR_NDIM(state->accum) != 1 ||
 		ARR_NDIM(state->total) != 1 ||
 		ARR_DIMS(state->accum)[0] != ARR_DIMS(state->classes)[0] ||
-		ARR_DIMS(state->classes)[0] != ARR_DIMS(state->classes)[0])
+		ARR_DIMS(state->classes)[0] != ARR_DIMS(state->total)[0])
 	{
 		ereport(ERROR, 
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("nb_classify: invalid accumulation state")));
 	}
 
-	/* Check that lengths matchup with what was expected */
+	/* Check that lengths match up with what was expected */
 	if (nclasses > 0 && ARR_DIMS(state->classes)[0] != nclasses) 
 	{
 		ereport(ERROR,

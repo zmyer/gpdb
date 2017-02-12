@@ -329,10 +329,6 @@ TEST_F(ClangCompilerTest, GetLiteralConstantTest) {
   CheckGetLiteralConstant(UInt16Enum::kCaseC,
                           "static_cast<unsigned short>(2u)");
 
-  // Floats and doubles (using hex-float literals to avoid rounding errors).
-  CheckGetLiteralConstant(0x1.123efp-10f, "0x1.123ef00000000p-10f");
-  CheckGetLiteralConstant(0x1.123456789abcdp+999, "0x1.123456789abcdp+999");
-
   // Pointer literals.
   CheckGetLiteralConstant(nullptr, "nullptr");
   CheckGetLiteralConstant(static_cast<void*>(nullptr),
@@ -372,7 +368,7 @@ static const char kExternalFunctionBinomialCoefficientSource[] =
 }  // namespace
 
 TEST_F(ClangCompilerTest, ExternalFunctionTest) {
-  codegen_utils_->RegisterExternalFunction(&factorial, "factorial");
+  codegen_utils_->GetOrRegisterExternalFunction(&factorial, "factorial");
   EXPECT_TRUE(clang_compiler_->CompileCppSource(
       llvm::Twine(clang_compiler_->GenerateExternalFunctionDeclarations())
           .concat(kExternalFunctionBinomialCoefficientSource)));
@@ -429,16 +425,16 @@ static const char kExternalMethodInvocationSource[] =
 }  // namespace
 
 TEST_F(ClangCompilerTest, ExternalMethodTest) {
-  codegen_utils_->RegisterExternalFunction(
+  codegen_utils_->GetOrRegisterExternalFunction(
       &WrapNew<Accumulator<double>, double>,
       "new_Accumulator");
-  codegen_utils_->RegisterExternalFunction(
+  codegen_utils_->GetOrRegisterExternalFunction(
       &WrapDelete<Accumulator<double>>,
       "delete_Accumulator");
-  codegen_utils_->RegisterExternalFunction(
+  codegen_utils_->GetOrRegisterExternalFunction(
       &GPCODEGEN_WRAP_METHOD(&Accumulator<double>::Accumulate),
       "Accumulator_Accumulate");
-  codegen_utils_->RegisterExternalFunction(
+  codegen_utils_->GetOrRegisterExternalFunction(
       &GPCODEGEN_WRAP_METHOD(&Accumulator<double>::Get),
       "Accumulator_Get");
 

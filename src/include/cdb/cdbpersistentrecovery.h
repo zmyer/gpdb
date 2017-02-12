@@ -1,40 +1,17 @@
 /*-------------------------------------------------------------------------
  *
- * persistentrecovery.h
+ * cdbpersistentrecovery.h
  *
  * Copyright (c) 2009-2010, Greenplum inc
  *
  *-------------------------------------------------------------------------
  */
-#ifndef PERSISTENTRECOVERY_H
-#define PERSISTENTRECOVERY_H
+#ifndef CDBPERSISTENTRECOVERY_H
+#define CDBPERSISTENTRECOVERY_H
 
 #include "access/xlogdefs.h"
 #include "access/xlog.h"
 #include "cdb/cdbpersistentstore.h"
-
-typedef struct Pass2RecoveryHashShmem_s {
-
-	HTAB    *hash;
-
-} Pass2RecoveryHashShmem_s; 
-
-typedef struct Pass2RecoveryHashEntry_s {
-	
-	Oid objid;
-
-	int32 segmentFileNum;
-
-} Pass2RecoveryHashEntry_s;
-
-extern Pass2RecoveryHashShmem_s *pass2RecoveryHashShmem;
-
-extern void Pass2Recovery_ShmemInit(void);
-
-extern Size Pass2Recovery_ShmemSize(void);
-
-/* max number of AbortingCreate entry tracked in shared memory hash table */
-#define GP_MAX_PASS2RECOVERY_ABORTINGCREATE 128
 
 inline static int PersistentRecovery_DebugPrintLevel(void)
 {
@@ -43,7 +20,6 @@ inline static int PersistentRecovery_DebugPrintLevel(void)
 	else
 		return Debug_persistent_recovery_print_level;
 }
-
 
 extern bool
 PersistentRecovery_ShouldHandlePass1XLogRec(
@@ -95,4 +71,4 @@ extern void
 PersistentRecovery_DeserializeRedoRelationFile(
 	int redoRelationFile);
 
-#endif   /* PERSISTENTRECOVERY_H */
+#endif   /* CDBPERSISTENTRECOVERY_H */

@@ -14,12 +14,13 @@
  */
 
 #include "postgres.h"
-#include "utils/gp_atomic.h"
+
 #include "cdb/cdbvars.h"
-#include "utils/vmem_tracker.h"
-#include "utils/session_state.h"
-#include "utils/faultinjector.h"
 #include "miscadmin.h"
+#include "port/atomics.h"
+#include "utils/faultinjector.h"
+#include "utils/session_state.h"
+#include "utils/vmem_tracker.h"
 
 /* External dependencies within the runaway cleanup framework */
 extern bool vmemTrackerInited;
@@ -122,13 +123,7 @@ RunawayCleaner_StartCleanup()
 			/* Super user is terminated only when it's the primary runaway consumer (i.e., the top consumer) */
 			(!superuser() || MySessionState->runawayStatus == RunawayStatus_PrimaryRunawaySession))
 		{
-#ifdef FAULT_INJECTOR
-	FaultInjector_InjectFaultIfSet(
-			RunawayCleanup,
-			DDLNotSpecified,
-			"",  // databaseName
-			""); // tableName
-#endif
+			SIMPLE_FAULT_INJECTOR(RunawayCleanup);
 
 			ereport(ERROR, (errmsg("Canceling query because of high VMEM usage. Used: %dMB, available %dMB, red zone: %dMB",
 					VmemTracker_ConvertVmemChunksToMB(MySessionState->sessionVmem), VmemTracker_GetAvailableVmemMB(),

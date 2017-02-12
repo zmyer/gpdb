@@ -10,7 +10,7 @@
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/catalog/catalog.c,v 1.69 2007/01/05 22:19:24 momjian Exp $
+ *	  $PostgreSQL: pgsql/src/backend/catalog/catalog.c,v 1.72.2.1 2008/02/20 17:44:14 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -24,9 +24,11 @@
 #include "access/transam.h"
 #include "catalog/catalog.h"
 #include "catalog/indexing.h"
+#include "catalog/namespace.h"
 #include "catalog/pg_amop.h"
 #include "catalog/pg_amproc.h"
 #include "catalog/pg_auth_members.h"
+#include "catalog/pg_auth_time_constraint.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_exttable.h"
@@ -42,7 +44,6 @@
 #include "catalog/pg_resqueue.h"
 #include "catalog/pg_rewrite.h"
 #include "catalog/pg_statistic.h"
-#include "catalog/pg_tidycat.h"
 #include "catalog/pg_trigger.h"
 
 #include "catalog/gp_configuration.h"
@@ -302,58 +303,6 @@ GetDatabasePath(Oid dbNode, Oid spcNode)
 	return path;
 }
 
-void
-CopyDatabasePath(char *target, int targetMaxLen, Oid dbNode, Oid spcNode)
-{
-	int 		snprintfResult;
-
-	if (spcNode == GLOBALTABLESPACE_OID)
-	{
-		/* Shared system relations live in {datadir}/global */
-		Assert(dbNode == 0);
-
-		// Using strncpy is error prone.
-		snprintfResult =
-			snprintf(target, targetMaxLen, "global");
-	}
-	else if (spcNode == DEFAULTTABLESPACE_OID)
-	{
-		/* The default tablespace is {datadir}/base */
-		snprintfResult =
-			snprintf(target, targetMaxLen, "base/%u",
-					 dbNode);
-	}
-	else
-	{
-		char *primary_path;
-
-		/* All other tablespaces are accessed via filespace locations */
-		GetFilespacePathForTablespace(
-								spcNode,
-								&primary_path);
-
-		/* Copy path into the passed in target location */
-		snprintfResult =
-			snprintf(target, targetMaxLen, "%s/%u/%u",
-					 primary_path, spcNode, dbNode);
-
-		/* Throw away the allocation we got from persistent layer */
-		pfree(primary_path);
-	}
-
-	if (snprintfResult < 0)
-		elog(ERROR, "CopyDatabasePath formatting error");
-
-	/*
-	 * Magically truncating the result to fit in the target string is unacceptable here
-	 * because it can result in the wrong file-system object being referenced.
-	 */
-	if (snprintfResult >= targetMaxLen)
-		elog(ERROR, "CopyDatabasePath formatting result length %d exceeded the maximum length %d",
-					snprintfResult,
-					targetMaxLen);
-}
-
 
 void FormDatabasePath(
 	char *databasePath,
@@ -397,14 +346,14 @@ void FormDatabasePath(
 	}
 
 	if (snprintfResult < 0)
-		elog(ERROR, "CopyDatabasePath formatting error");
+		elog(ERROR, "FormDatabasePath formatting error");
 
 	/*
 	 * Magically truncating the result to fit in the target string is unacceptable here
 	 * because it can result in the wrong file-system object being referenced.
 	 */
 	if (snprintfResult >= targetMaxLen)
-		elog(ERROR, "CopyDatabasePath formatting result length %d exceeded the maximum length %d",
+		elog(ERROR, "FormDatabasePath formatting result length %d exceeded the maximum length %d",
 					snprintfResult,
 					targetMaxLen);
 }
@@ -568,30 +517,6 @@ IsToastClass(Form_pg_class reltuple)
 }
 
 /*
- * IsAoSegmentRelation
- *		True iff relation is an AO segment support relation (or index).
- */
-bool
-IsAoSegmentRelation(Relation relation)
-{
-	return IsAoSegmentNamespace(RelationGetNamespace(relation));
-}
-
-/*
- * IsAoSegmentClass
- *		Like the above, but takes a Form_pg_class as argument.
- *		Used when we do not want to open the relation and have to
- *		search pg_class directly.
- */
-bool
-IsAoSegmentClass(Form_pg_class reltuple)
-{
-	Oid			relnamespace = reltuple->relnamespace;
-	
-	return IsAoSegmentNamespace(relnamespace);
-}
-
-/*
  * IsSystemNamespace
  *		True iff namespace is pg_catalog.
  *
@@ -606,15 +531,17 @@ IsSystemNamespace(Oid namespaceId)
 
 /*
  * IsToastNamespace
- *		True iff namespace is pg_toast.
+ *		True iff namespace is pg_toast or my temporary-toast-table namespace.
  *
- * NOTE: the reason this isn't a macro is to avoid having to include
- * catalog/pg_namespace.h in a lot of places.
+ * Note: this will return false for temporary-toast-table namespaces belonging
+ * to other backends.  Those are treated the same as other backends' regular
+ * temp table namespaces, and access is prevented where appropriate.
  */
 bool
 IsToastNamespace(Oid namespaceId)
 {
-	return namespaceId == PG_TOAST_NAMESPACE;
+	return (namespaceId == PG_TOAST_NAMESPACE) ||
+		isTempToastNamespace(namespaceId);
 }
 
 /*
@@ -694,15 +621,17 @@ bool
 IsSharedRelation(Oid relationId)
 {
 	/* These are the shared catalogs (look for BKI_SHARED_RELATION) */
-	if (
+	if (relationId == AuthIdRelationId ||
 		relationId == AuthMemRelationId ||
 		relationId == DatabaseRelationId ||
 		relationId == PLTemplateRelationId ||
 		relationId == SharedDescriptionRelationId ||
 		relationId == SharedDependRelationId ||
-		relationId == FileSpaceRelationId ||
-		relationId == TableSpaceRelationId ||
+		relationId == TableSpaceRelationId)
+		return true;
 
+	/* GPDB additions */
+	if (relationId == FileSpaceRelationId ||
 		relationId == GpIdRelationId ||
 		relationId == GpVersionRelationId ||
 
@@ -715,47 +644,24 @@ IsSharedRelation(Oid relationId)
 		/* MPP-6929: metadata tracking */
 		relationId == StatLastShOpRelationId ||
 
-/* TIDYCAT_BEGIN_CODEGEN 
-*/
-/*
-   WARNING: DO NOT MODIFY THE FOLLOWING SECTION: 
-   Generated by ./tidycat.pl version 29
-   on Mon Aug  1 17:08:37 2011
- */
-/* relation id: 6026 - pg_resqueue 20100129 */
-relationId == ResQueueRelationId || 
-/* relation id: 6059 - pg_resourcetype 20100129 */
-relationId == ResourceTypeRelationId || 
-/* relation id: 6060 - pg_resqueuecapability 20100129 */
-relationId == ResQueueCapabilityRelationId || 
-/* relation id: 1260 - pg_authid 20100129 */
-relationId == AuthIdRelationId || 
-/* relation id: 5035 - gp_san_configuration 20101104 */
-relationId == GpSanConfigRelationId || 
-/* relation id: 5039 - gp_fault_strategy 20101104 */
-relationId == GpFaultStrategyRelationId || 
-/* relation id: 5000 - gp_configuration 20101104 */
-relationId == GpConfigurationRelationId || 
-/* relation id: 5006 - gp_configuration_history 20101104 */
-relationId == GpConfigHistoryRelationId || 
-/* relation id: 5029 - gp_db_interfaces 20101104 */
-relationId == GpDbInterfacesRelationId || 
-/* relation id: 5030 - gp_interfaces 20101104 */
-relationId == GpInterfacesRelationId || 
-/* relation id: 5036 - gp_segment_configuration 20101122 */
-relationId == GpSegmentConfigRelationId || 
-/* relation id: 5033 - pg_filespace_entry 20101122 */
-relationId == FileSpaceEntryRelationId || 
+		relationId == ResQueueRelationId ||
+		relationId == ResourceTypeRelationId ||
+		relationId == ResQueueCapabilityRelationId ||
+		relationId == GpSanConfigRelationId ||
+		relationId == GpFaultStrategyRelationId ||
+		relationId == GpConfigurationRelationId ||
+		relationId == GpConfigHistoryRelationId ||
+		relationId == GpDbInterfacesRelationId ||
+		relationId == GpInterfacesRelationId ||
+		relationId == GpSegmentConfigRelationId ||
+		relationId == FileSpaceEntryRelationId ||
 
-/* relation id: 2914 - pg_auth_time_constraint 20110908 */
-relationId == AuthTimeConstraintRelationId ||
-/* TIDYCAT_END_CODEGEN */
-		0 /* OR ZERO */
-			)
-
+		relationId == AuthTimeConstraintRelationId)
 		return true;
+
 	/* These are their indexes (see indexing.h) */
-	if (
+	if (relationId == AuthIdRolnameIndexId ||
+		relationId == AuthIdOidIndexId ||
 		relationId == AuthMemRoleMemIndexId ||
 		relationId == AuthMemMemRoleIndexId ||
 		relationId == DatabaseNameIndexId ||
@@ -764,91 +670,58 @@ relationId == AuthTimeConstraintRelationId ||
 		relationId == SharedDescriptionObjIndexId ||
 		relationId == SharedDependDependerIndexId ||
 		relationId == SharedDependReferenceIndexId ||
-		relationId == FilespaceOidIndexId ||
-		relationId == FilespaceNameIndexId ||
 		relationId == TablespaceOidIndexId ||
-		relationId == TablespaceNameIndexId ||
+		relationId == TablespaceNameIndexId)
+		return true;
+
+	/* GPDB added indexes */
+	if (relationId == FilespaceOidIndexId ||
+		relationId == FilespaceNameIndexId ||
 
 		/* MPP-6929: metadata tracking */
 		relationId == StatLastShOpClassidObjidIndexId ||
 		relationId == StatLastShOpClassidObjidStaactionnameIndexId ||
 
-/* TIDYCAT_BEGIN_CODEGEN 
-*/
-/*
-   WARNING: DO NOT MODIFY THE FOLLOWING SECTION: 
-   Generated by ./tidycat.pl version 3.
-   on Thu Jun  9 20:51:39 2011
- */
-/* relation id: 6026 - pg_resqueue 20100129 */
-relationId == ResQueueOidIndexId || 
-/* relation id: 6026 - pg_resqueue 20100129 */
-relationId == ResQueueRsqnameIndexId || 
-/* relation id: 6059 - pg_resourcetype 20100129 */
-relationId == ResourceTypeOidIndexId || 
-/* relation id: 6059 - pg_resourcetype 20100129 */
-relationId == ResourceTypeRestypidIndexId || 
-/* relation id: 6059 - pg_resourcetype 20100129 */
-relationId == ResourceTypeResnameIndexId || 
-/* relation id: 6060 - pg_resqueuecapability 20100129 */
-relationId == ResQueueCapabilityOidIndexId || 
-/* relation id: 6060 - pg_resqueuecapability 20100129 */
-relationId == ResQueueCapabilityResqueueidIndexId || 
-/* relation id: 6060 - pg_resqueuecapability 20100129 */
-relationId == ResQueueCapabilityRestypidIndexId || 
-/* relation id: 1260 - pg_authid 20100129 */
-relationId == AuthIdRolnameIndexId || 
-/* relation id: 1260 - pg_authid 20100129 */
-relationId == AuthIdOidIndexId || 
-/* relation id: 1260 - pg_authid 20100129 */
-relationId == AuthIdRolResQueueIndexId || 
-/* relation id: 5035 - gp_san_configuration 20101104 */
-relationId == GpSanConfigMountidIndexId || 
-/* relation id: 5000 - gp_configuration 20101104 */
-relationId == GpConfigurationContentDefinedprimaryIndexId || 
-/* relation id: 5000 - gp_configuration 20101104 */
-relationId == GpConfigurationDbidIndexId || 
-/* relation id: 5029 - gp_db_interfaces 20101104 */
-relationId == GpDbInterfacesDbidIndexId || 
-/* relation id: 5030 - gp_interfaces 20101104 */
-relationId == GpInterfacesInterfaceidIndexId || 
-/* relation id: 5036 - gp_segment_configuration 20101122 */
-relationId == GpSegmentConfigContentPreferred_roleIndexId || 
-/* relation id: 5036 - gp_segment_configuration 20101122 */
-relationId == GpSegmentConfigDbidIndexId || 
-/* relation id: 5033 - pg_filespace_entry 20101122 */
-relationId == FileSpaceEntryFsefsoidIndexId || 
-/* relation id: 5033 - pg_filespace_entry 20101122 */
-relationId == FileSpaceEntryFsefsoidFsedbidIndexId || 
-
-
-/* TIDYCAT_END_CODEGEN */
-		0 /* OR ZERO */
-
-			)
+		relationId == ResQueueOidIndexId ||
+		relationId == ResQueueRsqnameIndexId ||
+		relationId == ResourceTypeOidIndexId ||
+		relationId == ResourceTypeRestypidIndexId ||
+		relationId == ResourceTypeResnameIndexId ||
+		relationId == ResQueueCapabilityOidIndexId ||
+		relationId == ResQueueCapabilityResqueueidIndexId ||
+		relationId == ResQueueCapabilityRestypidIndexId ||
+		relationId == AuthIdRolResQueueIndexId ||
+		relationId == GpSanConfigMountidIndexId ||
+		relationId == GpConfigurationContentDefinedprimaryIndexId ||
+		relationId == GpConfigurationDbidIndexId ||
+		relationId == GpDbInterfacesDbidIndexId ||
+		relationId == GpInterfacesInterfaceidIndexId ||
+		relationId == GpSegmentConfigContentPreferred_roleIndexId ||
+		relationId == GpSegmentConfigDbidIndexId ||
+		relationId == FileSpaceEntryFsefsoidIndexId ||
+		relationId == FileSpaceEntryFsefsoidFsedbidIndexId)
+	{
 		return true;
+	}
+
 	/* These are their toast tables and toast indexes (see toasting.h) */
 	if (relationId == PgAuthidToastTable ||
 		relationId == PgAuthidToastIndex ||
 		relationId == PgDatabaseToastTable ||
 		relationId == PgDatabaseToastIndex ||
 		relationId == PgShdescriptionToastTable ||
-		relationId == PgShdescriptionToastIndex ||
-
-/* TIDYCAT_BEGIN_CODEGEN 
-*/
-
-/* relation id: 5036 - gp_segment_configuration 20101122 */
-relationId == GpSegmentConfigToastTable || 
-relationId == GpSegmentConfigToastIndex || 
-
-/* relation id: 5033 - pg_filespace_entry 20101122 */
-relationId == PgFileSpaceEntryToastTable || 
-relationId == PgFileSpaceEntryToastIndex || 
-/* TIDYCAT_END_CODEGEN */
-		0 /* OR ZERO */
-			)
+		relationId == PgShdescriptionToastIndex)
 		return true;
+
+	/* GPDB added toast tables and their indexes */
+	if (relationId == GpSegmentConfigToastTable ||
+		relationId == GpSegmentConfigToastIndex ||
+
+		relationId == PgFileSpaceEntryToastTable ||
+		relationId == PgFileSpaceEntryToastIndex)
+	{
+		return true;
+	}
 	return false;
 }
 
@@ -961,7 +834,7 @@ GetNewOid(Relation relation)
 	 * RelationNeedsSynchronizedOIDs()).
 	 */
 	if (Gp_role == GP_ROLE_EXECUTE && RelationNeedsSynchronizedOIDs(relation))
-		elog(WARNING, "allocated OID %u for relation \"%s\" in segment",
+		elog(PANIC, "allocated OID %u for relation \"%s\" in segment",
 			 newOid, RelationGetRelationName(relation));
 
 	return newOid;
@@ -983,9 +856,12 @@ Oid
 GetNewOidWithIndex(Relation relation, Relation indexrel)
 {
 	Oid			newOid;
+	SnapshotData SnapshotDirty;
 	IndexScanDesc scan;
 	ScanKeyData key;
 	bool		collides;
+
+	InitDirtySnapshot(SnapshotDirty);
 
 	/* Generate new OIDs until we find one not in the table */
 	do
@@ -1001,7 +877,7 @@ GetNewOidWithIndex(Relation relation, Relation indexrel)
 
 		/* see notes above about using SnapshotDirty */
 		scan = index_beginscan(relation, indexrel,
-							   SnapshotDirty, 1, &key);
+							   &SnapshotDirty, 1, &key);
 
 		collides = HeapTupleIsValid(index_getnext(scan, ForwardScanDirection));
 
@@ -1033,7 +909,7 @@ GetNewRelFileNode(Oid reltablespace, bool relisshared, Relation pg_class)
 	RelFileNode rnode;
 	char	   *rpath;
 	int			fd;
-	bool		collides;
+	bool		collides = true;
 
 	/* This should match RelationInitPhysicalAddr */
 	rnode.spcNode = reltablespace ? reltablespace : MyDatabaseTableSpace;
@@ -1048,6 +924,9 @@ GetNewRelFileNode(Oid reltablespace, bool relisshared, Relation pg_class)
 			rnode.relNode = GetNewOid(pg_class);
 		else
 			rnode.relNode = GetNewObjectId();
+
+		if (!UseOidForRelFileNode(rnode.relNode))
+			continue;
 
 		/* Check for existing file of same name */
 		rpath = relpath(rnode);
@@ -1081,69 +960,55 @@ GetNewRelFileNode(Oid reltablespace, bool relisshared, Relation pg_class)
 	if (Gp_role == GP_ROLE_EXECUTE)
 		Insist(!PointerIsValid(pg_class));
 
-	elog(DEBUG1, "Calling GetNewRelFileNode in %s mode %s pg_class. "
-		 "New relOid = %d", 
+	elog(DEBUG1, "Calling GetNewRelFileNode in %s mode %s pg_class. New relOid = %d",
 		 (Gp_role == GP_ROLE_EXECUTE ? "execute" :
 		  Gp_role == GP_ROLE_UTILITY ? "utility" :
 		  "dispatch"), pg_class ? "with" : "without",
-		 rnode.relNode );
+		 rnode.relNode);
 
 	return rnode.relNode;
 }
 
-
+/*
+ * Can the given OID be used as pg_class.relfilenode?
+ *
+ * As a side-effect, advances OID counter to the given OID and remembers
+ * that the OID has been used as a relfilenode, so that the same value
+ * doesn't get chosen again.
+ */
 bool
-CheckNewRelFileNodeIsOk(Oid newOid, Oid reltablespace, bool relisshared, 
-						Relation pg_class)
+CheckNewRelFileNodeIsOk(Oid newOid, Oid reltablespace, bool relisshared)
 {
 	RelFileNode rnode;
 	char	   *rpath;
 	int			fd;
 	bool		collides;
-	
-	
-	if (pg_class)
-	{
-		Oid			oidIndex;
-		Relation	indexrel;
-		IndexScanDesc scan;
-		ScanKeyData key;
-	
-		Assert(!IsBootstrapProcessingMode());
-		Assert(pg_class->rd_rel->relhasoids);
-	
-		/* The relcache will cache the identity of the OID index for us */
-		oidIndex = RelationGetOidIndex(pg_class);
-	
-		Assert(OidIsValid(oidIndex));
-		
-		indexrel = index_open(oidIndex, AccessShareLock);
-		
-		ScanKeyInit(&key,
-					(AttrNumber) 1,
-					BTEqualStrategyNumber, F_OIDEQ,
-					ObjectIdGetDatum(newOid));
+	SnapshotData SnapshotDirty;
 
-		scan = index_beginscan(pg_class, indexrel, SnapshotDirty, 1, &key);
+	/*
+	 * Advance our current OID counter with the given value, to keep
+	 * the counter roughly in sync across all nodes. This ensures
+	 * that a GetNewRelFileNode() call after this will not choose the
+	 * same OID, and won't have to loop excessively to retry. That
+	 * still leaves a race condition, if GetNewRelFileNode() is called
+	 * just before CheckNewRelFileNodeIsOk() - UseOidForRelFileNode()
+	 * is called to plug that.
+	 *
+	 * FIXME: handle OID wraparound gracefully.
+	 */
+	while(GetNewObjectId() < newOid);
 
-		collides = HeapTupleIsValid(index_getnext(scan, ForwardScanDirection));
+	if (!UseOidForRelFileNode(newOid))
+		return false;
 
-		index_endscan(scan);
-		
-		index_close(indexrel, AccessShareLock);
-		
-		if (collides)
-			elog(ERROR, "relfilenode %d already in use in \"pg_class\"",
-				 newOid);	
-		
-	}
+	InitDirtySnapshot(SnapshotDirty);
 
 	/* This should match RelationInitPhysicalAddr */
 	rnode.spcNode = reltablespace ? reltablespace : MyDatabaseTableSpace;
 	rnode.dbNode = relisshared ? InvalidOid : MyDatabaseId;
-	
+
 	rnode.relNode = newOid;
-	
+
 	/* Check for existing file of same name */
 	rpath = relpath(rnode);
 	fd = BasicOpenFile(rpath, O_RDONLY | PG_BINARY, 0);
@@ -1158,11 +1023,13 @@ CheckNewRelFileNodeIsOk(Oid newOid, Oid reltablespace, bool relisshared,
 		collides = false;
 
 	pfree(rpath);
-	
-	if (collides && !relisshared)
-		elog(ERROR, "oid %d already in use", newOid);	
 
-	while(GetNewObjectId() < newOid);
+	elog(DEBUG1, "Called CheckNewRelFileNodeIsOk in %s mode for %u / %u / %u. "
+		 "collides = %s",
+		 (Gp_role == GP_ROLE_EXECUTE ? "execute" :
+		  Gp_role == GP_ROLE_UTILITY ? "utility" :
+		  "dispatch"), newOid, reltablespace, relisshared,
+		 collides ? "true" : "false");
 
 	return !collides;
 }

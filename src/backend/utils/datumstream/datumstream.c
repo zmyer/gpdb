@@ -353,11 +353,8 @@ init_datumstream_info(
 					  bool checksum,
 					  int32 safeFSWriteSize,
 					  int32 maxsz,
-					  AORelationVersion version,
 					  Form_pg_attribute attr)
 {
-	AORelationVersion_CheckValid(version);
-
 	init_datumstream_typeinfo(
 							  typeInfo,
 							  attr);
@@ -376,7 +373,6 @@ init_datumstream_info(
 	ao_attr->compress = false;
 	ao_attr->compressType = NULL;
 	ao_attr->compressLevel = 0;
-	ao_attr->version = version;
 
 	*datumStreamVersion = DatumStreamVersion_Original;
 
@@ -486,7 +482,6 @@ create_datumstreamwrite(
 						bool checksum,
 						int32 safeFSWriteSize,
 						int32 maxsz,
-						AORelationVersion version,
 						Form_pg_attribute attr,
 						char *relname,
 						char *title)
@@ -513,7 +508,6 @@ create_datumstreamwrite(
 						  checksum,
 						  safeFSWriteSize,
 						  maxsz,
-						  version,
 						  attr);
 
 	compressionFunctions = NULL;
@@ -629,7 +623,6 @@ create_datumstreamread(
 					   bool checksum,
 					   int32 safeFSWriteSize,
 					   int32 maxsz,
-					   AORelationVersion version,
 					   Form_pg_attribute attr,
 					   char *relname,
 					   char *title)
@@ -653,7 +646,6 @@ create_datumstreamread(
 						  checksum,
 						  safeFSWriteSize,
 						  maxsz,
-						  version,
 						  attr);
 
 	compressionFunctions = NULL;
@@ -783,7 +775,7 @@ destroy_datumstreamread(DatumStreamRead * ds)
 
 
 void
-datumstreamwrite_open_file(DatumStreamWrite * ds, char *fn, int64 eof, int64 eofUncompressed, RelFileNode relFileNode, int32 segmentFileNum)
+datumstreamwrite_open_file(DatumStreamWrite * ds, char *fn, int64 eof, int64 eofUncompressed, RelFileNode relFileNode, int32 segmentFileNum, int version)
 {
 	ItemPointerData persistentTid;
 	int64 persistentSerialNum;
@@ -814,51 +806,51 @@ datumstreamwrite_open_file(DatumStreamWrite * ds, char *fn, int64 eof, int64 eof
 	else
 	{
 		if (!ReadGpRelationNode(
-								relFileNode.relNode,
-								segmentFileNum,
-								&persistentTid,
-								&persistentSerialNum))
+				(relFileNode.spcNode == MyDatabaseTableSpace) ? 0:relFileNode.spcNode,
+				relFileNode.relNode,
+				segmentFileNum,
+				&persistentTid,
+				&persistentSerialNum))
 		{
 			elog(ERROR, "Did not find gp_relation_node entry for relfilenode %u, segment file #%d, logical eof " INT64_FORMAT,
 				 relFileNode.relNode,
 				 segmentFileNum,
 				 eof);
 		}
+	}
 
-		if (gp_appendonly_verify_eof)
+	if (gp_appendonly_verify_eof)
+	{
+		appendOnlyNewEof = PersistentFileSysObj_ReadEof(
+					PersistentFsObjType_RelationFile,
+					&persistentTid);
+		/*
+		 * Verify if EOF from gp_persistent_relation_node < EOF from pg_aocsseg
+		 *
+		 * Note:- EOF from gp_persistent_relation_node has to be less than the
+		 * EOF from pg_aocsseg because inside a transaction the actual EOF where
+		 * the data is inserted has to be greater than or equal to Persistent
+		 * Table (PT) stored EOF as persistent table EOF value is updated at the
+		 * end of the transaction.
+		 */
+		if (eof < appendOnlyNewEof)
 		{
-			appendOnlyNewEof = PersistentFileSysObj_ReadEof(
-												PersistentFsObjType_RelationFile,
-												&persistentTid);
-
-			/*
-			 * Verify if EOF from gp_persistent_relation_node < EOF from pg_aocsseg
-			 *
-			 * Note:- EOF from gp_persistent_relation_node has to be less than the
-			 * EOF from pg_aocsseg because inside a transaction the actual EOF where
-			 * the data is inserted has to be greater than or equal to Persistent
-			 * Table (PT) stored EOF as persistent table EOF value is updated at the
-			 * end of the transaction.
-			 */
-			if (eof < appendOnlyNewEof)
-			{
-				elog(ERROR, "Unexpected EOF for relfilenode %u,"
-							" segment file %d: EOF from gp_persistent_relation_node "
-							INT64_FORMAT " greater than current EOF " INT64_FORMAT,
-							relFileNode.relNode,
-							segmentFileNum,
-							appendOnlyNewEof,
-							eof);
-			}
+			elog(ERROR, "Unexpected EOF for relfilenode %u,"
+						" segment file %d: EOF from gp_persistent_relation_node "
+						INT64_FORMAT " greater than current EOF " INT64_FORMAT,
+						relFileNode.relNode,
+						segmentFileNum,
+						appendOnlyNewEof,
+						eof);
 		}
 	}
 
 	/*
 	 * Open the existing file for write.
 	 */
-	AppendOnlyStorageWrite_OpenFile(
-									&ds->ao_write,
+	AppendOnlyStorageWrite_OpenFile(&ds->ao_write,
 									fn,
+									version,
 									eof,
 									eofUncompressed,
 									&relFileNode,
@@ -870,7 +862,7 @@ datumstreamwrite_open_file(DatumStreamWrite * ds, char *fn, int64 eof, int64 eof
 }
 
 void
-datumstreamread_open_file(DatumStreamRead * ds, char *fn, int64 eof, int64 eofUncompressed, RelFileNode relFileNode, int32 segmentFileNum)
+datumstreamread_open_file(DatumStreamRead * ds, char *fn, int64 eof, int64 eofUncompressed, RelFileNode relFileNode, int32 segmentFileNum, int version)
 {
 	ds->eof = eof;
 	ds->eofUncompress = eofUncompressed;
@@ -878,7 +870,7 @@ datumstreamread_open_file(DatumStreamRead * ds, char *fn, int64 eof, int64 eofUn
 	if (ds->need_close_file)
 		datumstreamread_close_file(ds);
 
-	AppendOnlyStorageRead_OpenFile(&ds->ao_read, fn, ds->eof);
+	AppendOnlyStorageRead_OpenFile(&ds->ao_read, fn, version, ds->eof);
 
 	ds->need_close_file = true;
 }
@@ -1051,7 +1043,7 @@ datumstreamwrite_lob(DatumStreamWrite * acc, Datum d)
 	/*
 	 * If the datum is toasted	/ compressed -- an error.
 	 */
-	if (VARATT_IS_EXTENDED_D(d))
+	if (VARATT_IS_EXTENDED(DatumGetPointer(d)))
 	{
 		elog(ERROR, "Expected large object / variable length objects (varlena) to be de-toasted and/or de-compressed at this point");
 	}
@@ -1059,7 +1051,7 @@ datumstreamwrite_lob(DatumStreamWrite * acc, Datum d)
 	/*
 	 * De-Toast Datum
 	 */
-	if (VARATT_IS_EXTERNAL_D(d))
+	if (VARATT_IS_EXTERNAL(DatumGetPointer(d)))
 	{
 		d = PointerGetDatum(heap_tuple_fetch_attr(DatumGetPointer(d)));
 	}
@@ -1199,13 +1191,8 @@ datumstreamread_block_content(DatumStreamRead * acc)
 				{
 					pfree(acc->large_object_buffer);
 					acc->large_object_buffer = NULL;
-#ifdef FAULT_INJECTOR
-					FaultInjector_InjectFaultIfSet(MallocFailure,
-												   DDLNotSpecified,
-												   "", //databaseName
-												   "");
-					/* tableName */
-#endif
+
+					SIMPLE_FAULT_INJECTOR(MallocFailure);
 				}
 
 				acc->large_object_buffer_size = acc->getBlockInfo.contentLen;

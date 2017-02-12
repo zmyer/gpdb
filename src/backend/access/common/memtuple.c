@@ -52,7 +52,8 @@
  * then we use off minus saved bytes to find the attribute.
  */
 
-static inline int compute_null_bitmap_extra_size(TupleDesc tupdesc, int col_align)
+static int
+compute_null_bitmap_extra_size(TupleDesc tupdesc, int col_align)
 {
 	int nbytes = (tupdesc->natts + 7) >> 3;
 	int avail_bytes = (tupdesc->tdhasoid || col_align == 4) ? 0 : 4;
@@ -96,13 +97,15 @@ void destroy_memtuple_binding(MemTupleBinding *pbind)
 /* Compute how much space to store the null save entries.
  * The null save entries are stored in the binding, not per tuple.
  */
-static inline uint32 compute_null_save_entries(int i)
+static uint32
+compute_null_save_entries(int i)
 {
 	return ((i+7)/8) * 32; 
 }
 
 /* Add null save space into the entries */
-static inline void add_null_save(short *null_save, int i, short sz)
+static void
+add_null_save(short *null_save, int i, short sz)
 {
 	short* first = null_save + ((i/4) * 16);
 	unsigned int bit = 1 << (i%4);
@@ -119,14 +122,15 @@ static inline void add_null_save(short *null_save, int i, short sz)
  * Adds the aligned length into the array holding the space saved from null attributes.
  * Returns true if the binding length is aligned to the following binding's alignment.
  */
-static inline bool add_null_save_aligned(MemTupleAttrBinding *bind, short *null_save_aligned, int i, char next_attr_align)
+static bool
+add_null_save_aligned(MemTupleAttrBinding *bind, short *null_save_aligned, int i, char next_attr_align)
 {
 	Assert(bind);
 	Assert(bind->len > 0);
 	Assert(null_save_aligned);
 	Assert(i >= 0);
 
-	bind->len_aligned = att_align(bind->len, next_attr_align);
+	bind->len_aligned = att_align_nominal(bind->len, next_attr_align);
 	add_null_save(null_save_aligned, i, bind->len_aligned);
 
 	return (bind->len == bind->len_aligned);
@@ -144,9 +148,9 @@ static inline short compute_null_save_b(short *null_saves, unsigned char b)
 /* compute the null saved bytes by the whole null bit map, by the attribute
  * physically precedes the one.
  */
-static inline short compute_null_save(short *null_saves, unsigned char *nullbitmaps, int nbyte, unsigned char nbit)
+static inline int compute_null_save(short *null_saves, unsigned char *nullbitmaps, int nbyte, unsigned char nbit)
 {
-	short ret = 0;
+	int ret = 0;
 	int curr_byte = 0;
 	while(curr_byte < nbyte) 
 	{
@@ -161,7 +165,8 @@ static inline short compute_null_save(short *null_saves, unsigned char *nullbitm
 		
 #undef MEMTUPLE_INLINE_CHARTYPE
 /* Determine if an attr should be treated as offset_len in memtuple */
-static inline bool att_bind_as_varoffset(Form_pg_attribute attr)
+static bool
+att_bind_as_varoffset(Form_pg_attribute attr)
 {
 #ifdef MEMTUPLE_INLINE_CHARTYPE 
 	return (attr->attlen < 0 /* Varlen type */
@@ -232,7 +237,7 @@ static void create_col_bind(MemTupleBindingCols *colbind, bool islarge, TupleDes
 
 			if(pass == 0 && attr->attlen > 0 && attr->attalign == 'd')
 			{
-				bind->offset = att_align(cur_offset, attr->attalign);
+				bind->offset = att_align_nominal(cur_offset, attr->attalign);
 				bind->len = attr->attlen;
 				add_null_save(colbind->null_saves, physical_col, attr->attlen);
 				if (physical_col)
@@ -261,7 +266,7 @@ static void create_col_bind(MemTupleBindingCols *colbind, bool islarge, TupleDes
 					      )
 				) 
 			{
-				bind->offset = att_align(cur_offset, 'i'); 
+				bind->offset = att_align_nominal(cur_offset, 'i'); 
 				bind->len = attr->attlen > 0 ? attr->attlen : 4; 
 				add_null_save(colbind->null_saves, physical_col, bind->len);
 				if (physical_col)
@@ -299,7 +304,7 @@ static void create_col_bind(MemTupleBindingCols *colbind, bool islarge, TupleDes
 						)
 				)
 			{
-				bind->offset = att_align(cur_offset, 's');
+				bind->offset = att_align_nominal(cur_offset, 's');
 				bind->len = attr->attlen > 0 ? attr->attlen : 2; 
 				add_null_save(colbind->null_saves, physical_col, bind->len);
 				if (physical_col)
@@ -338,7 +343,7 @@ static void create_col_bind(MemTupleBindingCols *colbind, bool islarge, TupleDes
 						)
 					)
 			{
-				bind->offset = att_align(cur_offset, 'c');
+				bind->offset = att_align_nominal(cur_offset, 'c');
 
 #ifdef MEMTUPLE_INLINE_CHARTYPE 
 				/* Inline CHAR(N) disabled.  See att_bind_as_varoffset */
@@ -438,8 +443,7 @@ static uint32 compute_memtuple_size_using_bind(
 		int nullbit_extra,
 		uint32 *nullsaves,
 		MemTupleBindingCols *colbind,
-		TupleDesc tupdesc,
-		bool use_null_saves_aligned)
+		TupleDesc tupdesc)
 {
 	uint32 data_length = colbind->var_start; 
 	int i;
@@ -461,14 +465,7 @@ static uint32 compute_memtuple_size_using_bind(
 				Assert(bind->len_aligned >= 0);
 				Assert(bind->len_aligned >= bind->len);
 
-				if (use_null_saves_aligned)
-				{
-					len = bind->len_aligned;
-				}
-				else
-				{
-					len = bind->len;
-				}
+				len = bind->len_aligned;
 
 				*nullsaves += len;
 				data_length -= len;
@@ -486,14 +483,16 @@ static uint32 compute_memtuple_size_using_bind(
 
 		/* Varlen stuff */
 		/* We plan to convert to short varlena even if it is not currently */
-		if(bind->flag == MTB_ByRef && value_type_could_short(values[i], attr->atttypid)) 
+		if (bind->flag == MTB_ByRef &&
+			attr->attstorage != 'p' &&
+			value_type_could_short(DatumGetPointer(values[i]), attr->atttypid))
 		{
-			data_length += VARSIZE_ANY_EXHDR_D(values[i]) + VARHDRSZ_SHORT;
+			data_length += VARSIZE_ANY_EXHDR(DatumGetPointer(values[i])) + VARHDRSZ_SHORT;
 		}
 		else
 		{
-			data_length = att_align(data_length, attr->attalign); 
-			data_length = att_addlength(data_length, attr->attlen, values[i]);
+			data_length = att_align_nominal(data_length, attr->attalign); 
+			data_length = att_addlength_datum(data_length, attr->attlen, values[i]);
 		}
 	}
 
@@ -503,15 +502,15 @@ static uint32 compute_memtuple_size_using_bind(
 /* Compute the memtuple size. 
  * nullsave is an output param
  */
-uint32 compute_memtuple_size(MemTupleBinding *pbind, Datum *values, bool *isnull, bool hasnull, uint32 *nullsaves, bool use_null_saves_aligned)
+uint32 compute_memtuple_size(MemTupleBinding *pbind, Datum *values, bool *isnull, bool hasnull, uint32 *nullsaves)
 {
 	uint32 ret_len = 0;
-	ret_len = compute_memtuple_size_using_bind(values, isnull, hasnull, pbind->null_bitmap_extra_size, nullsaves, &pbind->bind, pbind->tupdesc, use_null_saves_aligned);
+	ret_len = compute_memtuple_size_using_bind(values, isnull, hasnull, pbind->null_bitmap_extra_size, nullsaves, &pbind->bind, pbind->tupdesc);
 
 	if(ret_len <= MEMTUPLE_LEN_FITSHORT) 
 		return ret_len;
 
-	ret_len = compute_memtuple_size_using_bind(values, isnull, hasnull, pbind->null_bitmap_extra_size, nullsaves, &pbind->large_bind, pbind->tupdesc, use_null_saves_aligned);
+	ret_len = compute_memtuple_size_using_bind(values, isnull, hasnull, pbind->null_bitmap_extra_size, nullsaves, &pbind->large_bind, pbind->tupdesc);
 	Assert(ret_len > MEMTUPLE_LEN_FITSHORT);
 
 	return ret_len;
@@ -520,7 +519,7 @@ uint32 compute_memtuple_size(MemTupleBinding *pbind, Datum *values, bool *isnull
 
 static inline char* memtuple_get_attr_ptr(char *start, MemTupleAttrBinding *bind, short *null_saves, unsigned char *nullp)
 {
-	short ns = 0;
+	int ns = 0;
 
 	if(nullp)
 		ns = compute_null_save(null_saves, nullp, bind->null_byte, bind->null_mask);
@@ -550,15 +549,13 @@ static inline int memtuple_get_nullp_len(MemTuple mtup __attribute__((unused)), 
 
 
 /* form a memtuple from values and isnull, to a prespecified buffer */
-static
-MemTuple memtuple_form_to_align(
+MemTuple memtuple_form_to(
 		MemTupleBinding *pbind,
 		Datum *values,
 		bool *isnull,
 		MemTuple mtup,
 		uint32 *destlen,
-		bool inline_toast,
-		bool use_null_saves_aligned)
+		bool inline_toast)
 {
 	bool hasnull = false;
 	bool hasext = false;
@@ -605,7 +602,7 @@ MemTuple memtuple_form_to_align(
 		if (attr->attlen == -1 &&
 				attr->attalign == 'd' &&
 				attr->attndims == 0 &&
-				!VARATT_IS_EXTENDED_D(values[i]))
+				!VARATT_IS_EXTENDED(DatumGetPointer(values[i])))
 		{
 			if (old_values == NULL)
 				old_values = (Datum *)palloc0(pbind->tupdesc->natts * sizeof(Datum));
@@ -615,7 +612,7 @@ MemTuple memtuple_form_to_align(
 				old_values[i] = 0;
 		}
 
-		if (attr->attlen == -1 && VARATT_IS_EXTERNAL_D(values[i]))
+		if (attr->attlen == -1 && VARATT_IS_EXTERNAL(DatumGetPointer(values[i])))
 		{
 			if(inline_toast)
 			{
@@ -634,7 +631,7 @@ MemTuple memtuple_form_to_align(
 	}
 
 	/* compute needed length */
-	len = compute_memtuple_size(pbind, values, isnull, hasnull, &null_save_len, use_null_saves_aligned);
+	len = compute_memtuple_size(pbind, values, isnull, hasnull, &null_save_len);
 	colbind = (len <= MEMTUPLE_LEN_FITSHORT) ? &pbind->bind : &pbind->large_bind;
 
 	if(!destlen)
@@ -738,15 +735,7 @@ MemTuple memtuple_form_to_align(
 
 		Assert(bind->offset != 0);
 
-		short *null_saves = NULL;
-		if (use_null_saves_aligned)
-		{
-			null_saves = colbind->null_saves_aligned;
-		}
-		else
-		{
-			null_saves = colbind->null_saves;
-		}
+		short *null_saves = colbind->null_saves_aligned;
 		Assert(null_saves);
 
 		/* Not null */
@@ -778,39 +767,40 @@ MemTuple memtuple_form_to_align(
 					else
 					{
 						char *p = memtuple_get_attr_ptr(start, bind, null_saves, nullp);
-						Assert(VARATT_COULD_SHORT_D(values[i]));
-						attr_len = VARSIZE_D(values[i]) - VARHDRSZ + VARHDRSZ_SHORT;
+						Assert(VARATT_CAN_MAKE_SHORT(DatumGetPointer(values[i])));
+						attr_len = VARSIZE(DatumGetPointer(values[i])) - VARHDRSZ + VARHDRSZ_SHORT;
 						Assert(attr_len <= bind->len);
 						*p = VARSIZE_TO_SHORT_D(values[i]);
-						memcpy(p+1, VARDATA_D(values[i]), attr_len-1);
+						memcpy(p+1, VARDATA(DatumGetPointer(values[i])), attr_len-1);
 					}
 				}
 				break;
 			case MTB_ByRef:
-				if(VARATT_IS_EXTERNAL_D(values[i]))
+				if(VARATT_IS_EXTERNAL(DatumGetPointer(values[i])))
 				{
-					varlen_start = (char *) att_align((long) varlen_start, attr->attalign);
+					varlen_start = (char *) att_align_nominal((long) varlen_start, attr->attalign);
 					attr_len = VARSIZE_EXTERNAL(DatumGetPointer(values[i]));
 					Assert((varlen_start - (char *) mtup) + attr_len <= len);
 					memcpy(varlen_start, DatumGetPointer(values[i]), attr_len);
 				}
-				else if(VARATT_IS_SHORT_D(values[i]))
+				else if(VARATT_IS_SHORT(DatumGetPointer(values[i])))
 				{
 					attr_len = VARSIZE_SHORT(DatumGetPointer(values[i]));
 					Assert((varlen_start - (char *) mtup) + attr_len <= len);
 					memcpy(varlen_start, DatumGetPointer(values[i]), attr_len);
 				}
-				else if(value_type_could_short(values[i], attr->atttypid))
+				else if(attr->attstorage != 'p' &&
+						value_type_could_short(DatumGetPointer(values[i]), attr->atttypid))
 				{
-					attr_len = VARSIZE_D(values[i]) - VARHDRSZ + VARHDRSZ_SHORT;
+					attr_len = VARSIZE(DatumGetPointer(values[i])) - VARHDRSZ + VARHDRSZ_SHORT;
 					*varlen_start = VARSIZE_TO_SHORT_D(values[i]);
 					Assert((varlen_start - (char *) mtup) + attr_len <= len);
-					memcpy(varlen_start+1, VARDATA_D(values[i]), attr_len-1);
+					memcpy(varlen_start+1, VARDATA(DatumGetPointer(values[i])), attr_len-1);
 				}
 				else
 				{
 					/* Must be 4 byte header aligned varlena */
-					varlen_start = (char *) att_align((long) varlen_start, attr->attalign);
+					varlen_start = (char *) att_align_nominal((long) varlen_start, attr->attalign);
 					attr_len = VARSIZE(DatumGetPointer(values[i]));
 					Assert((varlen_start - (char *) mtup) + attr_len <= len);
 					memcpy(varlen_start, DatumGetPointer(values[i]), attr_len);
@@ -828,7 +818,7 @@ MemTuple memtuple_form_to_align(
 				break;
 
 			case MTB_ByRef_CStr:
-				varlen_start = (char *) att_align((long) varlen_start, attr->attalign);
+				varlen_start = (char *) att_align_nominal((long) varlen_start, attr->attalign);
 				attr_len = strlen(DatumGetCString(values[i])) + 1;
 				Assert((varlen_start - (char *) mtup) + attr_len <= len);
 				memcpy(varlen_start, DatumGetPointer(values[i]), attr_len);
@@ -871,18 +861,6 @@ MemTuple memtuple_form_to_align(
 	}
 
 	return mtup;
-}
-
-/* form a memtuple from values and isnull, to a prespecified buffer */
-MemTuple memtuple_form_to(
-		MemTupleBinding *pbind,
-		Datum *values,
-		bool *isnull,
-		MemTuple mtup,
-		uint32 *destlen,
-		bool inline_toast)
-{
-	return memtuple_form_to_align(pbind, values, isnull, mtup, destlen, inline_toast, true /* aligned */);
 }
 
 bool memtuple_attisnull(MemTuple mtup, MemTupleBinding *pbind, int attnum)
@@ -986,6 +964,22 @@ void memtuple_deform(MemTuple mtup, MemTupleBinding *pbind, Datum *datum, bool *
 	memtuple_get_values(mtup, pbind, datum, isnull, true /* aligned */);
 }
 
+
+/*
+ * Deform a memtuple with old binding alignment.
+ *
+ * We assume that the 'mtup' was created using null_saves, where the
+ * binding length is not aligned to the following binding's alignment. In
+ * this case, we create an "upgraded" clone using null_saves_aligned, which
+ * uses properly aligned binding length.
+ */
+void
+memtuple_deform_misaligned(MemTuple mtup, MemTupleBinding *pbind,
+						   Datum *datum, bool *isnull)
+{
+	memtuple_get_values(mtup, pbind, datum, isnull, false /* aligned */);
+}
+
 /*
  * Get the Oid assigned to this tuple (when WITH OIDS is used).
  *
@@ -1026,7 +1020,7 @@ bool MemTupleHasExternal(MemTuple mtup, MemTupleBinding *pbind)
 			Datum d = memtuple_getattr(mtup, pbind, i+1, &isnull);
 			if(!isnull)
 			{
-				if(VARATT_IS_EXTERNAL_D(d))
+				if(VARATT_IS_EXTERNAL(DatumGetPointer(d)))
 					return true;
 			}
 		}
@@ -1086,53 +1080,4 @@ bool memtuple_has_misaligned_attribute(MemTuple mtup, MemTupleBinding *pbind)
 	}
 
 	return false;
-}
-
-/*
- *	Create a clone of a memtuple with complementary binding alignment.
- *
- *	If use_null_saves_aligned is true, we assume that the memtuple was
- *	created using null_saves, where the binding length is not aligned to the
- *	following binding's alignment. In this case, we create an "upgraded" clone
- *	using null_saves_aligned, which uses properly aligned binding length. The
- *	opposite happens when use_null_saves_aligned is false, i.e. we create a
- *	"downgraded" clone using the possibly misaligned bindings.
- */
-MemTuple memtuple_aligned_clone(MemTuple mtup, MemTupleBinding *pbind, bool use_null_saves_aligned)
-{
-	Assert(memtuple_has_misaligned_attribute(mtup, pbind));
-
-	MemTuple newtuple = NULL;
-
-	const int attr_count = pbind->tupdesc->natts;
-	const bool use_dynamic_alloc = (attr_count > MAX_ATTR_COUNT_STATIC_ALLOC);
-
-	Datum values_static_alloc[MAX_ATTR_COUNT_STATIC_ALLOC];
-	bool is_null_static_alloc[MAX_ATTR_COUNT_STATIC_ALLOC];
-
-	Datum *values = values_static_alloc;
-	bool *isnull = is_null_static_alloc;
-
-	if (use_dynamic_alloc)
-	{
-		values = (Datum *) palloc(attr_count * sizeof(Datum));
-		isnull = (bool *) palloc(attr_count * sizeof(bool));
-	}
-
-	Assert(values);
-	Assert(isnull);
-
-	/* get attribute values using complementary alignment */
-	memtuple_get_values(mtup, pbind, values, isnull, !use_null_saves_aligned);
-
-	/* create the new memtuple using target alignment */
-	newtuple = memtuple_form_to_align(pbind, values, isnull, NULL, NULL, false, use_null_saves_aligned);
-
-	if (use_dynamic_alloc)
-	{
-		pfree(values);
-		pfree(isnull);
-	}
-
-	return newtuple;
 }

@@ -32,11 +32,9 @@ try:
     from gppylib.gpversion import GpVersion
     from gppylib.db import dbconn
     from gppylib.operations.unix import CheckDir, CheckFile, MakeDir
-    from gppylib.operations.dump import get_partition_state_tuples, compare_metadata, \
-                                        compare_dict, get_pgstatlastoperations_dict, \
-                                        write_lines_to_file, verify_lines_in_file, ValidateIncludeTargets, \
-                                        ValidateSchemaExists
-    from gppylib.operations.backup_utils import execute_sql, get_lines_from_file
+    from gppylib.operations.dump import get_partition_state_tuples, compare_metadata, compare_dict, get_pgstatlastoperations_dict, \
+                                        write_lines_to_file, verify_lines_in_file, ValidateSchemaExists
+    from gppylib.operations.backup_utils import execute_sql, get_lines_from_file, Context
     from pygresql import pg
 
 except ImportError, e:
@@ -273,6 +271,11 @@ class AnalyzeDb(Operation):
             global CURR_TIME
             CURR_TIME = generate_timestamp()
 
+            # The below object is needed for some functions imported from dump.py
+            self.context = Context()
+            self.context.master_port = self.pg_port
+            self.context.target_db = self.dbname
+
             # The input_col_dict keeps track of the requested columns to analyze.
             # key: table name (e.g. 'public.foo')
             # value: a set of requested column names (e.g. set(['col1','col2']), or '-1' indicating all columns
@@ -387,12 +390,11 @@ class AnalyzeDb(Operation):
                                     (len(self.success_list), len(ordered_candidates)))
                     wait_count -= 1
 
-                for worker in pool.workers:
-                    worker.join(1)
+                pool.join()
+                pool.haltWork()
             except:
                 pool.haltWork()
-                for worker in pool.workers:
-                    worker.join(1)
+                pool.joinWorkers()
                 raise
 
             finally:
@@ -447,7 +449,7 @@ class AnalyzeDb(Operation):
             self._parse_column(col_dict, self.single_table, schema, table, self.include_cols, self.exclude_cols, True)
 
         elif self.schema: # all tables in a schema
-            ValidateSchemaExists(self.dbname, self.schema, self.pg_port).run()
+            ValidateSchemaExists(self.context, self.schema).run()
             logger.debug("getting all tables in the schema...")
             all_schema_tables = run_sql(self.conn, GET_ALL_DATA_TABLES_IN_SCHEMA_SQL % self.schema)
             # convert table name from ['public','foo'] to 'public.foo' and populate col_dict as all columns requested
@@ -547,7 +549,7 @@ class AnalyzeDb(Operation):
         logger.debug("getting ao state...")
         oid_str = get_oid_str(input_tables_set)
         ao_partition_info = run_sql(self.conn, GET_REQUESTED_AO_DATA_TABLE_INFO_SQL % oid_str)
-        return get_partition_state_tuples(self.pg_port, self.dbname, 'pg_aoseg', ao_partition_info)
+        return get_partition_state_tuples(self.context, 'pg_aoseg', ao_partition_info)
 
     def _get_lastop_state(self, input_tables_set):
         # oid, action, subtype, timestamp
@@ -560,7 +562,7 @@ class AnalyzeDb(Operation):
             ret.append(tup)
         return ret
 
-    
+
 
     def _write_back(self, curr_ao_state, curr_last_op, prev_ao_state, prev_last_op, heap_partitions,
                    input_col_dict, prev_col_dict, root_partition_col_dict, is_full, dirty_partitions, target_list):
@@ -1131,6 +1133,7 @@ class AnalyzeWorkerPool(WorkerPool):
         self.workers=[]
         self.work_queue=Queue()
         self.completed_queue=Queue()
+        self.should_stop=False
         self.num_assigned=0
         if items is not None:
             for item in items:
@@ -1145,31 +1148,37 @@ class AnalyzeWorkerPool(WorkerPool):
         self.numWorkers = numWorkers
         self.logger = logger
 
-
-class AnalyzeWorker(Thread):
+class AnalyzeWorker(Worker):
     """
     a custom worker thread for Analyze
     """
-    pool=None
-    cmd=None
-    name=None
-    logger=None
-
-    def __init__(self,name,pool,timeout=0.05):
-        self.name=name
-        self.pool=pool
-        self.timeout=timeout
-        self.logger=logger
-        self.stoprequest = threading.Event()
-        Thread.__init__(self)
-
+    def __init__(self,name,pool):
+        Worker.__init__(self, name, pool)
+    
+    
     def run(self):
-        while not self.stoprequest.isSet():
+        while True:
             try:
-                self.cmd = self.pool.getNextWorkItem(timeout=self.timeout)
+                try:
+                    self.cmd = self.pool.getNextWorkItem()
+                except TypeError:
+                    # misleading exception raised during interpreter shutdown
+                    return 
 
-                if self.cmd is not None:
-                    # tablename = self.cmd.cmdStr.split()[-1][:-1]
+                # we must have got a command to run here
+                if self.cmd is None:
+                    self.logger.debug("[%s] got a None cmd" % self.name)
+                    self.pool.markTaskDone()
+                elif self.cmd is self.pool.halt_command:
+                    self.logger.debug("[%s] got a halt cmd" % self.name)
+                    self.pool.markTaskDone()
+                    self.cmd=None
+                    return
+                elif self.pool.should_stop:
+                    self.logger.debug("[%s] got cmd and pool is stopped: %s" % (self.name, self.cmd))
+                    self.pool.markTaskDone()
+                    self.cmd=None
+                else:
                     self.logger.info("[%s] started  %s" % (self.name, self.cmd.name))
                     start_time = time.time()
                     self.cmd.run()
@@ -1183,24 +1192,13 @@ class AnalyzeWorker(Thread):
                     self.pool.addFinishedWorkItem(self.cmd)
                     self.cmd=None
 
-            except Empty:
-                return
-
-            except:
+            except Exception,e:
+                self.logger.exception(e)
                 if self.cmd:
                     self.logger.debug("[%s] finished cmd with exception: %s" % (self.name, self.cmd))
                     self.pool.addFinishedWorkItem(self.cmd)
                     self.cmd=None
-                raise
-
-    def haltWork(self):
-        self.stoprequest.set()
-        c = self.cmd
-        if c is not None:
-            c.interrupt()
-            c.cancel()
-
-
+    
 if __name__ == '__main__':
     sys.argv[0] = EXECNAME
     simple_main(create_parser, AnalyzeDb)

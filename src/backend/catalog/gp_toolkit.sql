@@ -1284,15 +1284,15 @@ GRANT SELECT ON TABLE gp_toolkit.gp_resq_role TO public;
 CREATE VIEW gp_toolkit.gp_locks_on_resqueue
 AS
     SELECT
-        pgsa.usename     AS lorusename,
-        pgrq.rsqname     AS lorrsqname,
-        pgl.locktype     AS lorlocktype,
-        pgl.objid        AS lorobjid,
-        pgl.transaction  AS lortransaction,
-        pgl.pid          AS lorpid,
-        pgl.mode         AS lormode,
-        pgl.granted      AS lorgranted,
-        pgsa.waiting     AS lorwaiting
+        pgsa.usename      AS lorusename,
+        pgrq.rsqname      AS lorrsqname,
+        pgl.locktype      AS lorlocktype,
+        pgl.objid         AS lorobjid,
+        pgl.transactionid AS lortransaction,
+        pgl.pid           AS lorpid,
+        pgl.mode          AS lormode,
+        pgl.granted       AS lorgranted,
+        pgsa.waiting      AS lorwaiting
     FROM pg_catalog.pg_stat_activity pgsa
 
     JOIN pg_catalog.pg_locks pgl
@@ -1319,7 +1319,7 @@ AS
         pgl.database       AS lordatabase,
         pgc.relname        AS lorrelname,
         pgl.relation       AS lorrelation,
-        pgl.transaction    AS lortransaction,
+        pgl.transactionid  AS lortransaction,
         pgl.pid            AS lorpid,
         pgl.mode           AS lormode,
         pgl.granted        AS lorgranted,
@@ -1843,6 +1843,7 @@ RETURNS TABLE(gp_tid tid,
     eof bigint,
     eof_uncompressed bigint,
     modcount bigint,
+    formatversion smallint,
     state smallint)
 AS '$libdir/gp_ao_co_diagnostics', 'gp_aoseg_history_wrapper'
 LANGUAGE C STRICT;
@@ -1857,6 +1858,7 @@ RETURNS TABLE(gp_tid tid,
     eof bigint,
     eof_uncompressed bigint,
     modcount bigint,
+    formatversion smallint,
     state smallint)
 AS '$libdir/gp_ao_co_diagnostics', 'gp_aocsseg_wrapper'
 LANGUAGE C STRICT;
@@ -1871,6 +1873,7 @@ RETURNS TABLE (gp_tid tid,
     eof bigint,
     eof_uncompressed bigint,
     modcount bigint,
+    formatversion smallint,
     state smallint)
 AS '$libdir/gp_ao_co_diagnostics', 'gp_aocsseg_name_wrapper'
 LANGUAGE C STRICT;
@@ -1895,6 +1898,7 @@ RETURNS TABLE(gp_tid tid,
     eof bigint,
     eof_uncompressed bigint,
     modcount bigint,
+    formatversion smallint,
     state smallint)
 AS '$libdir/gp_ao_co_diagnostics' , 'gp_aocsseg_history_wrapper'
 LANGUAGE C STRICT;
@@ -1954,7 +1958,9 @@ RETURNS TABLE (segno integer, eof bigint,
     tupcount bigint,
     varblockcount bigint,
     eof_uncompressed bigint,
-    modcount bigint, state smallint)
+    modcount bigint,
+    formatversion smallint,
+    state smallint)
 AS '$libdir/gp_ao_co_diagnostics', 'gp_aoseg_name_wrapper'
 LANGUAGE C STRICT;
 GRANT EXECUTE ON FUNCTION gp_toolkit.__gp_aoseg_name(text) TO public;
@@ -2011,7 +2017,6 @@ $$ LANGUAGE plpgsql;
 --        text - path to workfile set,
 --        int - hash value of the spilling operator,
 --        bigint - size in bytes,
---        int - utility,
 --        int - state,
 --        int - workmem in kilobytes,
 --        int - type of the spilling operator,
@@ -2033,6 +2038,7 @@ LANGUAGE C IMMUTABLE;
 
 GRANT EXECUTE ON FUNCTION gp_toolkit.__gp_workfile_entries_f() TO public;
 
+
 --------------------------------------------------------------------------------
 -- @view:
 --        gp_toolkit.gp_workfile_entries
@@ -2050,7 +2056,6 @@ WITH all_entries AS (
             path text,
             hash int,
             size bigint,
-            utility int,
             state int,
             workmem int,
             optype text,
@@ -2067,7 +2072,6 @@ WITH all_entries AS (
             path text,
             hash int,
             size bigint,
-            utility int,
             state int,
             workmem int,
             optype text,
@@ -2090,8 +2094,7 @@ SELECT S.datname,
        C.size,
        C.numfiles,
        C.path as directory,
-       (CASE WHEN (C.state = 1) THEN 'RUNNING' WHEN (C.state = 2) THEN 'CACHED' WHEN (C.state = 3) THEN 'DELETING' ELSE 'UNKNOWN' END) as state,
-       C.utility
+       (CASE WHEN (C.state = 1) THEN 'RUNNING' WHEN (C.state = 2) THEN 'CACHED' WHEN (C.state = 3) THEN 'DELETING' ELSE 'UNKNOWN' END) as state
 FROM all_entries C LEFT OUTER JOIN
 pg_stat_activity as S
 ON C.sessionid = S.sess_id;
@@ -2139,93 +2142,52 @@ GRANT SELECT ON gp_toolkit.gp_workfile_usage_per_query TO public;
 
 --------------------------------------------------------------------------------
 -- @function:
---        gp_toolkit.__gp_workfile_cache_clear_f(content int)
+--        gp_toolkit.__gp_workfile_mgr_used_diskspace_f
 --
 -- @in:
+--
+-- @out:
 --        int - segment id
--- @out:
---        int - number of workfile sets deleted
+--        bigint - size in bytes,
 --
 -- @doc:
---        UDF to clear the workfile cache on one segment
+--        UDF to retrieve workfile used diskspace counter in bytes per segment
 --
 --------------------------------------------------------------------------------
 
-CREATE FUNCTION gp_toolkit.__gp_workfile_cache_clear_f(content int)
-    RETURNS SETOF int
-AS '$libdir/gp_workfile_mgr', 'gp_workfile_mgr_clear_cache' LANGUAGE C IMMUTABLE;
+CREATE FUNCTION gp_toolkit.__gp_workfile_mgr_used_diskspace_f()
+RETURNS SETOF record
+AS '$libdir/gp_workfile_mgr', 'gp_workfile_mgr_used_diskspace'
+LANGUAGE C IMMUTABLE;
 
-REVOKE ALL ON FUNCTION gp_toolkit.__gp_workfile_cache_clear_f(int) FROM public;
+GRANT EXECUTE ON FUNCTION gp_toolkit.__gp_workfile_mgr_used_diskspace_f() TO public;
 
 --------------------------------------------------------------------------------
--- @function:
---        gp_toolkit.gp_workfile_cache_clear_segment(content int)
---
--- @in:
---        int - segment id
--- @out:
---        int - number of workfile sets deleted
+-- @view:
+--        gp_toolkit.gp_workfile_mgr_used_diskspace
 --
 -- @doc:
---        Clear the workfile cache on one segment
+--        Workfile used diskspace counter in bytes per segment
 --
 --------------------------------------------------------------------------------
+CREATE VIEW gp_toolkit.gp_workfile_mgr_used_diskspace AS
+WITH all_entries AS (
+  SELECT C.*
+	FROM gp_toolkit.__gp_localid, gp_toolkit.__gp_workfile_mgr_used_diskspace_f() as C (
+	  segid int,
+	  bytes bigint
+	)
+  UNION ALL
+  SELECT C.*
+	FROM gp_toolkit.__gp_masterid, gp_toolkit.__gp_workfile_mgr_used_diskspace_f() as C (
+	  segid int,
+	  bytes bigint
+	))
+SELECT segid, bytes
+FROM all_entries
+ORDER BY segid;
 
-CREATE FUNCTION gp_toolkit.gp_workfile_cache_clear_segment(content int)
-RETURNS SETOF int
-AS
-$$
- SELECT C.* FROM gp_toolkit.__gp_localid, gp_toolkit.__gp_workfile_cache_clear_f($1) as C
- UNION ALL
- SELECT C.* FROM gp_toolkit.__gp_masterid, gp_toolkit.__gp_workfile_cache_clear_f($1) as C;
-$$
-LANGUAGE SQL;
-
-REVOKE ALL ON FUNCTION gp_toolkit.gp_workfile_cache_clear_segment(int) FROM public;
-
---------------------------------------------------------------------------------
--- @function:
---        gp_toolkit.gp_workfile_cache_clear()
---
--- @in:
---
--- @out:
---        int - number of workfile sets deleted
---
--- @doc:
---        Clear the workfile caches on all segments
---
---------------------------------------------------------------------------------
-
-CREATE FUNCTION gp_toolkit.gp_workfile_cache_clear()
-RETURNS SETOF int
-AS
-$$
-  SELECT * from gp_toolkit.gp_workfile_cache_clear_segment(-2)
-$$
-LANGUAGE SQL;
-
-REVOKE ALL ON FUNCTION gp_toolkit.gp_workfile_cache_clear() FROM public;
-
---------------------------------------------------------------------------------
--- @function:
---        gp_toolkit.gp_dump_query_oids(text)
---
--- @in:
---        text - SQL text
--- @out:
---        text - serialized json string of oids
---
--- @doc:
---        Dump query oids for a given SQL text
---
---------------------------------------------------------------------------------
-
-CREATE FUNCTION gp_toolkit.gp_dump_query_oids(text)
-RETURNS text
-AS '$libdir/gpoptutils', 'gp_dump_query_oids' LANGUAGE C STRICT;
-
-GRANT EXECUTE ON FUNCTION gp_toolkit.gp_dump_query_oids(text) TO public;
+GRANT SELECT ON gp_toolkit.gp_workfile_mgr_used_diskspace TO public;
 
 --------------------------------------------------------------------------------
 

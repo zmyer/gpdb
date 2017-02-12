@@ -644,7 +644,7 @@ static Size est_hash_tuple_size(TupleTableSlot *hashslot, List *hash_needed)
 		
 		Assert( !attr->attisdropped );
 		
-		len = att_align(len, attr->attalign);
+		len = att_align_nominal(len, attr->attalign);
 		len += get_typavgwidth(attr->atttypid, attr->atttypmod);
 	}
 
@@ -868,7 +868,7 @@ agg_hash_initial_pass(AggState *aggstate)
 		}
 			
 		/* Advance the aggregates */
-		advance_aggregates(aggstate, hashtable->groupaggs->aggs, &(aggstate->mem_manager));
+		call_AdvanceAggregates(aggstate, hashtable->groupaggs->aggs, &(aggstate->mem_manager));
 		
 		hashtable->num_tuples++;
 
@@ -1198,7 +1198,7 @@ spill_hash_table(AggState *aggstate)
 	/* Spill set does not have a workfile_set. Use existing or create new one as needed */
 	if (hashtable->work_set == NULL)
 	{
-		hashtable->work_set = workfile_mgr_create_set(BFZ, true /* can_be_reused */, &aggstate->ss.ps, NULL_SNAPSHOT);
+		hashtable->work_set = workfile_mgr_create_set(BFZ, true /* can_be_reused */, &aggstate->ss.ps);
 		hashtable->work_set->metadata.buckets = hashtable->nbuckets;
 		//aggstate->workfiles_created = true;
 	}
@@ -1924,6 +1924,24 @@ agg_hash_next_pass(AggState *aggstate)
 	return more;
 }
 
+/* Resets all gpmon states for this agg and sends an updated gpmon packet */
+static void
+Gpmon_ResetAggHashTable(AggState* aggstate)
+{
+	Gpmon_M_Incr(GpmonPktFromAggState(aggstate), GPMON_AGG_SPILLPASS);
+	/* Reset current pass read tuples must be before current pass spill tuples */
+	Gpmon_M_Reset(GpmonPktFromAggState(aggstate),
+			GPMON_AGG_CURRSPILLPASS_READTUPLE);
+	Gpmon_M_Reset(GpmonPktFromAggState(aggstate),
+			GPMON_AGG_CURRSPILLPASS_READBYTE);
+	Gpmon_M_Reset(GpmonPktFromAggState(aggstate),
+			GPMON_AGG_CURRSPILLPASS_TUPLE);
+	Gpmon_M_Reset(GpmonPktFromAggState(aggstate), GPMON_AGG_CURRSPILLPASS_BYTE);
+	Gpmon_M_Reset(GpmonPktFromAggState(aggstate),
+			GPMON_AGG_CURRSPILLPASS_BATCH);
+	CheckSendPlanStateGpmonPkt(&aggstate->ss.ps);
+}
+
 /* Function: reset_agg_hash_table
  *
  * Clear the hash table content anchored by the bucket array.
@@ -1945,15 +1963,7 @@ void reset_agg_hash_table(AggState *aggstate)
 
 	init_agg_hash_iter(hashtable);
 
-	Gpmon_M_Incr(GpmonPktFromAggState(aggstate), GPMON_AGG_SPILLPASS);
-	/* Reset current pass read tuples much be before currentpass spill tuples */
-	Gpmon_M_Reset(GpmonPktFromAggState(aggstate), GPMON_AGG_CURRSPILLPASS_READTUPLE);
-	Gpmon_M_Reset(GpmonPktFromAggState(aggstate), GPMON_AGG_CURRSPILLPASS_READBYTE); 
-	Gpmon_M_Reset(GpmonPktFromAggState(aggstate), GPMON_AGG_CURRSPILLPASS_TUPLE);
-	Gpmon_M_Reset(GpmonPktFromAggState(aggstate), GPMON_AGG_CURRSPILLPASS_BYTE);
-	Gpmon_M_Reset(GpmonPktFromAggState(aggstate), GPMON_AGG_CURRSPILLPASS_BATCH);
-
-	CheckSendPlanStateGpmonPkt(&aggstate->ss.ps);
+	Gpmon_ResetAggHashTable(aggstate);
 }
 
 /* Function: destroy_agg_hash_table
@@ -1972,7 +1982,8 @@ void destroy_agg_hash_table(AggState *aggstate)
 			aggstate->hhashtable->num_ht_groups,
 			aggstate->hhashtable->num_tuples);
 		
-		reset_agg_hash_table(aggstate);
+		Gpmon_ResetAggHashTable(aggstate);
+		CdbCellBuf_Reset(&(aggstate->hhashtable->entry_buf));
 
 		/* destroy_batches(aggstate->hhashtable); */
 		pfree(aggstate->hhashtable->buckets);
@@ -1981,6 +1992,12 @@ void destroy_agg_hash_table(AggState *aggstate)
 			pfree(aggstate->hhashtable->hashkey_buf);
 
 		closeSpillFiles(aggstate, aggstate->hhashtable->spill_set);
+
+		if (NULL != aggstate->hhashtable->spill_set)
+		{
+			pfree(aggstate->hhashtable->spill_set);
+			aggstate->hhashtable->spill_set = NULL;
+		}
 
 		if (NULL != aggstate->hhashtable->work_set)
 		{
@@ -1992,21 +2009,6 @@ void destroy_agg_hash_table(AggState *aggstate)
 		pfree(aggstate->hhashtable);
 		aggstate->hhashtable = NULL;
 	}
-}
-
-/*
- * Marks workfile set as complete
- */
-void
-agg_hash_mark_spillset_complete(AggState *aggstate)
-{
-
-	Assert(aggstate != NULL);
-	Assert(aggstate->hhashtable != NULL);
-	Assert(aggstate->hhashtable->work_set != NULL);
-
-	workfile_set *work_set = aggstate->hhashtable->work_set;
-	workfile_mgr_mark_complete(work_set);
 }
 
 /* EOF */

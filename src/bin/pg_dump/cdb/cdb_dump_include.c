@@ -66,8 +66,18 @@ bool		g_gp_supportsOpfamilies = true;
 /*
  * Indicates whether or not the GPDB cluster supports column attributes.
  */
-bool g_gp_supportsAttributeEncoding = false;
+bool		g_gp_supportsAttributeEncoding = false;
 
+/*
+ * Indicates whether or not the GPDB cluster supports full text search
+ */
+bool		g_gp_supportsFullText = false;
+
+/*
+ * Indicates whether or not the GPDB cluster supports languages owned by
+ * other than OID 10.
+ */
+bool		g_gp_supportsLanOwner = false;
 
 /*
  * When true, indicates that only the MPP schema is being dumped.
@@ -152,6 +162,34 @@ do_sql_command(PGconn *conn, const char *query)
 	PQclear(res);
 }
 
+/*
+ * checkExtensionMembership
+ *		Determine whether object is an extension member, and if so,
+ *		record an appropriate dependency and set the object's dump flag.
+ *
+ * It's important to call this for each object that could be an extension
+ * member.  Generally, we integrate this with determining the object's
+ * to-be-dumped-ness, since extension membership overrides other rules for that.
+ *
+ * Returns true if object is an extension member, else false.
+ */
+static bool
+checkExtensionMembership(DumpableObject *dobj)
+{
+	ExtensionInfo *ext = findOwningExtension(dobj->catId);
+
+	if (ext == NULL)
+		return false;
+
+	dobj->ext_member = true;
+
+	/* Record dependency so that getDependencies needn't deal with that */
+	addObjectDependency(dobj, ext->dobj.dumpId);
+
+	dobj->dump = false;
+
+	return true;
+}
 
 /*
  * selectDumpableNamespace: policy-setting subroutine
@@ -160,6 +198,9 @@ do_sql_command(PGconn *conn, const char *query)
 static void
 selectDumpableNamespace(NamespaceInfo *nsinfo)
 {
+	if (checkExtensionMembership(&nsinfo->dobj))
+		return;					/* extension membership overrides all else */
+
 	/*
 	 * If specific tables are being dumped, do not dump any complete
 	 * namespaces. If specific namespaces are being dumped, dump just those
@@ -194,6 +235,9 @@ selectDumpableNamespace(NamespaceInfo *nsinfo)
 static void
 selectDumpableTable(TableInfo *tbinfo)
 {
+	if (checkExtensionMembership(&tbinfo->dobj))
+		return;					/* extension membership overrides all else */
+
 	/*
 	 * If specific tables are being dumped, dump just those tables; else, dump
 	 * according to the parent namespace's dump flag.
@@ -241,6 +285,9 @@ selectDumpableTable(TableInfo *tbinfo)
 static void
 selectDumpableObject(DumpableObject *dobj)
 {
+	if (checkExtensionMembership(dobj))
+		return;					/* extension membership overrides all else */
+
 	/*
 	 * Default policy is to dump if parent namespace is dumpable, or always
 	 * for non-namespace-associated items.
@@ -259,6 +306,9 @@ selectDumpableObject(DumpableObject *dobj)
 static void
 selectDumpableType(TypeInfo *tinfo)
 {
+	if (checkExtensionMembership(&tinfo->dobj))
+		return;					/* extension membership overrides all else */
+
 	/* Dump only types in dumpable namespaces */
 	if (!tinfo->dobj.namespace->dobj.dump)
 		tinfo->dobj.dump = false;
@@ -309,6 +359,406 @@ findNamespace(Oid nsoid, Oid objoid)
 	return NULL;				/* keep compiler quiet */
 }
 
+
+/*
+ * getExtensions:
+ *	  read all extensions in the system catalogs and return them in the
+ * ExtensionInfo* structure
+ *
+ *	numExtensions is set to the number of extensions read in
+ */
+ExtensionInfo *
+getExtensions(int *numExtensions)
+{
+	PGresult   *res;
+	int			ntups;
+	int			i;
+	PQExpBuffer query;
+	ExtensionInfo *extinfo;
+	int			i_tableoid;
+	int			i_oid;
+	int			i_extname;
+	int			i_nspname;
+	int			i_extrelocatable;
+	int			i_extversion;
+	int			i_extconfig;
+	int			i_extcondition;
+
+	query = createPQExpBuffer();
+
+	/* Make sure we are in proper schema */
+	selectSourceSchema("pg_catalog");
+
+	appendPQExpBuffer(query, "SELECT x.tableoid, x.oid, "
+			"x.extname, n.nspname, x.extrelocatable, x.extversion, x.extconfig, x.extcondition "
+			"FROM pg_extension x "
+			"JOIN pg_namespace n ON n.oid = x.extnamespace");
+
+	res = PQexec(g_conn, query->data);
+	check_sql_result(res, g_conn, query->data, PGRES_TUPLES_OK);
+
+	ntups = PQntuples(res);
+
+	extinfo = (ExtensionInfo *) malloc(ntups * sizeof(ExtensionInfo));
+
+	i_tableoid = PQfnumber(res, "tableoid");
+	i_oid = PQfnumber(res, "oid");
+	i_extname = PQfnumber(res, "extname");
+	i_nspname = PQfnumber(res, "nspname");
+	i_extrelocatable = PQfnumber(res, "extrelocatable");
+	i_extversion = PQfnumber(res, "extversion");
+	i_extconfig = PQfnumber(res, "extconfig");
+	i_extcondition = PQfnumber(res, "extcondition");
+
+	for (i = 0; i < ntups; i++)
+	{
+		extinfo[i].dobj.objType = DO_EXTENSION;
+		extinfo[i].dobj.catId.tableoid = atooid(PQgetvalue(res, i, i_tableoid));
+		extinfo[i].dobj.catId.oid = atooid(PQgetvalue(res, i, i_oid));
+		AssignDumpId(&extinfo[i].dobj);
+		extinfo[i].dobj.name = strdup(PQgetvalue(res, i, i_extname));
+		extinfo[i].namespace = strdup(PQgetvalue(res, i, i_nspname));
+		extinfo[i].relocatable = *(PQgetvalue(res, i, i_extrelocatable)) == 't';
+		extinfo[i].extversion = strdup(PQgetvalue(res, i, i_extversion));
+		extinfo[i].extconfig = strdup(PQgetvalue(res, i, i_extconfig));
+		extinfo[i].extcondition = strdup(PQgetvalue(res, i, i_extcondition));
+
+		extinfo[i].dobj.dump = true;
+	}
+
+	PQclear(res);
+	destroyPQExpBuffer(query);
+
+	*numExtensions = ntups;
+
+	return extinfo;
+}
+
+
+/*
+ * getExtensionMembership --- obtain extension membership data
+ *
+ * We need to identify objects that are extension members as soon as they're
+ * loaded, so that we can correctly determine whether they need to be dumped.
+ * Generally speaking, extension member objects will get marked as *not* to
+ * be dumped, as they will be recreated by the single CREATE EXTENSION
+ * command.  However, in binary upgrade mode we still need to dump the members
+ * individually.
+ */
+void
+getExtensionMembership(ExtensionInfo extinfo[], int numExtensions)
+{
+	PQExpBuffer query;
+	PGresult   *res;
+	int			ntups,
+				nextmembers,
+				i;
+	int			i_classid,
+				i_objid,
+				i_refobjid;
+	ExtensionMemberId *extmembers;
+	ExtensionInfo *ext;
+
+	/* Nothing to do if no extensions */
+	if (numExtensions == 0)
+		return;
+
+	/* Make sure we are in proper schema */
+	selectSourceSchema("pg_catalog");
+
+	query = createPQExpBuffer();
+
+	/* refclassid constraint is redundant but may speed the search */
+	appendPQExpBufferStr(query, "SELECT "
+			"classid, objid, refobjid "
+			"FROM pg_depend "
+			"WHERE refclassid = 'pg_extension'::regclass "
+			"AND deptype = 'e' "
+			"ORDER BY 3");
+
+	res = PQexec(g_conn, query->data);
+	check_sql_result(res, g_conn, query->data, PGRES_TUPLES_OK);
+
+	ntups = PQntuples(res);
+
+	i_classid = PQfnumber(res, "classid");
+	i_objid = PQfnumber(res, "objid");
+	i_refobjid = PQfnumber(res, "refobjid");
+
+	extmembers = (ExtensionMemberId *) pg_malloc(ntups * sizeof(ExtensionMemberId));
+	nextmembers = 0;
+
+	/*
+	 * Accumulate data into extmembers[].
+	 *
+	 * Since we ordered the SELECT by referenced ID, we can expect that
+	 * multiple entries for the same extension will appear together; this
+	 * saves on searches.
+	 */
+	ext = NULL;
+
+	for (i = 0; i < ntups; i++)
+	{
+		CatalogId	objId;
+		Oid			extId;
+
+		objId.tableoid = atooid(PQgetvalue(res, i, i_classid));
+		objId.oid = atooid(PQgetvalue(res, i, i_objid));
+		extId = atooid(PQgetvalue(res, i, i_refobjid));
+
+		if (ext == NULL ||
+			ext->dobj.catId.oid != extId)
+			ext = findExtensionByOid(extId);
+
+		if (ext == NULL)
+		{
+			/* shouldn't happen */
+			fprintf(stderr, "could not find referenced extension %u\n", extId);
+			continue;
+		}
+
+		extmembers[nextmembers].catId = objId;
+		extmembers[nextmembers].ext = ext;
+		nextmembers++;
+	}
+
+	PQclear(res);
+
+	/* Remember the data for use later */
+	setExtensionMembership(extmembers, nextmembers);
+
+	destroyPQExpBuffer(query);
+}
+
+/*
+ * Make a dumpable object for the data of this specific table
+ *
+ * Note: we make a TableDataInfo if and only if we are going to dump the
+ * table data; the "dump" flag in such objects isn't used.
+ */
+static void
+makeTableDataInfo(TableInfo *tbinfo, bool oids)
+{
+	TableDataInfo *tdinfo;
+
+	/*
+	 * Nothing to do if we already decided to dump the table.  This will
+	 * happen for "config" tables.
+	 */
+	if (tbinfo->dataObj != NULL)
+		return;
+
+	/* Skip VIEWs (no data to dump) */
+	if (tbinfo->relkind == RELKIND_VIEW)
+		return;
+	/* START MPP ADDITION */
+	/* Skip EXTERNAL TABLEs */
+	if (tbinfo->relstorage == RELSTORAGE_EXTERNAL)
+		return;
+	/* END MPP ADDITION */
+	/* Skip SEQUENCEs (handled elsewhere) */
+	if (tbinfo->relkind == RELKIND_SEQUENCE)
+		return;
+
+	/* OK, let's dump it */
+	tdinfo = (TableDataInfo *) malloc(sizeof(TableDataInfo));
+
+	tdinfo->dobj.objType = DO_TABLE_DATA;
+
+	/*
+	 * Note: use tableoid 0 so that this object won't be mistaken for
+	 * something that pg_depend entries apply to.
+	 */
+	tdinfo->dobj.catId.tableoid = 0;
+	tdinfo->dobj.catId.oid = tbinfo->dobj.catId.oid;
+	AssignDumpId(&tdinfo->dobj);
+	tdinfo->dobj.name = tbinfo->dobj.name;
+	tdinfo->dobj.namespace = tbinfo->dobj.namespace;
+	tdinfo->tdtable = tbinfo;
+	tdinfo->oids = oids;
+	tdinfo->filtercond = NULL;	/* might get set later */
+	addObjectDependency(&tdinfo->dobj, tbinfo->dobj.dumpId);
+
+	tbinfo->dataObj = tdinfo;
+}
+
+/*
+ * processExtensionTables --- deal with extension configuration tables
+ *
+ * There are two parts to this process:
+ *
+ * 1. Identify and create dump records for extension configuration tables.
+ *
+ *	  Extensions can mark tables as "configuration", which means that the user
+ *	  is able and expected to modify those tables after the extension has been
+ *	  loaded.  For these tables, we dump out only the data- the structure is
+ *	  expected to be handled at CREATE EXTENSION time, including any indexes or
+ *	  foreign keys, which brings us to-
+ *
+ * 2. Record FK dependencies between configuration tables.
+ *
+ *	  Due to the FKs being created at CREATE EXTENSION time and therefore before
+ *	  the data is loaded, we have to work out what the best order for reloading
+ *	  the data is, to avoid FK violations when the tables are restored.  This is
+ *	  not perfect- we can't handle circular dependencies and if any exist they
+ *	  will cause an invalid dump to be produced (though at least all of the data
+ *	  is included for a user to manually restore).  This is currently documented
+ *	  but perhaps we can provide a better solution in the future.
+ */
+void
+processExtensionTables(ExtensionInfo extinfo[], int numExtensions)
+{
+	PQExpBuffer query;
+	PGresult   *res;
+	int			ntups,
+				i;
+	int			i_conrelid,
+				i_confrelid;
+
+	/* Nothing to do if no extensions */
+	if (numExtensions == 0)
+		return;
+
+	/*
+	 * Identify extension configuration tables and create TableDataInfo
+	 * objects for them, ensuring their data will be dumped even though the
+	 * tables themselves won't be.
+	 *
+	 * Note that we create TableDataInfo objects even in schemaOnly mode, ie,
+	 * user data in a configuration table is treated like schema data. This
+	 * seems appropriate since system data in a config table would get
+	 * reloaded by CREATE EXTENSION.
+	 */
+	for (i = 0; i < numExtensions; i++)
+	{
+		ExtensionInfo *curext = &(extinfo[i]);
+		char	   *extconfig = curext->extconfig;
+		char	   *extcondition = curext->extcondition;
+		char	  **extconfigarray = NULL;
+		char	  **extconditionarray = NULL;
+		int			nconfigitems;
+		int			nconditionitems;
+
+		if (parsePGArray(extconfig, &extconfigarray, &nconfigitems) &&
+			parsePGArray(extcondition, &extconditionarray, &nconditionitems) &&
+			nconfigitems == nconditionitems)
+		{
+			int			j;
+
+			for (j = 0; j < nconfigitems; j++)
+			{
+				TableInfo  *configtbl;
+				Oid			configtbloid = atooid(extconfigarray[j]);
+				bool		dumpobj = curext->dobj.dump;
+
+				configtbl = findTableByOid(configtbloid);
+				if (configtbl && configtbl->dataObj == NULL)
+				{
+					/*
+					 * Tables of not-to-be-dumped extensions shouldn't be dumped
+					 * unless the table or its schema is explicitly included
+					 */
+					if (!curext->dobj.dump)
+					{
+						/* check table explicitly requested */
+						if (table_include_oids.head != NULL &&
+							simple_oid_list_member(&table_include_oids,
+												   configtbloid))
+							dumpobj = true;
+
+						/* check table's schema explicitly requested */
+						if (configtbl->dobj.namespace->dobj.dump)
+							dumpobj = true;
+					}
+
+					/* check table excluded by an exclusion switch */
+					if (table_exclude_oids.head != NULL &&
+						simple_oid_list_member(&table_exclude_oids,
+											   configtbloid))
+						dumpobj = false;
+
+					/* check schema excluded by an exclusion switch */
+					if (simple_oid_list_member(&schema_exclude_oids,
+											   configtbl->dobj.namespace->dobj.catId.oid))
+						dumpobj = false;
+
+					if (dumpobj)
+					{
+						/*
+						 * Note: config tables are dumped without OIDs regardless
+						 * of the --oids setting.  This is because row filtering
+						 * conditions aren't compatible with dumping OIDs.
+						 */
+						makeTableDataInfo(configtbl, false);
+						if (strlen(extconditionarray[j]) > 0)
+							configtbl->dataObj->filtercond = strdup(extconditionarray[j]);
+					}
+				}
+			}
+		}
+		if (extconfigarray)
+			free(extconfigarray);
+		if (extconditionarray)
+			free(extconditionarray);
+	}
+
+	/*
+	 * Now that all the TableInfoData objects have been created for all the
+	 * extensions, check their FK dependencies and register them to try and
+	 * dump the data out in an order that they can be restored in.
+	 *
+	 * Note that this is not a problem for user tables as their FKs are
+	 * recreated after the data has been loaded.
+	 */
+
+	/* Make sure we are in proper schema */
+	selectSourceSchema("pg_catalog");
+
+	query = createPQExpBuffer();
+
+	printfPQExpBuffer(query,
+					  "SELECT conrelid, confrelid "
+							  "FROM pg_constraint "
+							  "JOIN pg_depend ON (objid = confrelid) "
+							  "WHERE contype = 'f' "
+							  "AND refclassid = 'pg_extension'::regclass "
+							  "AND classid = 'pg_class'::regclass;");
+
+	res = PQexec(g_conn, query->data);
+	check_sql_result(res, g_conn, query->data, PGRES_TUPLES_OK);
+
+	ntups = PQntuples(res);
+
+	i_conrelid = PQfnumber(res, "conrelid");
+	i_confrelid = PQfnumber(res, "confrelid");
+
+	/* Now get the dependencies and register them */
+	for (i = 0; i < ntups; i++)
+	{
+		Oid			conrelid, confrelid;
+		TableInfo  *reftable, *contable;
+
+		conrelid = atooid(PQgetvalue(res, i, i_conrelid));
+		confrelid = atooid(PQgetvalue(res, i, i_confrelid));
+		contable = findTableByOid(conrelid);
+		reftable = findTableByOid(confrelid);
+
+		if (reftable == NULL ||
+			reftable->dataObj == NULL ||
+			contable == NULL ||
+			contable->dataObj == NULL)
+			continue;
+
+		/*
+		 * Make referencing TABLE_DATA object depend on the
+		 * referenced table's TABLE_DATA object.
+		 */
+		addObjectDependency(&contable->dataObj->dobj,
+							reftable->dataObj->dobj.dumpId);
+	}
+	PQclear(res);
+	destroyPQExpBuffer(query);
+}
 
 /*
  * getDomainConstraints
@@ -910,16 +1360,6 @@ getTypes(int *numTypes)
 		tinfo[i].typrelkind = *PQgetvalue(res, i, i_typrelkind);
 		tinfo[i].typtype = *PQgetvalue(res, i, i_typtype);
 		tinfo[i].shellType = NULL;
-
-		/*
-		 * If it's a table's rowtype, use special type code to facilitate
-		 * sorting into the desired order.	(We don't want to consider it an
-		 * ordinary type because that would bring the table up into the
-		 * datatype part of the dump order.)
-		 */
-		if (OidIsValid(tinfo[i].typrelid) &&
-			tinfo[i].typrelkind != RELKIND_COMPOSITE_TYPE)
-			tinfo[i].dobj.objType = DO_TABLE_TYPE;
 
 		/*
 		 * check for user-defined array types, omit system generated ones
@@ -2442,13 +2882,28 @@ getProcLangs(int *numProcLangs)
 	/* Make sure we are in proper schema */
 	selectSourceSchema("pg_catalog");
 
-	/* Languages are owned by the bootstrap superuser, OID 10 */
-	appendPQExpBuffer(query, "SELECT tableoid, oid, *, "
-					  "(%s '10') as lanowner "
-					  "FROM pg_language "
-					  "WHERE lanispl "
-					  "ORDER BY oid",
-					  username_subquery);
+	if (g_gp_supportsLanOwner)
+	{
+		/* pg_language has a lanowner column */
+		appendPQExpBuffer(query, "SELECT tableoid, oid, "
+						  "lanname, lanpltrusted, lanplcallfoid, "
+						  "lanvalidator,  lanacl, "
+						  "(%s lanowner) as lanowner "
+						  "FROM pg_language "
+						  "WHERE lanispl "
+						  "ORDER BY oid",
+						  username_subquery);
+	}
+	else
+	{
+		/* Languages are owned by the bootstrap superuser, OID 10 */
+		appendPQExpBuffer(query, "SELECT tableoid, oid, *, "
+						  "(%s '10') as lanowner "
+						  "FROM pg_language "
+						  "WHERE lanispl "
+						  "ORDER BY oid",
+						  username_subquery);
+	}
 
 	res = PQexec(g_conn, query->data);
 	check_sql_result(res, g_conn, query->data, PGRES_TUPLES_OK);
@@ -2748,8 +3203,6 @@ getTableAttrs(TableInfo *tblinfo, int numTables)
 		tbinfo->attislocal = (bool *) malloc(ntups * sizeof(bool));
 		tbinfo->notnull = (bool *) malloc(ntups * sizeof(bool));
 		tbinfo->attrdefs = (AttrDefInfo **) malloc(ntups * sizeof(AttrDefInfo *));
-		tbinfo->inhAttrs = (bool *) malloc(ntups * sizeof(bool));
-		tbinfo->inhAttrDef = (bool *) malloc(ntups * sizeof(bool));
 		tbinfo->inhNotNull = (bool *) malloc(ntups * sizeof(bool));
 		tbinfo->attencoding = (char **)malloc(ntups * sizeof(char *));
 		hasdefaults = false;
@@ -2774,9 +3227,8 @@ getTableAttrs(TableInfo *tblinfo, int numTables)
 			tbinfo->attrdefs[j] = NULL; /* fix below */
 			if (PQgetvalue(res, j, i_atthasdef)[0] == 't')
 				hasdefaults = true;
+
 			/* these flags will be set in flagInhAttrs() */
-			tbinfo->inhAttrs[j] = false;
-			tbinfo->inhAttrDef[j] = false;
 			tbinfo->inhNotNull[j] = false;
 
 			/* column storage attributes */
@@ -2784,6 +3236,14 @@ getTableAttrs(TableInfo *tblinfo, int numTables)
 				tbinfo->attencoding[j] = strdup(PQgetvalue(res, j, i_attencoding));
 			else
 				tbinfo->attencoding[j] = NULL;
+
+			/*
+			 * External table doesn't support inheritance so ensure that all
+			 * attributes are marked as local.  Applicable to partitioned
+			 * tables where a partition is exchanged for an external table.
+			 */
+			if (tbinfo->relstorage == RELSTORAGE_EXTERNAL && tbinfo->attislocal[j])
+				tbinfo->attislocal[j] = false;
 		}
 
 		PQclear(res);
@@ -2947,6 +3407,343 @@ getTableAttrs(TableInfo *tblinfo, int numTables)
 	cleanUpTable();
 
 	destroyPQExpBuffer(q);
+}
+
+/*
+ * Test whether a column should be printed as part of table's CREATE TABLE.
+ * Column number is zero-based.
+ *
+ * Normally this is always true, but it's false for dropped columns, as well
+ * as those that were inherited without any local definition.  (If we print
+ * such a column it will mistakenly get pg_attribute.attislocal set to true.)
+ *
+ * This function exists because there are scattered nonobvious places that
+ * must be kept in sync with this decision.
+ */
+bool
+shouldPrintColumn(TableInfo *tbinfo, int colno)
+{
+	return (tbinfo->attislocal[colno] && !tbinfo->attisdropped[colno]);
+}
+
+/*
+ * getTSParsers:
+ *	  read all text search parsers in the system catalogs and return them
+ *	  in the TSParserInfo* structure
+ *
+ *	numTSParsers is set to the number of parsers read in
+ */
+TSParserInfo *
+getTSParsers(int *numTSParsers)
+{
+	PGresult   *res;
+	int			ntups;
+	int			i;
+	PQExpBuffer query = createPQExpBuffer();
+	TSParserInfo *prsinfo;
+	int			i_tableoid;
+	int			i_oid;
+	int			i_prsname;
+	int			i_prsnamespace;
+	int			i_prsstart;
+	int			i_prstoken;
+	int			i_prsend;
+	int			i_prsheadline;
+	int			i_prslextype;
+
+	/* Before 8.3, there is no built-in text search support */
+	if (!g_gp_supportsFullText)
+	{
+		*numTSParsers = 0;
+		return NULL;
+	}
+
+	/*
+	 * find all text search objects, including builtin ones; we filter out
+	 * system-defined objects at dump-out time.
+	 */
+
+	/* Make sure we are in proper schema */
+	selectSourceSchema("pg_catalog");
+
+	appendPQExpBuffer(query, "SELECT tableoid, oid, prsname, prsnamespace, "
+					  "prsstart::oid, prstoken::oid, "
+					  "prsend::oid, prsheadline::oid, prslextype::oid "
+					  "FROM pg_ts_parser");
+
+	res = PQexec(g_conn, query->data);
+	check_sql_result(res, g_conn, query->data, PGRES_TUPLES_OK);
+
+	ntups = PQntuples(res);
+	*numTSParsers = ntups;
+
+	prsinfo = (TSParserInfo *) malloc(ntups * sizeof(TSParserInfo));
+
+	i_tableoid = PQfnumber(res, "tableoid");
+	i_oid = PQfnumber(res, "oid");
+	i_prsname = PQfnumber(res, "prsname");
+	i_prsnamespace = PQfnumber(res, "prsnamespace");
+	i_prsstart = PQfnumber(res, "prsstart");
+	i_prstoken = PQfnumber(res, "prstoken");
+	i_prsend = PQfnumber(res, "prsend");
+	i_prsheadline = PQfnumber(res, "prsheadline");
+	i_prslextype = PQfnumber(res, "prslextype");
+
+	for (i = 0; i < ntups; i++)
+	{
+		prsinfo[i].dobj.objType = DO_TSPARSER;
+		prsinfo[i].dobj.catId.tableoid = atooid(PQgetvalue(res, i, i_tableoid));
+		prsinfo[i].dobj.catId.oid = atooid(PQgetvalue(res, i, i_oid));
+		AssignDumpId(&prsinfo[i].dobj);
+		prsinfo[i].dobj.name = strdup(PQgetvalue(res, i, i_prsname));
+		prsinfo[i].dobj.namespace = findNamespace(atooid(PQgetvalue(res, i, i_prsnamespace)),
+												  prsinfo[i].dobj.catId.oid);
+		prsinfo[i].prsstart = atooid(PQgetvalue(res, i, i_prsstart));
+		prsinfo[i].prstoken = atooid(PQgetvalue(res, i, i_prstoken));
+		prsinfo[i].prsend = atooid(PQgetvalue(res, i, i_prsend));
+		prsinfo[i].prsheadline = atooid(PQgetvalue(res, i, i_prsheadline));
+		prsinfo[i].prslextype = atooid(PQgetvalue(res, i, i_prslextype));
+
+		/* Decide whether we want to dump it */
+		selectDumpableObject(&(prsinfo[i].dobj));
+	}
+
+	PQclear(res);
+
+	destroyPQExpBuffer(query);
+
+	return prsinfo;
+}
+
+/*
+ * getTSDictionaries:
+ *	  read all text search dictionaries in the system catalogs and return them
+ *	  in the TSDictInfo* structure
+ *
+ *	numTSDicts is set to the number of dictionaries read in
+ */
+TSDictInfo *
+getTSDictionaries(int *numTSDicts)
+{
+	PGresult   *res;
+	int			ntups;
+	int			i;
+	PQExpBuffer query = createPQExpBuffer();
+	TSDictInfo *dictinfo;
+	int			i_tableoid;
+	int			i_oid;
+	int			i_dictname;
+	int			i_dictnamespace;
+	int			i_rolname;
+	int			i_dicttemplate;
+	int			i_dictinitoption;
+
+	/* Before 8.3, there is no built-in text search support */
+	if (!g_gp_supportsFullText)
+	{
+		*numTSDicts = 0;
+		return NULL;
+	}
+
+	/* Make sure we are in proper schema */
+	selectSourceSchema("pg_catalog");
+
+	appendPQExpBuffer(query, "SELECT tableoid, oid, dictname, "
+					  "dictnamespace, (%s dictowner) as rolname, "
+					  "dicttemplate, dictinitoption "
+					  "FROM pg_ts_dict",
+					  username_subquery);
+
+	res = PQexec(g_conn, query->data);
+	check_sql_result(res, g_conn, query->data, PGRES_TUPLES_OK);
+
+	ntups = PQntuples(res);
+	*numTSDicts = ntups;
+
+	dictinfo = (TSDictInfo *) malloc(ntups * sizeof(TSDictInfo));
+
+	i_tableoid = PQfnumber(res, "tableoid");
+	i_oid = PQfnumber(res, "oid");
+	i_dictname = PQfnumber(res, "dictname");
+	i_dictnamespace = PQfnumber(res, "dictnamespace");
+	i_rolname = PQfnumber(res, "rolname");
+	i_dictinitoption = PQfnumber(res, "dictinitoption");
+	i_dicttemplate = PQfnumber(res, "dicttemplate");
+
+	for (i = 0; i < ntups; i++)
+	{
+		dictinfo[i].dobj.objType = DO_TSDICT;
+		dictinfo[i].dobj.catId.tableoid = atooid(PQgetvalue(res, i, i_tableoid));
+		dictinfo[i].dobj.catId.oid = atooid(PQgetvalue(res, i, i_oid));
+		AssignDumpId(&dictinfo[i].dobj);
+		dictinfo[i].dobj.name = strdup(PQgetvalue(res, i, i_dictname));
+		dictinfo[i].dobj.namespace = findNamespace(atooid(PQgetvalue(res, i, i_dictnamespace)),
+												 dictinfo[i].dobj.catId.oid);
+		dictinfo[i].rolname = strdup(PQgetvalue(res, i, i_rolname));
+		dictinfo[i].dicttemplate = atooid(PQgetvalue(res, i, i_dicttemplate));
+		if (PQgetisnull(res, i, i_dictinitoption))
+			dictinfo[i].dictinitoption = NULL;
+		else
+			dictinfo[i].dictinitoption = strdup(PQgetvalue(res, i, i_dictinitoption));
+
+		/* Decide whether we want to dump it */
+		selectDumpableObject(&(dictinfo[i].dobj));
+	}
+
+	PQclear(res);
+
+	destroyPQExpBuffer(query);
+
+	return dictinfo;
+}
+
+/*
+ * getTSTemplates:
+ *	  read all text search templates in the system catalogs and return them
+ *	  in the TSTemplateInfo* structure
+ *
+ *	numTSTemplates is set to the number of templates read in
+ */
+TSTemplateInfo *
+getTSTemplates(int *numTSTemplates)
+{
+	PGresult   *res;
+	int			ntups;
+	int			i;
+	PQExpBuffer query = createPQExpBuffer();
+	TSTemplateInfo *tmplinfo;
+	int			i_tableoid;
+	int			i_oid;
+	int			i_tmplname;
+	int			i_tmplnamespace;
+	int			i_tmplinit;
+	int			i_tmpllexize;
+
+	/* Before 8.3, there is no built-in text search support */
+	if (!g_gp_supportsFullText)
+	{
+		*numTSTemplates = 0;
+		return NULL;
+	}
+
+	/* Make sure we are in proper schema */
+	selectSourceSchema("pg_catalog");
+
+	appendPQExpBuffer(query, "SELECT tableoid, oid, tmplname, "
+					  "tmplnamespace, tmplinit::oid, tmpllexize::oid "
+					  "FROM pg_ts_template");
+
+	res = PQexec(g_conn, query->data);
+	check_sql_result(res, g_conn, query->data, PGRES_TUPLES_OK);
+
+	ntups = PQntuples(res);
+	*numTSTemplates = ntups;
+
+	tmplinfo = (TSTemplateInfo *) malloc(ntups * sizeof(TSTemplateInfo));
+
+	i_tableoid = PQfnumber(res, "tableoid");
+	i_oid = PQfnumber(res, "oid");
+	i_tmplname = PQfnumber(res, "tmplname");
+	i_tmplnamespace = PQfnumber(res, "tmplnamespace");
+	i_tmplinit = PQfnumber(res, "tmplinit");
+	i_tmpllexize = PQfnumber(res, "tmpllexize");
+
+	for (i = 0; i < ntups; i++)
+	{
+		tmplinfo[i].dobj.objType = DO_TSTEMPLATE;
+		tmplinfo[i].dobj.catId.tableoid = atooid(PQgetvalue(res, i, i_tableoid));
+		tmplinfo[i].dobj.catId.oid = atooid(PQgetvalue(res, i, i_oid));
+		AssignDumpId(&tmplinfo[i].dobj);
+		tmplinfo[i].dobj.name = strdup(PQgetvalue(res, i, i_tmplname));
+		tmplinfo[i].dobj.namespace = findNamespace(atooid(PQgetvalue(res, i, i_tmplnamespace)),
+												 tmplinfo[i].dobj.catId.oid);
+		tmplinfo[i].tmplinit = atooid(PQgetvalue(res, i, i_tmplinit));
+		tmplinfo[i].tmpllexize = atooid(PQgetvalue(res, i, i_tmpllexize));
+
+		/* Decide whether we want to dump it */
+		selectDumpableObject(&(tmplinfo[i].dobj));
+	}
+
+	PQclear(res);
+
+	destroyPQExpBuffer(query);
+
+	return tmplinfo;
+}
+
+/*
+ * getTSConfigurations:
+ *	  read all text search configurations in the system catalogs and return
+ *	  them in the TSConfigInfo* structure
+ *
+ *	numTSConfigs is set to the number of configurations read in
+ */
+TSConfigInfo *
+getTSConfigurations(int *numTSConfigs)
+{
+	PGresult   *res;
+	int			ntups;
+	int			i;
+	PQExpBuffer query = createPQExpBuffer();
+	TSConfigInfo *cfginfo;
+	int			i_tableoid;
+	int			i_oid;
+	int			i_cfgname;
+	int			i_cfgnamespace;
+	int			i_rolname;
+	int			i_cfgparser;
+
+	/* Before 8.3, there is no built-in text search support */
+	if (!g_gp_supportsFullText)
+	{
+		*numTSConfigs = 0;
+		return NULL;
+	}
+
+	/* Make sure we are in proper schema */
+	selectSourceSchema("pg_catalog");
+
+	appendPQExpBuffer(query, "SELECT tableoid, oid, cfgname, "
+					  "cfgnamespace, (%s cfgowner) as rolname, cfgparser "
+					  "FROM pg_ts_config",
+					  username_subquery);
+
+	res = PQexec(g_conn, query->data);
+	check_sql_result(res, g_conn, query->data, PGRES_TUPLES_OK);
+
+	ntups = PQntuples(res);
+	*numTSConfigs = ntups;
+
+	cfginfo = (TSConfigInfo *) malloc(ntups * sizeof(TSConfigInfo));
+
+	i_tableoid = PQfnumber(res, "tableoid");
+	i_oid = PQfnumber(res, "oid");
+	i_cfgname = PQfnumber(res, "cfgname");
+	i_cfgnamespace = PQfnumber(res, "cfgnamespace");
+	i_rolname = PQfnumber(res, "rolname");
+	i_cfgparser = PQfnumber(res, "cfgparser");
+
+	for (i = 0; i < ntups; i++)
+	{
+		cfginfo[i].dobj.objType = DO_TSCONFIG;
+		cfginfo[i].dobj.catId.tableoid = atooid(PQgetvalue(res, i, i_tableoid));
+		cfginfo[i].dobj.catId.oid = atooid(PQgetvalue(res, i, i_oid));
+		AssignDumpId(&cfginfo[i].dobj);
+		cfginfo[i].dobj.name = strdup(PQgetvalue(res, i, i_cfgname));
+		cfginfo[i].dobj.namespace = findNamespace(atooid(PQgetvalue(res, i, i_cfgnamespace)),
+												  cfginfo[i].dobj.catId.oid);
+		cfginfo[i].rolname = strdup(PQgetvalue(res, i, i_rolname));
+		cfginfo[i].cfgparser = atooid(PQgetvalue(res, i, i_cfgparser));
+
+		/* Decide whether we want to dump it */
+		selectDumpableObject(&(cfginfo[i].dobj));
+	}
+
+	PQclear(res);
+
+	destroyPQExpBuffer(query);
+
+	return cfginfo;
 }
 
 bool

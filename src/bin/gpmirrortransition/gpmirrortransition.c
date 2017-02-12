@@ -144,7 +144,7 @@ main(int argc, char **argv)
 	int num_retries = 20;
 	int transition_timeout = 3600;  /* 1 hour */
 	
-	char opt;
+	int opt;
 
 	char msgBuffer[SEGMENT_MSG_BUF_SIZE];
 	char *msg = NULL;
@@ -188,7 +188,13 @@ main(int argc, char **argv)
 				transition_timeout_str = optarg;
 				break;
 			case '?':
-				fprintf(stderr, "Unrecognized option: -%c\n", optopt);
+			default:
+				/*
+				 * getopt has already emitted an error about unrecognized
+				 * parameter so no need to add our own
+				 */
+				exit(1);
+				break;
 		}
 	}
 
@@ -318,7 +324,7 @@ main(int argc, char **argv)
 	}
 
 	 /* check for errors while building the message */
-	if ( msg == NULL )
+	if (msg == NULL || msgLen >= sizeof(msgBuffer))
 	{
 		return TRANS_ERRCODE_ERROR_READING_INPUT;
 	}

@@ -4,19 +4,10 @@
  * Copyright (c) 2008, Greenplum inc
  *
  */
-#ifndef MEM_TUP_H
-#define MEM_TUP_H
+#ifndef MEMTUP_H
+#define MEMTUP_H
 
 #include "access/tupdesc.h"
-
-/* 
- * TODO: implement this macro - equivalent
- * in functionality to the the following check
- * Assert(!(tup->t_data->t_infomask & HEAP_HASOID));
- * it's a sanity check.
- */
-#define MemTupleNoOidSpace(tuple) Assert(tuple) \
-
 
 typedef enum MemTupleBindFlag
 {
@@ -171,11 +162,12 @@ extern MemTupleBinding* create_memtuple_binding(TupleDesc tupdesc);
 extern Datum memtuple_getattr(MemTuple mtup, MemTupleBinding *pbind, int attnum, bool *isnull);
 extern bool memtuple_attisnull(MemTuple mtup, MemTupleBinding *pbind, int attnum);
 
-extern uint32 compute_memtuple_size(MemTupleBinding *pbind, Datum *values, bool *isnull, bool hasnull, uint32 *nullsaves, bool use_null_saves_aligned);
+extern uint32 compute_memtuple_size(MemTupleBinding *pbind, Datum *values, bool *isnull, bool hasnull, uint32 *nullsaves);
 
 extern MemTuple memtuple_copy_to(MemTuple mtup, MemTupleBinding *pbind, MemTuple dest, uint32 *destlen);
 extern MemTuple memtuple_form_to(MemTupleBinding *pbind, Datum *values, bool *isnull, MemTuple dest, uint32 *destlen, bool inline_toast);
 extern void memtuple_deform(MemTuple mtup, MemTupleBinding *pbind, Datum *datum, bool *isnull);
+extern void memtuple_deform_misaligned(MemTuple mtup, MemTupleBinding *pbind, Datum *datum, bool *isnull);
 
 extern Oid MemTupleGetOid(MemTuple mtup, MemTupleBinding *pbind);
 extern void MemTupleSetOid(MemTuple mtup, MemTupleBinding *pbind, Oid oid);
@@ -185,4 +177,4 @@ extern bool MemTupleHasExternal(MemTuple mtup, MemTupleBinding *pbind);
 extern bool memtuple_has_misaligned_attribute(MemTuple mtup, MemTupleBinding *pbind);
 extern MemTuple memtuple_aligned_clone(MemTuple mtup, MemTupleBinding *pbind, bool use_null_saves_aligned);
 
-#endif /* _MEM_TUP_H_ */
+#endif /* MEMTUP_H */

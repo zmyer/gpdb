@@ -1,9 +1,7 @@
 /*
- *  cdbfilerepprimaryrecovery.c
- *  
+ *  cdbfilerepresyncmanager.c
  *
  *  Copyright 2009-2010 Greenplum Inc. All rights reserved. *
- *
  */
 
 /*
@@ -167,8 +165,6 @@ typedef struct FileRepResyncShmem_s {
 	volatile int	appendOnlyCommitCount;
 		/* This counter is protected by FileRepAppendOnlyCommitCountLock */
 		
-	bool			checkpointRequest;
-	
 	bool			reMirrorAllowed;
 		/*
 		 * This flag is used just to enable FILEREP proces to perform some operation
@@ -364,14 +360,6 @@ FileRepResync_SetReMirrorAllowed(void)
 	fileRepResyncShmem->reMirrorAllowed = TRUE;
 }
 
-bool 
-FileRepResync_IsTransitionFromResyncToInSync(void)
-{
-	return((fileRepResyncShmem != NULL)?
-		   (fileRepResyncShmem->checkpointRequest == TRUE &&
-			fileRepProcessType == FileRepProcessTypeResyncManager):false);
-}
-
 bool
 FileRepResync_IsReMirrorAllowed(void)
 {
@@ -507,8 +495,6 @@ FileRepResync_ShmemInit(void)
 	
 	fileRepResyncShmem->appendOnlyCommitCount = 0;
 	
-	fileRepResyncShmem->checkpointRequest = FALSE;
-	
 	fileRepResyncShmem->reMirrorAllowed = FALSE;	
 	
 	fileRepResyncShmem->totalBlocksToSynchronize = 0;
@@ -577,9 +563,6 @@ FileRepResync_ShmemReInit(void)
 	/*
 	 * NOTE: Do not zero Commit Work Intent count for ReInit.
 	 */
-
-	fileRepResyncShmem->checkpointRequest = FALSE;
-	
 	fileRepResyncShmem->reMirrorAllowed = FALSE;	
 	
 	fileRepResyncShmem->totalBlocksToSynchronize = 0;
@@ -945,13 +928,7 @@ FileRepResyncManager_InResyncTransition(void)
 		goto exit;
 	}		
 
-#ifdef FAULT_INJECTOR	
-	FaultInjector_InjectFaultIfSet(
-								   FileRepTransitionToInResyncMirrorReCreate, 
-								   DDLNotSpecified,
-								   "",	// databaseName
-								   ""); // tableName
-#endif
+	SIMPLE_FAULT_INJECTOR(FileRepTransitionToInResyncMirrorReCreate);
 	
 	FileRep_InsertConfigLogEntry("run resync transition, mirror recreate");	
 	
@@ -967,13 +944,7 @@ FileRepResyncManager_InResyncTransition(void)
 
 	FileRepSubProcess_SetState(FileRepStateReady);
 	
-#ifdef FAULT_INJECTOR	
-	FaultInjector_InjectFaultIfSet(
-								   FileRepTransitionToInResyncMarkReCreated, 
-								   DDLNotSpecified,
-								   "",	// databaseName
-								   ""); // tableName
-#endif
+	SIMPLE_FAULT_INJECTOR(FileRepTransitionToInResyncMarkReCreated);
 
 	/*
 	 * Mark Persistent Table entries as 'Dropped (i.e. Free)' to indicate the drops
@@ -1001,13 +972,8 @@ FileRepResyncManager_InResyncTransition(void)
 		goto exit;
 	}		
 	
-#ifdef FAULT_INJECTOR	
-	FaultInjector_InjectFaultIfSet(
-								   FileRepTransitionToInResyncMarkCompleted, 
-								   DDLNotSpecified,
-								   "",	// databaseName
-								   ""); // tableName
-#endif		
+	SIMPLE_FAULT_INJECTOR(FileRepTransitionToInResyncMarkCompleted);
+
 	FileRep_InsertConfigLogEntry("run resync transition, mark transition to resync completed");	
 
 	ChangeTracking_MarkTransitionToResyncCompleted();
@@ -1212,15 +1178,9 @@ FileRepPrimary_RunResyncManager(void)
 					elog(LOG, "Not adding this entry to hash table %s", entry.fileName);
 				continue;
 		}
-		
-#ifdef FAULT_INJECTOR	
-		FaultInjector_InjectFaultIfSet(
-									   FileRepResync, 
-									   DDLNotSpecified,
-									   "",	// databaseName
-									   ""); // tableName
-#endif
-		
+
+		SIMPLE_FAULT_INJECTOR(FileRepResync);
+
 		FileRep_GetRelationPath(
 								entry.fileName, 
 								entry.relFileNode, 
@@ -1306,15 +1266,8 @@ FileRepResyncManager_InSyncTransition(void)
 	
 	FileRep_InsertConfigLogEntry("run resync sync transition");
 
-	
-#ifdef FAULT_INJECTOR	
-	FaultInjector_InjectFaultIfSet(
-								   FileRepTransitionToInSyncBegin, 
-								   DDLNotSpecified,
-								   "",	// databaseName
-								   ""); // tableName
-#endif	
-	
+	SIMPLE_FAULT_INJECTOR(FileRepTransitionToInSyncBegin);
+
 	while (1) {
 		/*
 		 * (MirroredLock, LW_EXCLUSIVE) is acquired and released in CreateCheckPoint
@@ -1323,16 +1276,14 @@ FileRepResyncManager_InSyncTransition(void)
 		
 		MirroredFlatFile_DropFilesFromDir();
 		
-		fileRepResyncShmem->checkpointRequest = TRUE;		
-		CreateCheckPoint(false, true);
-		fileRepResyncShmem->checkpointRequest = FALSE;
+		RequestCheckpoint(CHECKPOINT_IMMEDIATE | CHECKPOINT_FORCE | CHECKPOINT_WAIT | CHECKPOINT_RESYNC_TO_INSYNC_TRANSITION);
 		
 		/* 
 		 * The second checkpoint is required in order to mirror pg_control
 		 * with last checkpoint position in the xlog file that is mirrored (XLogSwitch).
 		 */
-		CreateCheckPoint(false, true);
-		
+		RequestCheckpoint(CHECKPOINT_IMMEDIATE | CHECKPOINT_FORCE | CHECKPOINT_WAIT);
+
 		FileRepSubProcess_ProcessSignals();
 		if (! (FileRepSubProcess_GetState() == FileRepStateReady &&
 			   dataState == DataStateInSync))
@@ -1353,15 +1304,9 @@ FileRepResyncManager_InSyncTransition(void)
 		/* primary and mirror have now completed re-sync */
 		setResyncCompleted();
 		primaryMirrorSetInSync();
-		
-#ifdef FAULT_INJECTOR	
-		FaultInjector_InjectFaultIfSet(
-									   FileRepTransitionToInSyncMarkCompleted, 
-									   DDLNotSpecified,
-									   "",	// databaseName
-									   ""); // tableName
-#endif	
-		
+
+		SIMPLE_FAULT_INJECTOR(FileRepTransitionToInSyncMarkCompleted);
+
 		break;
 	}
 		
@@ -1377,15 +1322,9 @@ FileRepResyncManager_ResyncFlatFiles(void)
 	int status = STATUS_OK;
 	
 	FileRep_SetSegmentState(SegmentStateInSyncTransition, FaultTypeNotInitialized);
-	
-#ifdef FAULT_INJECTOR	
-	FaultInjector_InjectFaultIfSet(
-								   FileRepTransitionToInSync, 
-								   DDLNotSpecified,
-								   "",	// databaseName
-								   ""); // tableName
-#endif	
-	
+
+	SIMPLE_FAULT_INJECTOR(FileRepTransitionToInSync);
+
 	while (1) 
 	{
 		FileRep_InsertConfigLogEntry("run sync transition, resync pg_control file");

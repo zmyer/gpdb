@@ -31,7 +31,6 @@ MASTER_ONLY_TABLES = [
     'gp_fault_strategy',
     'gp_san_configuration',
     'gp_segment_configuration',
-    'gp_verification_history',
     'pg_description',
     'pg_listener',  # ???
     'pg_partition',
@@ -546,6 +545,9 @@ class GPCatalogTable():
 
     def __str__(self):
         return self._name
+
+    def __hash__(self):
+        return hash(self.__str__())
 
     def __repr__(self):
         return "GPCatalogTable: %s; pkey: %s; oids: %s; acl: %s" % (

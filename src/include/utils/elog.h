@@ -8,7 +8,7 @@
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- * $PostgreSQL: pgsql/src/include/utils/elog.h,v 1.83 2007/01/05 22:19:59 momjian Exp $
+ * $PostgreSQL: pgsql/src/include/utils/elog.h,v 1.90.2.2 2008/10/27 19:37:29 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -166,11 +166,34 @@ void elog_internalerror(const char *filename, int lineno, const char *funcname)
  * and have errstart insert the default text domain.  Modules can either use
  * ereport_domain() directly, or preferably they can override the TEXTDOMAIN
  * macro.
+ *
+ * If elevel >= ERROR, the call will not return; we try to inform the compiler
+ * of that via pg_unreachable().  However, no useful optimization effect is
+ * obtained unless the compiler sees elevel as a compile-time constant, else
+ * we're just adding code bloat.  So, if __builtin_constant_p is available,
+ * use that to cause the second if() to vanish completely for non-constant
+ * cases.  We avoid using a local variable because it's not necessary and
+ * prevents gcc from making the unreachability deduction at optlevel -O0.
  *----------
  */
+#ifdef HAVE__BUILTIN_CONSTANT_P
 #define ereport_domain(elevel, domain, rest)	\
-	(errstart(elevel, __FILE__, __LINE__, PG_FUNCNAME_MACRO, domain) ? \
-	 (errfinish rest) : (void) 0)
+	do { \
+		if (errstart(elevel, __FILE__, __LINE__, PG_FUNCNAME_MACRO, domain)) \
+			errfinish rest; \
+		if (__builtin_constant_p(elevel) && (elevel) >= ERROR) \
+			pg_unreachable(); \
+	} while(0)
+#else /* !HAVE__BUILTIN_CONSTANT_P */
+#define ereport_domain(elevel, domain, rest)	\
+	do { \
+		const int elevel_ = (elevel); \
+		if (errstart(elevel_, __FILE__, __LINE__, PG_FUNCNAME_MACRO, domain)) \
+			errfinish rest; \
+		if (elevel_ >= ERROR) \
+			pg_unreachable(); \
+	} while(0)
+#endif /* HAVE__BUILTIN_CONSTANT_P */
 
 #define ereport(elevel, rest)	\
 	ereport_domain(elevel, TEXTDOMAIN, rest)
@@ -194,6 +217,9 @@ extern int	errcode(int sqlerrcode);
 
 extern int	errcode_for_file_access(void);
 extern int	errcode_for_socket_access(void);
+
+extern int sqlstate_to_errcode(const char *sqlstate);
+extern char *errcode_to_sqlstate(int errcode, char outbuf[6]);
 
 extern int
 errmsg(const char *fmt,...)
@@ -261,20 +287,46 @@ extern int	geterrcode(void);
 extern int	geterrposition(void);
 extern int	getinternalerrposition(void);
 
-extern int errOmitLocation(bool omitLocation);   /* GPDB */
-
 extern int errFatalReturn(bool fatalReturn); /* GPDB: true => return on FATAL error */
 
 extern int errSendAlert(bool sendAlert);		/* GPDB: Send alert via e-mail or SNMP */
-
-extern int errSuppressOutputToLog(void);   /* GP */
 
 /*----------
  * Old-style error reporting API: to be used in this way:
  *		elog(ERROR, "portal \"%s\" not found", stmt->portalname);
  *----------
  */
-#define elog	elog_start(__FILE__, __LINE__, PG_FUNCNAME_MACRO), elog_finish
+#ifdef HAVE__VA_ARGS
+/*
+ * If we have variadic macros, we can give the compiler a hint about the
+ * call not returning when elevel >= ERROR.  See comments for ereport().
+ * Note that historically elog() has called elog_start (which saves errno)
+ * before evaluating "elevel", so we preserve that behavior here.
+ */
+#ifdef HAVE__BUILTIN_CONSTANT_P
+#define elog(elevel, ...)  \
+	do { \
+		elog_start(__FILE__, __LINE__, PG_FUNCNAME_MACRO); \
+		elog_finish(elevel, __VA_ARGS__); \
+		if (__builtin_constant_p(elevel) && (elevel) >= ERROR) \
+			pg_unreachable(); \
+	} while(0)
+#else /* !HAVE__BUILTIN_CONSTANT_P */
+#define elog(elevel, ...)  \
+	do { \
+		int		elevel_; \
+		elog_start(__FILE__, __LINE__, PG_FUNCNAME_MACRO); \
+		elevel_ = (elevel); \
+		elog_finish(elevel_, __VA_ARGS__); \
+		if (elevel_ >= ERROR) \
+			pg_unreachable(); \
+	} while(0)
+#endif /* HAVE__BUILTIN_CONSTANT_P */
+#else /* !HAVE__VA_ARGS */
+#define elog  \
+	elog_start(__FILE__, __LINE__, PG_FUNCNAME_MACRO), \
+	elog_finish
+#endif /* HAVE__VA_ARGS */
 
 extern void elog_start(const char *filename, int lineno, const char *funcname);
 extern void
@@ -390,8 +442,8 @@ typedef struct ErrorData
 	bool		show_funcname;	/* true to force funcname inclusion */
     bool        omit_location;  /* GPDB: don't add filename:line# and stack trace */
     bool        fatal_return;   /* GPDB: true => return instead of proc_exit() */
-	bool		hide_stmt;		/* true to prevent STATEMENT: inclusion */
 	bool		send_alert;		/* GPDB: send e-mail alert and/or SNMP trap/inform */
+	bool		hide_stmt;		/* true to prevent STATEMENT: inclusion */
 	const char *filename;		/* __FILE__ of ereport() call */
 	int			lineno;			/* __LINE__ of ereport() call */
 	const char *funcname;		/* __func__ of ereport() call */
@@ -512,7 +564,6 @@ extern size_t backtrace(void **buffer, int size);
 extern char **backtrace_symbols(void *const *buffer, int size);
 #endif
 
-extern void GetLastLogTimeVal(struct timeval *lastLogTimeVal);
 extern void write_message_to_server_log(int elevel,
 										int sqlerrcode,
 										const char *message,

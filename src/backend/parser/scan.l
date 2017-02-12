@@ -58,7 +58,13 @@ int base_yylex_destroy  (void);
 
 /* Avoid exit() on fatal scanner errors (a bit ugly -- see yy_fatal_error) */
 #undef fprintf
-#define fprintf(file, fmt, msg)  ereport(ERROR, (errmsg_internal("%s", msg)))
+#define fprintf(file, fmt, msg)  fprintf_to_ereport(fmt, msg)
+
+static void
+fprintf_to_ereport(const char *fmt, const char *msg)
+{
+	ereport(ERROR, (errmsg_internal("%s", msg)));
+}
 
 static int		xcdepth = 0;	/* depth of nesting in slash-star comments */
 static char    *dolqstart;      /* current $foo$ quote start string */
@@ -592,7 +598,6 @@ other			.
 									(errcode(ERRCODE_NONSTANDARD_USE_OF_ESCAPE_CHARACTER),
 									 errmsg("unsafe use of \\' in a string literal"),
 									 errhint("Use '' to write quotes in strings. \\' is insecure in client-only encodings."),
-									 errOmitLocation(true),
 									 lexer_errposition()));
 					}
 					check_string_escape_warning(yytext[1]);
@@ -965,7 +970,6 @@ yyerror(const char *message)
 				(errcode(ERRCODE_SYNTAX_ERROR),
 				 /* translator: %s is typically the translation of "syntax error" */
 				 errmsg("%s at end of input", _(message)),
-				 errOmitLocation(true),
 				 lexer_errposition()));
 	}
 	else
@@ -974,7 +978,6 @@ yyerror(const char *message)
 				(errcode(ERRCODE_SYNTAX_ERROR),
 				 /* translator: first %s is typically the translation of "syntax error" */
 				 errmsg("%s at or near \"%s\"", _(message), loc),
-				 errOmitLocation(true),
 				 lexer_errposition()));
 	}
 }
@@ -1222,7 +1225,6 @@ check_string_escape_warning(unsigned char ychar)
 					(errcode(ERRCODE_NONSTANDARD_USE_OF_ESCAPE_CHARACTER),
 					 errmsg("nonstandard use of \\' in a string literal"),
 					 errhint("Use '' to write quotes in strings, or use the escape string syntax (E'...')."),
-					 errOmitLocation(true),
 					 lexer_errposition()));
 		warn_on_first_escape = false;	/* warn only once per string */
 	}
@@ -1233,7 +1235,6 @@ check_string_escape_warning(unsigned char ychar)
 					(errcode(ERRCODE_NONSTANDARD_USE_OF_ESCAPE_CHARACTER),
 					 errmsg("nonstandard use of \\\\ in a string literal"),
 					 errhint("Use the escape string syntax for backslashes, e.g., E'\\\\'."),
-					 errOmitLocation(true),
 					 lexer_errposition()));
 		warn_on_first_escape = false;	/* warn only once per string */
 	}
@@ -1249,7 +1250,6 @@ check_escape_warning(void)
 				(errcode(ERRCODE_NONSTANDARD_USE_OF_ESCAPE_CHARACTER),
 				 errmsg("nonstandard use of escape in a string literal"),
 				 errhint("Use the escape string syntax for escapes, e.g., E'\\r\\n'."),
-				 errOmitLocation(true),
 				 lexer_errposition()));
 	warn_on_first_escape = false;	/* warn only once per string */
 }

@@ -22,8 +22,6 @@
 #include "settings.h"
 #include "variables.h"
 
-#define CATALOG_83_SUPPORTED false
-
 static bool describeOneTableDetails(const char *schemaname,
 						const char *relationname,
 						const char *oid,
@@ -41,6 +39,7 @@ static bool describeOneTSConfig(const char *oid, const char *nspname,
 					const char *cfgname,
 					const char *pnspname, const char *prsname);
 static void printACLColumn(PQExpBuffer buf, const char *colname);
+static bool listOneExtensionContents(const char *extname, const char *oid);
 static bool isGPDB(void);
 static bool isGPDB4200OrLater(void);
 static bool isGPDB5000OrLater(void);
@@ -255,7 +254,7 @@ describeTablespaces(const char *pattern, bool verbose)
 					  "  fsname AS \"%s\"",
 					  gettext_noop("Name"),
 					  gettext_noop("Owner"),
-					  gettext_noop("Filespae Name"));
+					  gettext_noop("Filespace Name"));
     else
     printfPQExpBuffer(&buf,
 					  "SELECT spcname AS \"%s\",\n"
@@ -630,8 +629,7 @@ describeTypes(const char *pattern, bool verbose, bool showSystem)
 						  gettext_noop("Internal name"),
 						  gettext_noop("Size"));
 	}
-	/* FIXME when we add enum types */
-	if (verbose && pset.sversion >= 80300 && CATALOG_83_SUPPORTED )
+	if (verbose && pset.sversion >= 80300)
 		appendPQExpBuffer(&buf,
 						  "  pg_catalog.array_to_string(\n"
 						  "      ARRAY(\n"
@@ -667,8 +665,7 @@ describeTypes(const char *pattern, bool verbose, bool showSystem)
 	 * do not include array types (before 8.3 we have to use the assumption
 	 * that their names start with underscore)
 	 */
-	/* FIXME when we pull in array types */
-	if (pset.sversion >= 80300 && CATALOG_83_SUPPORTED)
+	if (pset.sversion >= 80300)
 		appendPQExpBuffer(&buf, "  AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_type el WHERE el.oid = t.typelem AND el.typarray = t.oid)\n");
 	else
 		appendPQExpBuffer(&buf, "  AND t.typname !~ '^_'\n");
@@ -1451,7 +1448,7 @@ describeOneTableDetails(const char *schemaname,
 		if (!result)
 			goto error_return;
 
-		if (PQgetisnull(result, 0, 0))
+		if (PQgetisnull(result, 0, 0) || PQgetvalue(result, 0, 0)[0] == '\0')
 		{
 			tableinfo.compressionType = pg_malloc(sizeof("None") + 1);
 			strcpy(tableinfo.compressionType, "None");
@@ -1808,6 +1805,8 @@ describeOneTableDetails(const char *schemaname,
 	{
 		/* Footer information about an external table */
 		PGresult   *result;
+        bool	    gpdb5 = isGPDB5000OrLater();
+		char	   *optionsName = gpdb5 ? ", x.options " : "";
 
 		printfPQExpBuffer(&buf,
 						  "SELECT x.location, x.fmttype, x.fmtopts, x.command, "
@@ -1817,8 +1816,9 @@ describeOneTableDetails(const char *schemaname,
 								  "WHERE Oid=x.fmterrtbl) AS errtblname, "
 								  "pg_catalog.pg_encoding_to_char(x.encoding), "
 								  "x.fmterrtbl = x.reloid AS errortofile "
+								  "%s"
 						  "FROM pg_catalog.pg_exttable x, pg_catalog.pg_class c "
-						  "WHERE x.reloid = c.oid AND c.oid = '%s'\n", oid);
+						  "WHERE x.reloid = c.oid AND c.oid = '%s'\n", optionsName, oid);
 
 		result = PSQLexec(buf.data, false);
 		if (!result)
@@ -1841,6 +1841,11 @@ describeOneTableDetails(const char *schemaname,
 			char	   *extencoding = PQgetvalue(result, 0, 8);
 			char	   *errortofile = PQgetvalue(result, 0, 9);
 			char       *format;
+			char	   *options;
+			if (gpdb5)
+			{
+				options = PQgetvalue(result, 0, 10);
+			}
 
 			/* Writable/Readable */
 			printfPQExpBuffer(&tmpbuf, _("Type: %s"), writable[0] == 't' ? "writable" : "readable");
@@ -1891,6 +1896,13 @@ describeOneTableDetails(const char *schemaname,
 			/* format options */
 			printfPQExpBuffer(&tmpbuf, _("Format options: %s"), fmtopts);
 			printTableAddFooter(&cont, tmpbuf.data);
+
+		    if (gpdb5)
+			{
+				/* external table options */
+				printfPQExpBuffer(&tmpbuf, _("External options: %s"), options);
+				printTableAddFooter(&cont, tmpbuf.data);
+			}
 
 			if(command && strlen(command) > 0)
 			{
@@ -2245,13 +2257,7 @@ describeOneTableDetails(const char *schemaname,
 		/* print rules */
 		if (tableinfo.hasrules)
 		{
-			/*
-			* FIXME: temporarily disabled, because GPDB hasn't been merged
-			* up to 8.3 completely yet, so the column is not there yet.
-			* Re-enable once we reach that commit where ev_enabled is
-			* added.
-			*/
-			if (pset.sversion >= 80300 && CATALOG_83_SUPPORTED)
+			if (pset.sversion >= 80300)
 			{
 				printfPQExpBuffer(&buf,
 								  "SELECT r.rulename, trim(trailing ';' from pg_catalog.pg_get_ruledef(r.oid, true)), "
@@ -2356,13 +2362,7 @@ describeOneTableDetails(const char *schemaname,
 							  oid);
 			if (pset.sversion >= 90000)
 				appendPQExpBuffer(&buf, "NOT t.tgisinternal");
-			/*
-			* FIXME: temporarily disabled, because GPDB hasn't been merged
-			* up to 8.3 completely yet, so the column is not there yet.
-			* Re-enable once we reach that commit where tgconstraint is
-			* added.
-			*/
-			else if (pset.sversion >= 80300 && CATALOG_83_SUPPORTED)
+			else if (pset.sversion >= 80300)
 				appendPQExpBuffer(&buf, "t.tgconstraint = 0");
 			else
 				appendPQExpBuffer(&buf,
@@ -2489,8 +2489,7 @@ describeOneTableDetails(const char *schemaname,
 		PQclear(result);
 
 		/* print child tables */
-		/* FIXME: this needs to be enabled after we have fully merged with 8.3, so that this works */
-		if (pset.sversion >= 80300 && CATALOG_83_SUPPORTED)
+		if (pset.sversion >= 80300)
 			printfPQExpBuffer(&buf, "SELECT c.oid::pg_catalog.regclass FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i WHERE c.oid=i.inhrelid AND i.inhparent = '%s' ORDER BY c.oid::pg_catalog.regclass::pg_catalog.text;", oid);
 		else
 			printfPQExpBuffer(&buf, "SELECT c.oid::pg_catalog.regclass FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i WHERE c.oid=i.inhrelid AND i.inhparent = '%s' ORDER BY c.relname;", oid);
@@ -2879,6 +2878,13 @@ describeRoles(const char *pattern, bool verbose)
 				 "        JOIN pg_catalog.pg_roles b ON (m.roleid = b.oid)\n"
 						  "        WHERE m.member = r.oid) as memberof");
 
+		/* add Greenplum specific attributes */
+		appendPQExpBufferStr(&buf, "\n, r.rolcreaterextgpfd");
+		appendPQExpBufferStr(&buf, "\n, r.rolcreatewextgpfd");
+		appendPQExpBufferStr(&buf, "\n, r.rolcreaterexthttp");
+		appendPQExpBufferStr(&buf, "\n, r.rolcreaterexthdfs");
+		appendPQExpBufferStr(&buf, "\n, r.rolcreatewexthdfs");
+
 		if (verbose && pset.sversion >= 80200)
 		{
 			appendPQExpBufferStr(&buf, "\n, pg_catalog.shobj_description(r.oid, 'pg_authid') AS description");
@@ -2940,6 +2946,25 @@ describeRoles(const char *pattern, bool verbose)
 		if (strcmp(PQgetvalue(res, i, 4), "t") == 0)
 			add_role_attribute(&buf, _("Create DB"));
 
+
+		/* output Greenplum specific attributes */
+		if (strcmp(PQgetvalue(res, i, 8), "t") == 0)
+			add_role_attribute(&buf, _("Ext gpfdist Table"));
+
+		if (strcmp(PQgetvalue(res, i, 9), "t") == 0)
+			add_role_attribute(&buf, _("Wri Ext gpfdist Table"));
+
+		if (strcmp(PQgetvalue(res, i, 10), "t") == 0)
+			add_role_attribute(&buf, _("Ext http Table"));
+
+		if (strcmp(PQgetvalue(res, i, 11), "t") == 0)
+			add_role_attribute(&buf, _("Ext hdfs Table"));
+
+		if (strcmp(PQgetvalue(res, i, 12), "t") == 0)
+			add_role_attribute(&buf, _("Wri Ext hdfs Table"));
+		/* end Greenplum specific attributes */
+
+
 		if (strcmp(PQgetvalue(res, i, 5), "t") != 0)
 			add_role_attribute(&buf, _("Cannot login"));
 
@@ -2965,7 +2990,7 @@ describeRoles(const char *pattern, bool verbose)
 		printTableAddCell(&cont, PQgetvalue(res, i, 7), false, false);
 
 		if (verbose && pset.sversion >= 80200)
-			printTableAddCell(&cont, PQgetvalue(res, i, 8), false, false);
+			printTableAddCell(&cont, PQgetvalue(res, i, 8 + 5 /* Greenplum specific attributes */), false, false);
 	}
 	termPQExpBuffer(&buf);
 
@@ -4032,6 +4057,168 @@ describeOneTSConfig(const char *oid, const char *nspname, const char *cfgname,
 	printQuery(res, &myopt, pset.queryFout, pset.logfile);
 
 	termPQExpBuffer(&title);
+
+	PQclear(res);
+	return true;
+}
+
+
+/*
+ * \dx
+ *
+ * Briefly describes installed extensions.
+ */
+bool
+listExtensions(const char *pattern)
+{
+	PQExpBufferData buf;
+	PGresult   *res;
+	printQueryOpt myopt = pset.popt;
+
+	if (pset.sversion < 80300)
+	{
+		fprintf(stderr, _("The server (version %d.%d) does not support extensions.\n"),
+				pset.sversion / 10000, (pset.sversion / 100) % 100);
+		return true;
+	}
+
+	initPQExpBuffer(&buf);
+	printfPQExpBuffer(&buf,
+					  "SELECT e.extname AS \"%s\", "
+							  "e.extversion AS \"%s\", n.nspname AS \"%s\", c.description AS \"%s\"\n"
+							  "FROM pg_catalog.pg_extension e "
+							  "LEFT JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace "
+							  "LEFT JOIN pg_catalog.pg_description c ON c.objoid = e.oid "
+							  "AND c.classoid = 'pg_catalog.pg_extension'::pg_catalog.regclass\n",
+					  gettext_noop("Name"),
+					  gettext_noop("Version"),
+					  gettext_noop("Schema"),
+					  gettext_noop("Description"));
+
+	processSQLNamePattern(pset.db, &buf, pattern,
+						  false, false,
+						  NULL, "e.extname", NULL,
+						  NULL);
+
+	appendPQExpBuffer(&buf, "ORDER BY 1;");
+
+	res = PSQLexec(buf.data, false);
+	termPQExpBuffer(&buf);
+	if (!res)
+		return false;
+
+	myopt.nullPrint = NULL;
+	myopt.title = _("List of installed extensions");
+	myopt.translate_header = true;
+
+	printQuery(res, &myopt, pset.queryFout, pset.logfile);
+
+	PQclear(res);
+	return true;
+}
+
+/*
+ * \dx+
+ *
+ * List contents of installed extensions.
+ */
+bool
+listExtensionContents(const char *pattern)
+{
+	PQExpBufferData buf;
+	PGresult   *res;
+	int			i;
+
+	if (pset.sversion < 80300)
+	{
+		fprintf(stderr, _("The server (version %d.%d) does not support extensions.\n"),
+				pset.sversion / 10000, (pset.sversion / 100) % 100);
+		return true;
+	}
+
+	initPQExpBuffer(&buf);
+	printfPQExpBuffer(&buf,
+					  "SELECT e.extname, e.oid\n"
+							  "FROM pg_catalog.pg_extension e\n");
+
+	processSQLNamePattern(pset.db, &buf, pattern,
+						  false, false,
+						  NULL, "e.extname", NULL,
+						  NULL);
+
+	appendPQExpBuffer(&buf, "ORDER BY 1;");
+
+	res = PSQLexec(buf.data, false);
+	termPQExpBuffer(&buf);
+	if (!res)
+		return false;
+
+	if (PQntuples(res) == 0)
+	{
+		if (!pset.quiet)
+		{
+			if (pattern)
+				fprintf(stderr, _("Did not find any extension named \"%s\".\n"),
+						pattern);
+			else
+				fprintf(stderr, _("Did not find any extensions.\n"));
+		}
+		PQclear(res);
+		return false;
+	}
+
+	for (i = 0; i < PQntuples(res); i++)
+	{
+		const char *extname;
+		const char *oid;
+
+		extname = PQgetvalue(res, i, 0);
+		oid = PQgetvalue(res, i, 1);
+
+		if (!listOneExtensionContents(extname, oid))
+		{
+			PQclear(res);
+			return false;
+		}
+		if (cancel_pressed)
+		{
+			PQclear(res);
+			return false;
+		}
+	}
+
+	PQclear(res);
+	return true;
+}
+
+static bool
+listOneExtensionContents(const char *extname, const char *oid)
+{
+	PQExpBufferData buf;
+	PGresult   *res;
+	char		title[1024];
+	printQueryOpt myopt = pset.popt;
+
+	initPQExpBuffer(&buf);
+	printfPQExpBuffer(&buf,
+					  "SELECT pg_catalog.pg_describe_object(classid, objid, 0) AS \"%s\"\n"
+							  "FROM pg_catalog.pg_depend\n"
+							  "WHERE refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass AND refobjid = '%s' AND deptype = 'e'\n"
+							  "ORDER BY 1;",
+					  gettext_noop("Object Description"),
+					  oid);
+
+	res = PSQLexec(buf.data, false);
+	termPQExpBuffer(&buf);
+	if (!res)
+		return false;
+
+	myopt.nullPrint = NULL;
+	snprintf(title, sizeof(title), _("Objects in extension \"%s\""), extname);
+	myopt.title = title;
+	myopt.translate_header = true;
+
+	printQuery(res, &myopt, pset.queryFout, pset.logfile);
 
 	PQclear(res);
 	return true;

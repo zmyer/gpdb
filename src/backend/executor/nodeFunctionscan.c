@@ -9,7 +9,7 @@
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/executor/nodeFunctionscan.c,v 1.43 2007/02/19 02:23:11 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/executor/nodeFunctionscan.c,v 1.45.2.1 2008/02/29 02:49:43 neilc Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -68,12 +68,13 @@ FunctionNext(FunctionScanState *node)
 	 */
 	if (tuplestorestate == NULL)
 	{
-		tuplestorestate = ExecMakeTableFunctionResult(
-				node->funcexpr,
-				node->ss.ps.ps_ExprContext,
-				node->tupdesc,
-				PlanStateOperatorMemKB( (PlanState *) node));
-		node->tuplestorestate = tuplestorestate;
+		ExprContext *econtext = node->ss.ps.ps_ExprContext;
+
+		node->tuplestorestate = tuplestorestate =
+			ExecMakeTableFunctionResult(node->funcexpr,
+										econtext,
+										node->tupdesc,
+										PlanStateOperatorMemKB( (PlanState *) node));
 
 		/* CDB: Offer extra info for EXPLAIN ANALYZE. */
 		if (node->ss.ps.instrument)
@@ -84,7 +85,6 @@ FunctionNext(FunctionScanState *node)
 			/* Request a callback at end of query. */
 			node->ss.ps.cdbexplainfun = ExecFunctionScanExplainEnd;
 		}
-
 	}
 
 	/*
@@ -337,7 +337,7 @@ ExecFunctionMarkPos(FunctionScanState *node)
 
     node->cdb_mark_ctid = node->cdb_fake_ctid;
 
-	tuplestore_markpos(node->tuplestorestate); 
+	tuplestore_markpos(node->tuplestorestate);
 }
 
 /* ----------------------------------------------------------------
@@ -380,7 +380,7 @@ ExecFunctionReScan(FunctionScanState *node, ExprContext *exprCtxt)
 
     ItemPointerSet(&node->cdb_fake_ctid, 0, 0);
 
-    /*
+	/*
 	 * Here we have a choice whether to drop the tuplestore (and recompute the
 	 * function outputs) or just rescan it.  We must recompute if the
 	 * expression contains parameters, else we rescan.  XXX maybe we should
@@ -391,9 +391,7 @@ ExecFunctionReScan(FunctionScanState *node, ExprContext *exprCtxt)
 		ExecEagerFreeFunctionScan(node);
 	}
 	else
-	{
 		tuplestore_rescan(node->tuplestorestate);
-	}
 }
 
 void

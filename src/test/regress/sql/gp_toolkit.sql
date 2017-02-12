@@ -287,10 +287,10 @@ select sosdnsp,
 from gp_toolkit.gp_size_of_schema_disk where sosdnsp='tktest' order by 1;
 
 -- gp_size_of_database
--- We assume the regression database is between 30 MB and 1GB in size
+-- We assume the regression database is between 30 MB and 5GB in size
 select sodddatname,
        sodddatsize > 30000000 as "db size over 30MB",
-       sodddatsize < 1000000000 as "db size below 1 GB"
+       sodddatsize < 5000000000 as "db size below 5 GB"
 from gp_toolkit.gp_size_of_database where sodddatname='regression';
 
 -- gp_size_of_partition_and_indexes_disk
@@ -340,6 +340,17 @@ select * from gp_toolkit.gp_resq_activity where resqrole = 'toolkit_user1';
 -- Should be empty unless there is failure in the segment, it's a view from gp_pgdatabase
 select * from gp_toolkit.gp_pgdatabase_invalid;
 
+-- Test that the statistics on resource queue usage are properly updated and
+-- reflected in the pg_stat_resqueues view
+set stats_queue_level=on;
+create resource queue q with (active_statements = 10);
+create user resqueuetest with resource queue q;
+set role resqueuetest;
+select 1;
+select n_queries_exec from pg_stat_resqueues where queuename = 'q';
+reset role;
+drop role resqueuetest;
+drop resource queue q;
 
 -- GP Readable Data Table
 

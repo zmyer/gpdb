@@ -1,5 +1,6 @@
 top_builddir = ..
 include $(top_builddir)/src/Makefile.global
+include $(top_builddir)/gpMgmt/Makefile.behave
 
 #---------------------------------------------------------------------
 # Set Version
@@ -9,9 +10,8 @@ SET_VERSION_SCRIPTS = \
 	bin/gpactivatestandby \
 	bin/gpaddmirrors \
 	bin/gpbitmapreindex \
-	bin/gpcheckos \
 	bin/gpcheckperf \
-	bin/gpcrondump.py \
+	bin/gpcrondump \
 	bin/gpdbrestore \
 	bin/gpdeletesystem \
 	bin/gpexpand \
@@ -23,12 +23,9 @@ SET_VERSION_SCRIPTS = \
 	bin/gpmigrator \
 	bin/gpmigrator_mirror \
 	bin/gpmovemirrors \
-	bin/gprebuildsystem \
 	bin/gprecoverseg \
 	bin/gpreload \
 	bin/gpscp \
-	bin/gpsizecalc \
-	bin/gpskew \
 	bin/gpssh \
 	bin/gpssh-exkeys \
 	bin/gpstart \
@@ -38,7 +35,6 @@ SET_VERSION_SCRIPTS = \
 	bin/gpcheckcat \
 	sbin/gpaddconfig.py \
 	sbin/gpchangeuserpassword \
-	sbin/gpcheck_hostdump \
 	sbin/gpcleansegmentdir.py \
 	sbin/gpfixuserlimts \
 	sbin/gpgetstatususingtransition.py \
@@ -47,7 +43,6 @@ SET_VERSION_SCRIPTS = \
 	sbin/gpsegstop.py \
 	sbin/gpsegtoprimaryormirror.py \
 	sbin/gpsetdbid.py \
-	sbin/gpsuspend.py \
 	sbin/gpupgrademirror.py \
 	lib/python/gppylib/programs/clsAddMirrors.py \
 	lib/python/gppylib/programs/clsHostCacheLookup.py \
@@ -56,41 +51,40 @@ SET_VERSION_SCRIPTS = \
 	lib/python/gppylib/programs/clsSystemState.py \
 	lib/python/gppylib/programs/gppkg.py \
 	lib/python/gppylib/programs/kill.py \
-	lib/python/gppylib/programs/verify.py \
 	lib/python/gppylib/mainUtils.py \
 	$(NULL)
 
 set_scripts_version : 
 	@for file in $(SET_VERSION_SCRIPTS); do \
-	    if [ -f $(prefix)/$${file} ]; then \
-	        perl $(top_builddir)/putversion $(prefix)/$${file} ; \
+	    if [ -f $(DESTDIR)$(prefix)/$${file} ]; then \
+	        perl $(top_builddir)/putversion $(DESTDIR)$(prefix)/$${file} ; \
 	    fi ; \
 	done
 
 generate_greenplum_path_file:
-	mkdir -p $(prefix)
+	mkdir -p $(DESTDIR)$(prefix)
 	unset LIBPATH; \
-	bin/generate-greenplum-path.sh $(prefix) > $(prefix)/greenplum_path.sh
+	bin/generate-greenplum-path.sh $(prefix) > $(DESTDIR)$(prefix)/greenplum_path.sh
 
 install: generate_greenplum_path_file
 	# Generate some python libraries
-	$(MAKE) -C bin all prefix=$(prefix)
+	$(MAKE) -C bin all prefix=$(DESTDIR)$(prefix)
 
 	# Copy the management utilities
-	mkdir -p $(prefix)/bin
-	mkdir -p $(prefix)/lib
-	mkdir -p $(prefix)/lib/python	
-	mkdir -p $(prefix)/sbin
+	mkdir -p $(DESTDIR)$(prefix)/bin
+	mkdir -p $(DESTDIR)$(prefix)/lib
+	mkdir -p $(DESTDIR)$(prefix)/lib/python
+	mkdir -p $(DESTDIR)$(prefix)/sbin
 
 	# Setup /lib/python contents
-	cp -rp bin/gppylib $(prefix)/lib/python
-	cp -rp bin/ext/* $(prefix)/lib/python
+	cp -rp bin/gppylib $(DESTDIR)$(prefix)/lib/python
+	cp -rp bin/ext/* $(DESTDIR)$(prefix)/lib/python
 
 	# Setup /bin contents
-	cp -rp bin $(prefix)
+	cp -rp bin $(DESTDIR)$(prefix)
 	# Symlink gpcheckcat from bin to bin/lib to maintain backward compatibility
-	if [ -f $(prefix)/bin/gpcheckcat  ]; then \
-		ln -sf ../gpcheckcat $(prefix)/bin/lib/gpcheckcat; \
+	if [ -f $(DESTDIR)$(prefix)/bin/gpcheckcat  ]; then \
+		ln -sf ../gpcheckcat $(DESTDIR)$(prefix)/bin/lib/gpcheckcat; \
 	fi
 
 #ifeq "$(findstring $(BLD_ARCH),$(GPPKG_PLATFORMS))" ""
@@ -98,15 +92,16 @@ install: generate_greenplum_path_file
 #	rm -f $(prefix)/bin/gppkg
 #endif
 
-	cp -rp sbin/* $(prefix)/sbin/.
-	#cp -p extensions/gpfdist/gpfdist$(EXE_EXT) $(prefix)/bin/
-	cp $(top_builddir)/src/test/regress/*.pl $(prefix)/bin
-	cp $(top_builddir)/src/test/regress/*.pm $(prefix)/bin
-	if [ ! -d ${prefix}/docs ] ; then mkdir ${prefix}/docs ; fi
-	if [ -d doc ]; then cp -rp doc $(prefix)/docs/cli_help; fi
-	if [ -d demo/gpmapreduce ]; then \
-	  mkdir -p $(prefix)/demo; \
-	  $(TAR) -C demo -czf $(prefix)/demo/gpmapreduce.tar.gz gpmapreduce; \
+	$(MAKE) -C sbin $@ prefix=$(DESTDIR)$(prefix)
+
+	#cp -p extensions/gpfdist/gpfdist$(EXE_EXT) $(DESTDIR)$(prefix)/bin/
+	cp $(top_builddir)/src/test/regress/*.pl $(DESTDIR)$(prefix)/bin
+	cp $(top_builddir)/src/test/regress/*.pm $(DESTDIR)$(prefix)/bin
+	if [ ! -d ${DESTDIR}${prefix}/docs ] ; then mkdir ${DESTDIR}${prefix}/docs ; fi
+	if [ -d doc ]; then cp -rp doc $(DESTDIR)$(prefix)/docs/cli_help; fi
+	@if [ -d demo/gpmapreduce ]; then \
+	  mkdir -p $(DESTDIR)$(prefix)/demo; \
+	  $(TAR) -C demo -czf $(DESTDIR)$(prefix)/demo/gpmapreduce.tar.gz gpmapreduce; \
 	fi
 
 #	THIS NEEDS TO MOVE
@@ -117,16 +112,14 @@ install: generate_greenplum_path_file
 
 	$(MAKE) set_scripts_version prefix=$(prefix)
 	# Remove unwanted files.
-	rm -rf $(prefix)/bin/CVS
-	rm -rf $(prefix)/doc/CVS
-	rm -rf $(prefix)/bin/ext
-	rm -rf $(prefix)/bin/pythonSrc
-	rm -rf $(prefix)/bin/Makefile
-	rm -rf $(prefix)/bin/lib/CVS
-	rm -rf $(prefix)/bin/lib/.p4ignore
-	rm -rf $(prefix)/bin/src
-	rm -f $(prefix)/bin/gpchecksubnetcfg
-	echo "`date` -- INFO: Removing $(prefix)/bin/gpexpandsystem"
-	rm -f $(prefix)/bin/gpexpandsystem
-	rm -rf $(prefix)/bin/gppylib
-	find $(prefix)/lib/python/gppylib -name test -type d | xargs rm -rf
+	rm -rf $(DESTDIR)$(prefix)/bin/ext
+	rm -rf $(DESTDIR)$(prefix)/bin/pythonSrc
+	rm -rf $(DESTDIR)$(prefix)/bin/Makefile
+	rm -rf $(DESTDIR)$(prefix)/bin/src
+	rm -f $(DESTDIR)$(prefix)/bin/gpchecksubnetcfg
+	rm -rf $(DESTDIR)$(prefix)/bin/gppylib
+	find $(DESTDIR)$(prefix)/lib/python/gppylib -name test -type d | xargs rm -rf
+
+clean:
+	@$(MAKE) -C bin $@
+	@$(MAKE) -C sbin $@

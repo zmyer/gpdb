@@ -22,10 +22,8 @@
 #include "nodes/primnodes.h"
 
 #include "gpopt/translate/CMappingVarColId.h"
-#include "gpopt/translate/CMappingParamIdScalarId.h"
 #include "gpopt/translate/CCTEListEntry.h"
 
-#include "naucrates/dxl/operators/CDXLScalarBoolExpr.h"
 #include "naucrates/dxl/CIdGenerator.h"
 
 #include "naucrates/base/IDatum.h"
@@ -49,7 +47,6 @@ struct OpExpr;
 struct Param;
 struct RelabelType;
 struct ScalarArrayOpExpr;
-struct PlannedStmt;
 
 namespace gpdxl
 {
@@ -98,13 +95,6 @@ namespace gpdxl
 
 			// is scalar being translated in query mode
 			BOOL m_fQuery;
-
-			// planned statement containing scalar expression being translated
-			// need this to access initplans
-			PlannedStmt *m_pplstmt;
-
-			// mapping from param id -> scalar id for params in subplans
-			CMappingParamIdScalarId *m_pparammapping;
 
 			// physical operator that created this translator
 			EPlStmtPhysicalOpType m_eplsphoptype;
@@ -253,12 +243,26 @@ namespace gpdxl
 				const CMappingVarColId* pmapvarcolid
 				);
 
-                       // create a DXL scalar coerce node from a GPDB expression
-                        CDXLNode *PdxlnScCoerceFromCoerce
-                                (
-                                const Expr *pexpr,
-                                const CMappingVarColId* pmapvarcolid
-                                );
+			// create a DXL scalar coerce node from a GPDB expression
+			CDXLNode *PdxlnScCoerceFromCoerce
+				(
+				const Expr *pexpr,
+				const CMappingVarColId* pmapvarcolid
+				);
+
+			// create a DXL scalar coerceviaio node from a GPDB expression
+			CDXLNode *PdxlnScCoerceFromCoerceViaIO
+				(
+				const Expr *pexpr,
+				const CMappingVarColId* pmapvarcolid
+				);
+		
+			// create a DXL scalar array coerce expression node from a GPDB expression
+			CDXLNode *PdxlnScArrayCoerceExprFromExpr
+				(
+				const Expr *pexpr,
+				const CMappingVarColId* pmapvarcolid
+				);
 
 			// create a DXL scalar funcexpr node from a GPDB expression
 			CDXLNode *PdxlnScFuncExprFromFuncExpr
@@ -289,9 +293,6 @@ namespace gpdxl
 				const Expr *pexpr,
 				const CMappingVarColId* pmapvarcolid
 				);
-
-			// Create a DXL colid from a GPDB param
-			CDXLNode *PdxlnScIdFromParam(const Param * pparam) const;
 
 			CDXLNode *PdxlnInitPlanFromParam(const Param *pparam) const;
 
@@ -371,8 +372,6 @@ namespace gpdxl
 				CIdGenerator *pulidgtorCTE,
 				ULONG ulQueryLevel,
 				BOOL fQuery,
-				PlannedStmt *pplstmt,
-				CMappingParamIdScalarId *pmapps,
 				HMUlCTEListEntry *phmulCTEEntries,
 				DrgPdxln *pdrgpdxlnCTE
 				);

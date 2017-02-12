@@ -21,7 +21,7 @@
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/executor/nodeSetOp.c,v 1.24 2007/01/10 18:06:02 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/executor/nodeSetOp.c,v 1.25 2008/01/01 19:45:49 momjian Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -167,7 +167,7 @@ ExecSetOp(SetOpState *node)
 						0 : (node->numLeft - node->numRight);
 					break;
 				default:
-					insist_log(false, "unrecognized set op: %d",
+					elog(ERROR, "unrecognized set op: %d",
 						 (int) plannode->cmd);
 					break;
 			}

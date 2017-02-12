@@ -21,10 +21,6 @@
  *	  This file contains the appendonly_ routines which implement
  *	  the access methods used for all append-only relations.
  *
- *            $Id: $
- *        $Change: $
- *      $DateTime: $
- *        $Author: $
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
@@ -56,6 +52,7 @@
 #include "access/aosegfiles.h"
 #include "catalog/catalog.h"
 #include "catalog/pg_appendonly.h"
+#include "catalog/pg_appendonly_fn.h"
 #include "catalog/pg_attribute_encoding.h"
 #include "catalog/namespace.h"
 #include "catalog/gp_fastsequence.h"
@@ -64,6 +61,7 @@
 #include "pgstat.h"
 #include "storage/procarray.h"
 #include "storage/gp_compress.h"
+#include "utils/datum.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -100,11 +98,6 @@ typedef struct AppendOnlyDeleteDescData
 	 * Snapshot to use for meta data operations
 	 */
 	Snapshot		appendOnlyMetaDataSnapshot;
-
-	/*
-	 * pg_appendonly entry for the append-only relation
-	 */
-	AppendOnlyEntry *aoEntry;
 
 	/*
 	 * visibility map
@@ -209,6 +202,7 @@ SetNextFileSegForRead(AppendOnlyScanDesc scan)
 	Relation		reln = scan->aos_rd;
 	int				segno = -1;
 	int64			eof = 0;
+	int				formatversion = -1;
 	bool			finished_all_files = true; /* assume */
 	int32			fileSegNo;
 
@@ -236,7 +230,7 @@ SetNextFileSegForRead(AppendOnlyScanDesc scan)
 
 		/* Get the relation specific compression functions */
 
-		fns = get_funcs_for_compression(scan->aoEntry->compresstype);
+		fns = get_funcs_for_compression(NameStr(reln->rd_appendonly->compresstype));
 		scan->storageRead.compression_functions = fns;
 
 		if (scan->storageRead.compression_functions != NULL)
@@ -284,6 +278,7 @@ SetNextFileSegForRead(AppendOnlyScanDesc scan)
 		/* still have more segment files to read. get info of the next one */
 		FileSegInfo *fsinfo = scan->aos_segfile_arr[scan->aos_segfiles_processed];
 		segno = fsinfo->segno;
+		formatversion = fsinfo->formatversion;
 		eof = (int64)fsinfo->eof;
 
 		scan->aos_segfiles_processed++;
@@ -311,13 +306,12 @@ SetNextFileSegForRead(AppendOnlyScanDesc scan)
 				 * update the sequence value.
 				 */
 				int64 firstSequence =
-					GetFastSequences(scan->aoEntry->segrelid,
+					GetFastSequences(reln->rd_appendonly->segrelid,
 									 segno,
 									 fsinfo->total_tupcount + 1,
 									 NUM_FAST_SEQUENCES);
 
 				AppendOnlyBlockDirectory_Init_forInsert(scan->blockDirectory,
-														scan->aoEntry,
 														scan->appendOnlyMetaDataSnapshot,
 														fsinfo,
 														0, /* lastSequence */
@@ -326,7 +320,7 @@ SetNextFileSegForRead(AppendOnlyScanDesc scan)
 														1, /* columnGroupNo */
 														false);
 
-				InsertFastSequenceEntry(scan->aoEntry->segrelid,
+				InsertFastSequenceEntry(reln->rd_appendonly->segrelid,
 										segno,
 										firstSequence);
 			}
@@ -353,6 +347,7 @@ SetNextFileSegForRead(AppendOnlyScanDesc scan)
 	AppendOnlyStorageRead_OpenFile(
 						&scan->storageRead,
 						scan->aos_filenamepath,
+						formatversion,
 						eof);
 
 	AppendOnlyExecutionReadBlock_SetSegmentFileNum(
@@ -444,7 +439,7 @@ errdetail_appendonly_insert_block_header(AppendOnlyInsertDesc aoInsertDesc)
 
 	usingChecksum = aoInsertDesc->usingChecksum;
 
-	return errdetail_appendonly_storage_content_header(header, usingChecksum, aoInsertDesc->storageAttributes.version);
+	return errdetail_appendonly_storage_content_header(header, usingChecksum, aoInsertDesc->storageWrite.formatVersion);
 }
 
 /*
@@ -488,7 +483,6 @@ SetCurrentFileSegForWrite(AppendOnlyInsertDesc aoInsertDesc)
 	/* Now, get the information for the file segment we are going to append to. */
 	aoInsertDesc->fsInfo = GetFileSegInfo(
 										  aoInsertDesc->aoi_rel,
-										  aoInsertDesc->aoEntry,
 										  aoInsertDesc->appendOnlyMetaDataSnapshot,
 										  aoInsertDesc->cur_segno);
 
@@ -504,10 +498,12 @@ SetCurrentFileSegForWrite(AppendOnlyInsertDesc aoInsertDesc)
 		 */
 		if (gp_appendonly_verify_eof &&
 			aoInsertDesc->cur_segno > 0 &&
-			ReadGpRelationNode(aoInsertDesc->aoi_rel->rd_node.relNode,
-							   aoInsertDesc->cur_segno,
-							   &persistentTid,
-							   &persistentSerialNum))
+			ReadGpRelationNode(
+				aoInsertDesc->aoi_rel->rd_rel->reltablespace,
+				aoInsertDesc->aoi_rel->rd_rel->relfilenode,
+				aoInsertDesc->cur_segno,
+				&persistentTid,
+				&persistentSerialNum))
 		{
 			elog(ERROR, "Found gp_relation_node entry for relation name %s, "
 			"relation Oid %u, relfilenode %u, segment file #%d "
@@ -520,7 +516,7 @@ SetCurrentFileSegForWrite(AppendOnlyInsertDesc aoInsertDesc)
 			persistentSerialNum);
 		}
 
-		InsertInitialSegnoEntry(aoInsertDesc->aoEntry, aoInsertDesc->cur_segno);
+		InsertInitialSegnoEntry(aoInsertDesc->aoi_rel, aoInsertDesc->cur_segno);
 		aoInsertDesc->fsInfo = NewFileSegInfo(aoInsertDesc->cur_segno);
 	}
 
@@ -553,49 +549,49 @@ SetCurrentFileSegForWrite(AppendOnlyInsertDesc aoInsertDesc)
 	else
 	{
 		if (!ReadGpRelationNode(
-					aoInsertDesc->aoi_rel->rd_node.relNode,
-					aoInsertDesc->cur_segno,
-					&persistentTid,
-					&persistentSerialNum))
+				aoInsertDesc->aoi_rel->rd_rel->reltablespace,
+				aoInsertDesc->aoi_rel->rd_rel->relfilenode,
+				aoInsertDesc->cur_segno,
+				&persistentTid,
+				&persistentSerialNum))
 		{
 			elog(ERROR, "Did not find gp_relation_node entry for relation name"
-						" %s, relation id %u, relfilenode %u, segment file #%d,"
+						" %s, relation id %u, tablespace %u, relfilenode %u, segment file #%d,"
 						" logical eof " INT64_FORMAT,
-						aoInsertDesc->aoi_rel->rd_rel->relname.data,
-						aoInsertDesc->aoi_rel->rd_id,
-						aoInsertDesc->aoi_rel->rd_node.relNode,
-						aoInsertDesc->cur_segno,
-						eof);
+				 aoInsertDesc->aoi_rel->rd_rel->relname.data,
+				 aoInsertDesc->aoi_rel->rd_id,
+				 aoInsertDesc->aoi_rel->rd_rel->reltablespace,
+				 aoInsertDesc->aoi_rel->rd_rel->relfilenode,
+				 aoInsertDesc->cur_segno,
+				 eof);
 		}
+	}
 
-
-		if (gp_appendonly_verify_eof)
+	if (gp_appendonly_verify_eof)
+	{
+		/* Get EOF from gp_persistent_relation_node */
+		appendOnlyNewEof = PersistentFileSysObj_ReadEof(
+					PersistentFsObjType_RelationFile,
+					&persistentTid);
+		/*
+		 * Verify if EOF from gp_persistent_relation_node < EOF from pg_aoseg
+		 *
+		 * Note:- EOF from gp_persistent_relation_node has to be less than the
+		 * EOF from pg_aoseg because inside a transaction the actual EOF where
+		 * the data is inserted has to be greater than or equal to Persistent
+		 * Table (PT) stored EOF as persistent table EOF value is updated at the
+		 * end of the transaction.
+		 */
+		if (eof < appendOnlyNewEof)
 		{
-			/* Get EOF from gp_persistent_relation_node */
-			appendOnlyNewEof = PersistentFileSysObj_ReadEof(
-											    PersistentFsObjType_RelationFile,
-											    &persistentTid);
-
-			/*
-			 * Verify if EOF from gp_persistent_relation_node < EOF from pg_aoseg
-			 *
-			 * Note:- EOF from gp_persistent_relation_node has to be less than the
-			 * EOF from pg_aoseg because inside a transaction the actual EOF where
-			 * the data is inserted has to be greater than or equal to Persistent
-			 * Table (PT) stored EOF as persistent table EOF value is updated at the
-			 * end of the transaction.
-			 */
-		    if (eof < appendOnlyNewEof)
-		    {
-				elog(ERROR, "Unexpected EOF for relation name %s, relfilenode %u, "
-							"segment file %d. EOF from gp_persistent_relation_node "
-							INT64_FORMAT " greater than current EOF " INT64_FORMAT,
-							aoInsertDesc->aoi_rel->rd_rel->relname.data,
-							aoInsertDesc->aoi_rel->rd_node.relNode,
-							aoInsertDesc->cur_segno,
-							appendOnlyNewEof,
-							eof);
-			}
+			elog(ERROR, "Unexpected EOF for relation name %s, relfilenode %u, "
+				 "segment file %d. EOF from gp_persistent_relation_node "
+				 INT64_FORMAT " greater than current EOF " INT64_FORMAT,
+				 aoInsertDesc->aoi_rel->rd_rel->relname.data,
+				 aoInsertDesc->aoi_rel->rd_node.relNode,
+				 aoInsertDesc->cur_segno,
+				 appendOnlyNewEof,
+				 eof);
 		}
 	}
 
@@ -605,6 +601,7 @@ SetCurrentFileSegForWrite(AppendOnlyInsertDesc aoInsertDesc)
 	AppendOnlyStorageWrite_OpenFile(
 							&aoInsertDesc->storageWrite,
 							aoInsertDesc->appendFilePathName,
+							aoInsertDesc->fsInfo->formatversion,
 							eof,
 							eof_uncompressed,
 							&aoInsertDesc->aoi_rel->rd_node,
@@ -652,7 +649,6 @@ CloseWritableFileSeg(AppendOnlyInsertDesc aoInsertDesc)
 	 * Update the AO segment info table with our new eof
 	 */
 	UpdateFileSegInfo(aoInsertDesc->aoi_rel,
-					  aoInsertDesc->aoEntry,
 					  aoInsertDesc->cur_segno,
 					  fileLen,
 					  fileLen_uncompressed,
@@ -944,14 +940,9 @@ AppendOnlyExecutorReadBlock_Init(
 	oldcontext = MemoryContextSwitchTo(memoryContext);
 	executorReadBlock->uncompressedBuffer = (uint8 *) palloc(usableBlockSize * sizeof(uint8));
 
-	executorReadBlock->mt_bind = create_memtuple_binding(RelationGetDescr(relation));
-
-	ItemPointerSet(&executorReadBlock->cdb_fake_ctid, 0, 0);
-
 	executorReadBlock->storageRead = storageRead;
 
 	MemoryContextSwitchTo(oldcontext);
-
 }
 
 /*
@@ -967,10 +958,10 @@ AppendOnlyExecutorReadBlock_Finish(
 		executorReadBlock->uncompressedBuffer = NULL;
 	}
 
-	if (executorReadBlock->mt_bind)
+	if (executorReadBlock->numericAtts)
 	{
-		destroy_memtuple_binding(executorReadBlock->mt_bind);
-		executorReadBlock->mt_bind = NULL;
+		pfree(executorReadBlock->numericAtts);
+		executorReadBlock->numericAtts = NULL;
 	}
 }
 
@@ -979,6 +970,140 @@ AppendOnlyExecutorReadBlock_ResetCounts(
 	AppendOnlyExecutorReadBlock		*executorReadBlock)
 {
 	executorReadBlock->totalRowsScannned = 0;
+}
+
+/*
+ * Given a tuple in 'formatversion', convert it to a format that is
+ * understood by the rest of the system.
+ */
+static MemTuple
+upgrade_tuple(AppendOnlyExecutorReadBlock *executorReadBlock,
+			  MemTuple mtup, MemTupleBinding *pbind, int formatversion, bool *shouldFree)
+{
+	TupleDesc	tupdesc = pbind->tupdesc;
+	const int	natts = tupdesc->natts;
+	MemTuple	newtuple;
+	int			i;
+
+	static Datum *values = NULL;
+	static bool *isnull = NULL;
+	static int nallocated = 0;
+
+	bool		convert_alignment = false;
+	bool		convert_numerics = false;
+
+	/*
+	 * MPP-7372: If the AO table was created before the fix for this issue, it may
+	 * contain tuples with misaligned bindings. Here we check if the stored memtuple
+	 * is problematic and then create a clone of the tuple with properly aligned
+	 * bindings to be used by the executor.
+	 */
+	if (formatversion < AORelationVersion_Aligned64bit &&
+		memtuple_has_misaligned_attribute(mtup, pbind))
+		convert_alignment = true;
+
+	if (PG82NumericConversionNeeded(formatversion))
+	{
+		/*
+		 * On first call, figure out which columns are numerics, or domains
+		 * over numerics.
+		 */
+		if (executorReadBlock->numericAtts == NULL)
+		{
+			int			n;
+
+			executorReadBlock->numericAtts = (int *) palloc(natts * sizeof(int));
+
+			n = 0;
+			for (i = 0; i < natts; i++)
+			{
+				Oid			typeoid;
+
+				typeoid = getBaseType(tupdesc->attrs[i]->atttypid);
+				if (typeoid == NUMERICOID)
+					executorReadBlock->numericAtts[n++] = i;
+			}
+			executorReadBlock->numNumericAtts = n;
+		}
+
+		/* If there were any numeric columns, we need to conver them. */
+		if (executorReadBlock->numNumericAtts > 0)
+			convert_numerics = true;
+	}
+
+	if (!convert_alignment && !convert_numerics)
+	{
+		/* No conversion required. Return the original tuple unmodified. */
+		*shouldFree = false;
+		return mtup;
+	}
+
+	/* Conversion is needed. */
+
+	/* enlarge the arrays if needed */
+	if (natts > nallocated)
+	{
+		if (values)
+			pfree(values);
+		if (isnull)
+			pfree(values);
+		values = (Datum *) MemoryContextAlloc(TopMemoryContext, natts * sizeof(Datum));
+		isnull = (bool *) MemoryContextAlloc(TopMemoryContext, natts * sizeof(bool));
+		nallocated = natts;
+	}
+
+	if (convert_alignment)
+	{
+		/* get attribute values form mis-aligned tuple */
+		memtuple_deform_misaligned(mtup, pbind, values, isnull);
+		/* Form a new, properly-aligned, tuple */
+		newtuple = memtuple_form_to(pbind, values, isnull, NULL, NULL, true);
+	}
+	else
+	{
+		/*
+		 * make a modifiable copy
+		 */
+		newtuple = memtuple_copy_to(mtup, pbind, NULL, NULL);
+	}
+
+	/*
+	 * NOTE: we do this *after* creating the new tuple, so that we can
+	 * modify the new, copied, tuple in-place.
+	 */
+	if (convert_numerics)
+	{
+		int			i;
+
+		/*
+		 * Get pointers to the datums within the tuple
+		 */
+		memtuple_deform(newtuple, pbind, values, isnull);
+
+		for (i = 0; i < executorReadBlock->numNumericAtts; i++)
+		{
+			/*
+			 * Before PostgreSQL 8.3, the n_weight and n_sign_dscale fields
+			 * were the other way 'round. Swap them.
+			 */
+			Datum		datum;
+			char	   *numericdata;
+			uint16		tmp;
+
+			if (isnull[executorReadBlock->numericAtts[i]])
+				continue;
+
+			datum = values[executorReadBlock->numericAtts[i]];
+			numericdata = VARDATA_ANY(DatumGetPointer(datum));
+
+			memcpy(&tmp, &numericdata[0], 2);
+			memcpy(&numericdata[0], &numericdata[2], 2);
+			memcpy(&numericdata[2], &tmp, 2);
+		}
+	}
+
+	*shouldFree = true;
+	return newtuple;
 }
 
 static bool
@@ -992,38 +1117,25 @@ AppendOnlyExecutorReadBlock_ProcessTuple(
 	TupleTableSlot 					*slot)
 {
 	bool	valid = true;	// Assume for HeapKeyTestUsingSlot define.
-	AOTupleId *aoTupleId = (AOTupleId*)&executorReadBlock->cdb_fake_ctid;
+	ItemPointerData	fake_ctid;
+	AOTupleId *aoTupleId = (AOTupleId*)&fake_ctid;
+	int			formatVersion = executorReadBlock->storageRead->formatVersion;
+
+	AORelationVersion_CheckValid(formatVersion);
 
 	AOTupleIdInit_Init(aoTupleId);
 	AOTupleIdInit_segmentFileNum(aoTupleId, executorReadBlock->segmentFileNum);
 	AOTupleIdInit_rowNum(aoTupleId, rowNum);
 
-	if(slot)
+	if (slot)
 	{
-		/*
-		 * MPP-7372: If the AO table was created before the fix for this issue, it may
-		 * contain tuples with misaligned bindings. Here we check if the stored memtuple
-		 * is problematic and then create a clone of the tuple with properly aligned
-		 * bindings to be used by the executor.
-		 */
-		if (!IsAOBlockAndMemtupleAlignmentFixed(executorReadBlock->storageRead->storageAttributes.version) &&
-			memtuple_has_misaligned_attribute(tuple, slot->tts_mt_bind))
-		{
-			/*
-			 * Create a properly aligned clone of the memtuple.
-			 * We p'alloc memory for the clone, so the slot is
-			 * responsible for releasing the allocated memory.
-			 */
-			tuple = memtuple_aligned_clone(tuple, slot->tts_mt_bind, true /* upgrade */);
-			Assert(tuple);
-			ExecStoreMinimalTuple(tuple, slot, true /* shouldFree */);
-		}
-		else
-		{
-			ExecStoreMinimalTuple(tuple, slot, false);
-		}
+		bool		shouldFree = false;
 
-		slot_set_ctid(slot, &(executorReadBlock->cdb_fake_ctid));
+		/* If the tuple is not in the latest format, convert it */
+		if (formatVersion < AORelationVersion_GetLatest())
+			tuple = upgrade_tuple(executorReadBlock, tuple, slot->tts_mt_bind, formatVersion, &shouldFree);
+		ExecStoreMinimalTuple(tuple, slot, shouldFree);
+		slot_set_ctid(slot, &fake_ctid);
 	}
 
 
@@ -1038,7 +1150,7 @@ AppendOnlyExecutorReadBlock_ProcessTuple(
 		     AppendOnlyStorageRead_RelationName(executorReadBlock->storageRead),
 		     AOTupleIdToString(aoTupleId),
 		     tupleLen,
-		     memtuple_get_size(tuple, executorReadBlock->mt_bind),
+		     memtuple_get_size(tuple, slot->tts_mt_bind),
 		     executorReadBlock->headerOffsetInFile);
 
 	return valid;
@@ -1288,7 +1400,7 @@ getNextBlock(
 }
 
 /* ----------------
- *		appendonlygettup - fetch next heap tuple
+ *		appendonlygettup - fetch next appendonly tuple
  *
  *		Initialize the scan if not already done; then advance to the next
  *		tuple in forward direction; return the next tuple in scan->aos_ctup,
@@ -1549,7 +1661,6 @@ static AppendOnlyScanDesc
 appendonly_beginrangescan_internal(Relation relation,
 						Snapshot snapshot,
 						Snapshot appendOnlyMetaDataSnapshot,
-						AppendOnlyEntry *aoentry,
 						FileSegInfo **seginfo,
 						int segfile_count,
 						int nkeys,
@@ -1577,16 +1688,13 @@ appendonly_beginrangescan_internal(Relation relation,
 	 */
 	scan = (AppendOnlyScanDesc) palloc0(sizeof(AppendOnlyScanDescData));
 
-	scan->aoEntry = aoentry;
-	Assert(aoentry->majorversion == 1 && aoentry->minorversion == 1);
-
 	/*
 	 * initialize the scan descriptor
 	 */
 	scan->aos_filenamepath_maxlen = AOSegmentFilePathNameLen(relation) + 1;
 	scan->aos_filenamepath = (char*)palloc(scan->aos_filenamepath_maxlen);
 	scan->aos_filenamepath[0] = '\0';
-	scan->usableBlockSize = AppendOnlyStorage_GetUsableBlockSize(aoentry->blocksize);
+	scan->usableBlockSize = AppendOnlyStorage_GetUsableBlockSize(relation->rd_appendonly->blocksize);
 	scan->aos_rd = relation;
 	scan->appendOnlyMetaDataSnapshot = appendOnlyMetaDataSnapshot;
 	scan->snapshot = snapshot;
@@ -1607,20 +1715,20 @@ appendonly_beginrangescan_internal(Relation relation,
 	/*
 	 * These attributes describe the AppendOnly format to be scanned.
 	 */
-	if (aoentry->compresstype == NULL || pg_strcasecmp(aoentry->compresstype, "none") == 0)
+	if (strcmp(NameStr(relation->rd_appendonly->compresstype), "") == 0 ||
+		pg_strcasecmp(NameStr(relation->rd_appendonly->compresstype), "none") == 0)
+	{
 		attr->compress = false;
-	else
-		attr->compress = true;
-	if (aoentry->compresstype != NULL)
-		attr->compressType = aoentry->compresstype;
-	else
 		attr->compressType = "none";
-	attr->compressLevel     = aoentry->compresslevel;
-	attr->checksum			= aoentry->checksum;
-	attr->safeFSWriteSize	= aoentry->safefswritesize;
-	attr->version			= aoentry->version;
-
-	AORelationVersion_CheckValid(attr->version);
+	}
+	else
+	{
+		attr->compress = true;
+		attr->compressType = pstrdup(NameStr(relation->rd_appendonly->compresstype));
+	}
+	attr->compressLevel     = relation->rd_appendonly->compresslevel;
+	attr->checksum			= relation->rd_appendonly->checksum;
+	attr->safeFSWriteSize	= relation->rd_appendonly->safefswritesize;
 
 	/*
 	 * Adding a NOTOAST table attribute in 3.3.3 would require a catalog change,
@@ -1628,7 +1736,7 @@ appendonly_beginrangescan_internal(Relation relation,
 	 *
 	 * This GUC must have the same value on write and read.
 	 */
-//	scan->aos_notoast = aoentry->notoast;
+//	scan->aos_notoast = relation->rd_appendonly->notoast;
 	scan->aos_notoast = Debug_appendonly_use_no_toast;
 
 
@@ -1660,8 +1768,8 @@ appendonly_beginrangescan_internal(Relation relation,
 	scan->blockDirectory = NULL;
 
 	AppendOnlyVisimap_Init(&scan->visibilityMap,
-			aoentry->visimaprelid,
-			aoentry->visimapidxid,
+			relation->rd_appendonly->visimaprelid,
+			relation->rd_appendonly->visimapidxid,
 			AccessShareLock,
 			appendOnlyMetaDataSnapshot);
 
@@ -1683,19 +1791,16 @@ appendonly_beginrangescan(Relation relation,
 	/*
 	 * Get the pg_appendonly information for this table
 	 */
-	AppendOnlyEntry *aoentry = GetAppendOnlyEntry(RelationGetRelid(relation),
-		appendOnlyMetaDataSnapshot);
 
 	FileSegInfo **seginfo = palloc0(sizeof(FileSegInfo *) * segfile_count);
 	for (int i = 0; i < segfile_count; i++)
 	{
-		seginfo[i] = GetFileSegInfo(relation, aoentry, appendOnlyMetaDataSnapshot,
+		seginfo[i] = GetFileSegInfo(relation, appendOnlyMetaDataSnapshot,
 				segfile_no_arr[i]);
 	}
 	return appendonly_beginrangescan_internal(relation,
 		snapshot,
 		appendOnlyMetaDataSnapshot,
-		aoentry,
 		seginfo,
 		segfile_count,
 		nkeys,
@@ -1715,17 +1820,13 @@ appendonly_beginscan(Relation relation,
 	/*
 	 * Get the pg_appendonly information for this table
 	 */
-	AppendOnlyEntry *aoentry = GetAppendOnlyEntry(RelationGetRelid(relation),
-		appendOnlyMetaDataSnapshot);
-
 	int segfile_count;
-	FileSegInfo **seginfo = GetAllFileSegInfo(relation, aoentry,
+	FileSegInfo **seginfo = GetAllFileSegInfo(relation,
 		appendOnlyMetaDataSnapshot, &segfile_count);
 
 	return appendonly_beginrangescan_internal(relation,
 		snapshot,
 		appendOnlyMetaDataSnapshot,
-		aoentry,
 		seginfo,
 		segfile_count,
 		nkeys,
@@ -1795,8 +1896,6 @@ appendonly_endscan(AppendOnlyScanDesc scan)
 
 	AppendOnlyVisimap_Finish(&scan->visibilityMap, AccessShareLock);
 	pfree(scan->aos_filenamepath);
-
-	pfree(scan->aoEntry);
 
 	pfree(scan->title);
 
@@ -1892,6 +1991,7 @@ openFetchSegmentFile(
 	if (!AppendOnlyStorageRead_TryOpenFile(
 						&aoFetchDesc->storageRead,
 						aoFetchDesc->segmentFileName,
+						fsInfo->formatversion,
 						logicalEof))
 		return false;
 
@@ -2109,7 +2209,6 @@ appendonly_fetch_init(
 	Snapshot 	appendOnlyMetaDataSnapshot)
 {
 	AppendOnlyFetchDesc	aoFetchDesc;
-	AppendOnlyEntry		*aoentry;
 
 	AppendOnlyStorageAttributes *attr;
 
@@ -2149,13 +2248,6 @@ appendonly_fetch_init(
 	aoFetchDesc->title = titleBuf.data;
 
 	/*
-	 * Get the pg_appendonly information for this table
-	 */
-	aoentry = GetAppendOnlyEntry(RelationGetRelid(relation), appendOnlyMetaDataSnapshot);
-
-	aoFetchDesc->aoEntry = aoentry;
-
-	/*
 	 * Fill in Append-Only Storage layer attributes.
 	 */
 	attr = &aoFetchDesc->storageAttributes;
@@ -2163,23 +2255,23 @@ appendonly_fetch_init(
 	/*
 	 * These attributes describe the AppendOnly format to be scanned.
 	 */
-  if (aoentry->compresstype == NULL || pg_strcasecmp(aoentry->compresstype, "none") == 0)
+	if (strcmp(NameStr(relation->rd_appendonly->compresstype), "") == 0 ||
+		pg_strcasecmp(NameStr(relation->rd_appendonly->compresstype), "none") == 0)
+	{
 		attr->compress = false;
-	else
-		attr->compress = true;
-	if (aoentry->compresstype != NULL)
-		attr->compressType = aoentry->compresstype;
-	else
 		attr->compressType = "none";
-	attr->compressLevel = aoentry->compresslevel;
-	attr->checksum			= aoentry->checksum;
-	attr->safeFSWriteSize	= aoentry->safefswritesize;
-	attr->version			= aoentry->version;
-
-	AORelationVersion_CheckValid(attr->version);
+	}
+	else
+	{
+		attr->compress = true;
+		attr->compressType = NameStr(relation->rd_appendonly->compresstype);
+	}
+	attr->compressLevel = relation->rd_appendonly->compresslevel;
+	attr->checksum			= relation->rd_appendonly->checksum;
+	attr->safeFSWriteSize	= relation->rd_appendonly->safefswritesize;
 
 	aoFetchDesc->usableBlockSize =
-				AppendOnlyStorage_GetUsableBlockSize(aoentry->blocksize);
+				AppendOnlyStorage_GetUsableBlockSize(relation->rd_appendonly->blocksize);
 
 	/*
 	 * Get information about all the file segments we need to scan
@@ -2187,7 +2279,6 @@ appendonly_fetch_init(
 	aoFetchDesc->segmentFileInfo =
 						GetAllFileSegInfo(
 									relation,
-									aoentry,
 									appendOnlyMetaDataSnapshot,
 									&aoFetchDesc->totalSegfiles);
 
@@ -2200,7 +2291,7 @@ appendonly_fetch_init(
 						&aoFetchDesc->storageAttributes);
 
 
-	fns = get_funcs_for_compression(aoentry->compresstype);
+	fns = get_funcs_for_compression(NameStr(relation->rd_appendonly->compresstype));
 	aoFetchDesc->storageRead.compression_functions = fns;
 
 	if (fns)
@@ -2209,9 +2300,9 @@ appendonly_fetch_init(
 		CompressionState *cs;
 		StorageAttributes sa;
 
-		sa.comptype = aoentry->compresstype;
-		sa.complevel = aoentry->compresslevel;
-		sa.blocksize = aoentry->blocksize;
+		sa.comptype = NameStr(relation->rd_appendonly->compresstype);
+		sa.complevel = relation->rd_appendonly->compresslevel;
+		sa.blocksize = relation->rd_appendonly->blocksize;
 
 
 		cs = callCompressionConstructor(cons, RelationGetDescr(relation),
@@ -2229,7 +2320,6 @@ appendonly_fetch_init(
 
 	AppendOnlyBlockDirectory_Init_forSearch(
 						&aoFetchDesc->blockDirectory,
-						aoentry,
 						appendOnlyMetaDataSnapshot,
 						aoFetchDesc->segmentFileInfo,
 						aoFetchDesc->totalSegfiles,
@@ -2239,8 +2329,8 @@ appendonly_fetch_init(
 						NULL);
 
 	AppendOnlyVisimap_Init(&aoFetchDesc->visibilityMap,
-						aoentry->visimaprelid,
-						aoentry->visimapidxid,
+						relation->rd_appendonly->visimaprelid,
+						relation->rd_appendonly->visimapidxid,
 						AccessShareLock,
 						appendOnlyMetaDataSnapshot);
 
@@ -2435,30 +2525,6 @@ appendonly_fetch(
 }
 
 void
-appendonly_fetch_detail(
-	AppendOnlyFetchDesc 		aoFetchDesc,
-	AppendOnlyFetchDetail 		*aoFetchDetail)
-{
-	aoFetchDetail->rangeFileOffset =
-			aoFetchDesc->currentBlock.blockDirectoryEntry.range.fileOffset;
-	aoFetchDetail->rangeFirstRowNum =
-			aoFetchDesc->currentBlock.blockDirectoryEntry.range.firstRowNum;
-	aoFetchDetail->rangeAfterFileOffset =
-			aoFetchDesc->currentBlock.blockDirectoryEntry.range.afterFileOffset;
-	aoFetchDetail->rangeLastRowNum =
-			aoFetchDesc->currentBlock.blockDirectoryEntry.range.lastRowNum;
-
-	aoFetchDetail->skipBlockCount = aoFetchDesc->skipBlockCount;
-
-	aoFetchDetail->blockFileOffset = aoFetchDesc->currentBlock.fileOffset;
-	aoFetchDetail->blockOverallLen = aoFetchDesc->currentBlock.overallBlockLen;
-	aoFetchDetail->blockFirstRowNum = aoFetchDesc->currentBlock.firstRowNum;
-	aoFetchDetail->blockLastRowNum = aoFetchDesc->currentBlock.lastRowNum;
-	aoFetchDetail->isCompressed = aoFetchDesc->currentBlock.isCompressed;
-	aoFetchDetail->isLargeContent = aoFetchDesc->currentBlock.isLargeContent;
-}
-
-void
 appendonly_fetch_finish(AppendOnlyFetchDesc aoFetchDesc)
 {
 	RelationDecrementReferenceCount(aoFetchDesc->relation);
@@ -2480,9 +2546,6 @@ appendonly_fetch_finish(AppendOnlyFetchDesc aoFetchDesc)
 
 	AppendOnlyVisimap_Finish(&aoFetchDesc->visibilityMap, AccessShareLock);
 
-	pfree(aoFetchDesc->aoEntry);
-	aoFetchDesc->aoEntry = NULL;
-
 	pfree(aoFetchDesc->segmentFileName);
 	aoFetchDesc->segmentFileName = NULL;
 
@@ -2500,23 +2563,15 @@ AppendOnlyDeleteDesc
 appendonly_delete_init(Relation rel, Snapshot appendOnlyMetaDataSnapshot)
 {
 	Assert(RelationIsAoRows(rel));
-
-	/*
-	 * Get the pg_appendonly information
-	 */
-	AppendOnlyEntry *aoentry = GetAppendOnlyEntry(RelationGetRelid(rel),
-			appendOnlyMetaDataSnapshot);
-	Assert(aoentry && aoentry->majorversion == 1 && aoentry->minorversion == 1);
 	Assert(!IsXactIsoLevelSerializable);
 
 	AppendOnlyDeleteDesc aoDeleteDesc = palloc0(sizeof(AppendOnlyDeleteDescData));
 	aoDeleteDesc->aod_rel = rel;
 	aoDeleteDesc->appendOnlyMetaDataSnapshot = appendOnlyMetaDataSnapshot;
-	aoDeleteDesc->aoEntry = aoentry;
 
 	AppendOnlyVisimap_Init(&aoDeleteDesc->visibilityMap,
-			aoentry->visimaprelid,
-			aoentry->visimapidxid,
+			rel->rd_appendonly->visimaprelid,
+			rel->rd_appendonly->visimapidxid,
 			RowExclusiveLock,
 			aoDeleteDesc->appendOnlyMetaDataSnapshot);
 
@@ -2531,11 +2586,6 @@ void appendonly_delete_finish(AppendOnlyDeleteDesc aoDeleteDesc)
 	Assert(aoDeleteDesc);
 
 	AppendOnlyVisimapDelete_Finish(&aoDeleteDesc->visiMapDelete);
-
-	if (aoDeleteDesc->aoEntry != NULL)
-	{
-		pfree(aoDeleteDesc->aoEntry);
-	}
 
 	AppendOnlyVisimap_Finish(&aoDeleteDesc->visibilityMap, NoLock);
 
@@ -2582,11 +2632,11 @@ appendonly_update_init(Relation rel, Snapshot appendOnlyMetaDataSnapshot, int se
 	 */
 	AppendOnlyUpdateDesc aoUpdateDesc  = (AppendOnlyUpdateDesc) palloc0(sizeof(AppendOnlyUpdateDescData));
 
-	aoUpdateDesc->aoInsertDesc = appendonly_insert_init(rel, appendOnlyMetaDataSnapshot, segno, true);
+	aoUpdateDesc->aoInsertDesc = appendonly_insert_init(rel, segno, true);
 
 	AppendOnlyVisimap_Init(&aoUpdateDesc->visibilityMap,
-			aoUpdateDesc->aoInsertDesc->aoEntry->visimaprelid,
-			aoUpdateDesc->aoInsertDesc->aoEntry->visimapidxid,
+			aoUpdateDesc->aoInsertDesc->aoi_rel->rd_appendonly->visimaprelid,
+			aoUpdateDesc->aoInsertDesc->aoi_rel->rd_appendonly->visimapidxid,
 			RowExclusiveLock,
 			appendOnlyMetaDataSnapshot);
 
@@ -2659,10 +2709,9 @@ HTSU_Result appendonly_update(AppendOnlyUpdateDesc aoUpdateDesc,
  * append only tables.
  */
 AppendOnlyInsertDesc
-appendonly_insert_init(Relation rel, Snapshot appendOnlyMetaDataSnapshot, int segno, bool update_mode)
+appendonly_insert_init(Relation rel, int segno, bool update_mode)
 {
 	AppendOnlyInsertDesc 	aoInsertDesc;
-	AppendOnlyEntry				*aoentry;
 	int 							maxtupsize;
 	int64 						firstSequence = 0;
 	PGFunction 				*fns;
@@ -2676,8 +2725,6 @@ appendonly_insert_init(Relation rel, Snapshot appendOnlyMetaDataSnapshot, int se
 	/*
 	 * Get the pg_appendonly information for this table
 	 */
-	aoentry = GetAppendOnlyEntry(RelationGetRelid(rel), appendOnlyMetaDataSnapshot);
-	Assert(aoentry->majorversion == 1 && aoentry->minorversion == 1);
 
 	/*
 	 * allocate and initialize the insert descriptor
@@ -2689,7 +2736,7 @@ appendonly_insert_init(Relation rel, Snapshot appendOnlyMetaDataSnapshot, int se
 	 * Writers uses this since they have exclusive access to the lock acquired with
 	 * LockRelationAppendOnlySegmentFile for the segment-file.
 	 */
-	aoInsertDesc->appendOnlyMetaDataSnapshot = appendOnlyMetaDataSnapshot;
+	aoInsertDesc->appendOnlyMetaDataSnapshot = SnapshotNow;
 
 	aoInsertDesc->mt_bind = create_memtuple_binding(RelationGetDescr(rel));
 
@@ -2706,7 +2753,6 @@ appendonly_insert_init(Relation rel, Snapshot appendOnlyMetaDataSnapshot, int se
 
 	Assert(segno >= 0);
 	aoInsertDesc->cur_segno = segno;
-	aoInsertDesc->aoEntry = aoentry;
 	aoInsertDesc->update_mode = update_mode;
 
 	/*
@@ -2718,29 +2764,29 @@ appendonly_insert_init(Relation rel, Snapshot appendOnlyMetaDataSnapshot, int se
 //	aoInsertDesc->useNoToast = aoentry->notoast;
 	aoInsertDesc->useNoToast = Debug_appendonly_use_no_toast;
 
-	aoInsertDesc->usableBlockSize = AppendOnlyStorage_GetUsableBlockSize(aoentry->blocksize);
+	aoInsertDesc->usableBlockSize = AppendOnlyStorage_GetUsableBlockSize(rel->rd_appendonly->blocksize);
 
 	attr = &aoInsertDesc->storageAttributes;
 
 	/*
 	 * These attributes describe the AppendOnly format to be scanned.
 	 */
-  if (aoentry->compresstype == NULL || pg_strcasecmp(aoentry->compresstype, "none") == 0)
+	if (strcmp(NameStr(rel->rd_appendonly->compresstype), "") == 0 ||
+		pg_strcasecmp(NameStr(rel->rd_appendonly->compresstype), "none") == 0)
+	{
 		attr->compress = false;
-	else
-		attr->compress = true;
-	if (aoentry->compresstype != NULL)
-		attr->compressType	= aoentry->compresstype;
-	else
 		attr->compressType = "none";
-	attr->compressLevel	= aoentry->compresslevel;
-	attr->checksum			= aoentry->checksum;
-	attr->safeFSWriteSize	= aoentry->safefswritesize;
-	attr->version			= aoentry->version;
+	}
+	else
+	{
+		attr->compress = true;
+		attr->compressType	= NameStr(rel->rd_appendonly->compresstype);
+	}
+	attr->compressLevel	= rel->rd_appendonly->compresslevel;
+	attr->checksum			= rel->rd_appendonly->checksum;
+	attr->safeFSWriteSize	= rel->rd_appendonly->safefswritesize;
 
-	AORelationVersion_CheckValid(attr->version);
-
-	fns = get_funcs_for_compression(aoentry->compresstype);
+	fns = get_funcs_for_compression(NameStr(rel->rd_appendonly->compresstype));
 
 	CompressionState *cs = NULL;
 	CompressionState *verifyCs = NULL;
@@ -2749,9 +2795,9 @@ appendonly_insert_init(Relation rel, Snapshot appendOnlyMetaDataSnapshot, int se
 		PGFunction cons = fns[COMPRESSION_CONSTRUCTOR];
 		StorageAttributes sa;
 
-		sa.comptype = aoentry->compresstype;
-		sa.complevel = aoentry->compresslevel;
-		sa.blocksize = aoentry->blocksize;
+		sa.comptype = NameStr(rel->rd_appendonly->compresstype);
+		sa.complevel = rel->rd_appendonly->compresslevel;
+		sa.blocksize = rel->rd_appendonly->blocksize;
 
 		cs = callCompressionConstructor(cons, RelationGetDescr(rel),
 										&sa,
@@ -2802,7 +2848,7 @@ appendonly_insert_init(Relation rel, Snapshot appendOnlyMetaDataSnapshot, int se
 			 NameStr(aoInsertDesc->aoi_rel->rd_rel->relname),
 			 aoInsertDesc->cur_segno,
 			 (attr->compress ? "true" : "false"),
-			 (aoentry->compresstype ? aoentry->compresstype : "<none>"),
+		     NameStr(rel->rd_appendonly->compresstype),
 			 attr->compressLevel);
 
 	/*
@@ -2842,7 +2888,7 @@ appendonly_insert_init(Relation rel, Snapshot appendOnlyMetaDataSnapshot, int se
 	Assert(aoInsertDesc->fsInfo->segno == segno);
 
 	firstSequence =
-		GetFastSequences(aoInsertDesc->aoEntry->segrelid,
+		GetFastSequences(aoInsertDesc->aoi_rel->rd_appendonly->segrelid,
 						 segno,
 						 aoInsertDesc->rowCount + 1,
 						 NUM_FAST_SEQUENCES);
@@ -2857,7 +2903,6 @@ appendonly_insert_init(Relation rel, Snapshot appendOnlyMetaDataSnapshot, int se
 	/* Initialize the block directory. */
 	AppendOnlyBlockDirectory_Init_forInsert(
 		&(aoInsertDesc->blockDirectory),
-		aoentry,
 		aoInsertDesc->appendOnlyMetaDataSnapshot,		// CONCERN: Safe to assume all block directory entries for segment are "covered" by same exclusive lock.
 		aoInsertDesc->fsInfo, aoInsertDesc->lastSequence,
 		rel, segno, 1, false);
@@ -2920,11 +2965,6 @@ appendonly_insert_init(Relation rel, Snapshot appendOnlyMetaDataSnapshot, int se
 		if (!OidIsValid(MemTupleGetOid(instup, aoInsertDesc->mt_bind)))
 			MemTupleSetOid(instup, aoInsertDesc->mt_bind, GetNewOid(relation));
 	}
-	else
-	{
-		/* check there is not space for an OID */
-		MemTupleNoOidSpace(instup);
-	}
 
 	if (aoInsertDesc->useNoToast)
 		need_toast = false;
@@ -2948,25 +2988,6 @@ appendonly_insert_init(Relation rel, Snapshot appendOnlyMetaDataSnapshot, int se
 												true, true);
 	else
 		tup = instup;
-
-	/*
-	 * MPP-7372: If the AO table was created before the fix for this issue, it may contain
-	 * tuples with misaligned bindings. Here we check if the memtuple to be stored is
-	 * problematic and then create a clone of the tuple with the old (misaligned) bindings
-	 * to preserve consistency.
-	 */
-	if (!IsAOBlockAndMemtupleAlignmentFixed(aoInsertDesc->storageAttributes.version) &&
-		memtuple_has_misaligned_attribute(tup, aoInsertDesc->mt_bind))
-	{
-		/* Create a clone of the memtuple using misaligned bindings. */
-		MemTuple tuple = memtuple_aligned_clone(tup, aoInsertDesc->mt_bind, false /* downgrade */);
-		Assert(tuple);
-		if(tup != instup)
-		{
-			pfree(tup);
-		}
-		tup = tuple;
-	}
 
 	/*
 	 * get space to insert our next item (tuple)
@@ -3132,7 +3153,7 @@ appendonly_insert_init(Relation rel, Snapshot appendOnlyMetaDataSnapshot, int se
 		int64 firstSequence;
 
 		firstSequence =
-			GetFastSequences(aoInsertDesc->aoEntry->segrelid,
+			GetFastSequences(aoInsertDesc->aoi_rel->rd_appendonly->segrelid,
 							 aoInsertDesc->cur_segno,
 							 aoInsertDesc->lastSequence + 1,
 							 NUM_FAST_SEQUENCES);
@@ -3174,7 +3195,6 @@ appendonly_insert_finish(AppendOnlyInsertDesc aoInsertDesc)
 
 	AppendOnlyStorageWrite_FinishSession(&aoInsertDesc->storageWrite);
 
-	pfree(aoInsertDesc->aoEntry);
 	pfree(aoInsertDesc->title);
 	pfree(aoInsertDesc);
 }

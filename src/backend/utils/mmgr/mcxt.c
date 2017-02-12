@@ -15,7 +15,7 @@
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/utils/mmgr/mcxt.c,v 1.59 2007/01/05 22:19:47 momjian Exp $
+ *	  $PostgreSQL: pgsql/src/backend/utils/mmgr/mcxt.c,v 1.63 2008/01/01 19:45:55 momjian Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -74,8 +74,7 @@ MemoryContext TopTransactionContext = NULL;
 MemoryContext CurTransactionContext = NULL;
 MemoryContext MemoryAccountMemoryContext = NULL;
 
-/* These two are transient links to contexts owned by other objects: */
-MemoryContext QueryContext = NULL;
+/* This is a transient link to the active portal's memory context: */
 MemoryContext PortalContext = NULL;
 
 
@@ -443,7 +442,7 @@ MemoryContextError(int errorcode, MemoryContext context,
 		 *
 		 * XXX What is the right way of doing this?
 		 */
-		*(int *) NULL = errorcode;
+		((void(*)()) NULL)();
 	}
 
 	if(errorcode != ERRCODE_OUT_OF_MEMORY && errorcode != ERRCODE_INTERNAL_ERROR)
@@ -606,7 +605,7 @@ static void
 MemoryContext_LogContextStats(uint64 siblingCount, uint64 allAllocated,
 		uint64 allFreed, uint64 curAvailable, const char *contextName)
 {
-	write_stderr("context: %" PRIu64 ", %" PRIu64 ", %" PRIu64 ", %" PRIu64 ", %" PRIu64 ", %s\n", \
+	write_stderr("context: " UINT64_FORMAT ", " UINT64_FORMAT ", " UINT64_FORMAT ", " UINT64_FORMAT ", " UINT64_FORMAT ", %s\n", \
 	siblingCount, (allAllocated - allFreed), curAvailable, \
 	allAllocated, allFreed, contextName);
 }
@@ -804,7 +803,6 @@ MemoryContextStats(MemoryContext context)
     MemoryContextStats_recur(context, context, name, namebuf, namebufsize, nBlocks, nChunks,
     		currentAvailable, allAllocated, allFreed, maxHeld);
 }
-
 
 /*
  * MemoryContextCheck
@@ -1324,8 +1322,8 @@ pnstrdup(const char *in, Size len)
 /*
  *	Memory support routines for libpgport on Win32
  *
- *	Win32 can't load a library that DLLIMPORTs a variable
- *	if the link object files also DLLIMPORT the same variable.
+ *	Win32 can't load a library that PGDLLIMPORTs a variable
+ *	if the link object files also PGDLLIMPORT the same variable.
  *	For this reason, libpgport can't reference CurrentMemoryContext
  *	in the palloc macro calls.
  *
@@ -1346,7 +1344,7 @@ pgport_pstrdup(const char *str)
 }
 
 
-/* Doesn't reference a DLLIMPORT variable, but here for completeness. */
+/* Doesn't reference a PGDLLIMPORT variable, but here for completeness. */
 void
 pgport_pfree(void *pointer)
 {

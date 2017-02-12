@@ -7,7 +7,7 @@
  * Portions Copyright (c) 1996-2009, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- * $PostgreSQL: pgsql/src/include/commands/dbcommands.h,v 1.46 2007/01/05 22:19:53 momjian Exp $
+ * $PostgreSQL: pgsql/src/include/commands/dbcommands.h,v 1.47 2008/01/01 19:45:57 momjian Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -19,6 +19,7 @@
 
 /* XLOG stuff */
 #define XLOG_DBASE_CREATE		0x00
+#define XLOG_DBASE_DROP			0x10
 
 typedef struct xl_dbase_create_rec_old
 {
@@ -58,7 +59,7 @@ extern void AlterDatabase(AlterDatabaseStmt *stmt);
 extern void AlterDatabaseSet(AlterDatabaseSetStmt *stmt);
 extern void AlterDatabaseOwner(const char *dbname, Oid newOwnerId);
 
-extern Oid	get_database_oid(const char *dbname);
+extern Oid	get_database_oid(const char *dbname, bool missing_ok);
 extern char *get_database_name(Oid dbid);
 
 extern void dbase_redo(XLogRecPtr beginLoc  __attribute__((unused)), XLogRecPtr lsn  __attribute__((unused)), XLogRecord *rptr);

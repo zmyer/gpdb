@@ -8,7 +8,7 @@
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- * $PostgreSQL: pgsql/src/include/nodes/memnodes.h,v 1.32 2007/01/05 22:19:55 momjian Exp $
+ * $PostgreSQL: pgsql/src/include/nodes/memnodes.h,v 1.34 2008/01/01 19:45:58 momjian Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -47,7 +47,6 @@ typedef struct MemoryContextMethods
 	bool		(*is_empty) (MemoryContext context);
 	void		(*stats) (MemoryContext context, uint64 *nBlocks, uint64 *nChunks, uint64 *currentAvailable, uint64 *allAllocated, uint64 *allFreed, uint64 *maxHeld);
 	void		(*release_accounting)(MemoryContext context);
-	void		(*update_generation)(MemoryContext context);
 #ifdef MEMORY_CONTEXT_CHECKING
 	void		(*check) (MemoryContext context);
 #endif
@@ -84,9 +83,6 @@ typedef struct MemoryContextData
  */
 #define MemoryContextIsValid(context) \
 	((context) != NULL && \
-	 ( IsA((context), AllocSetContext) || \
-       IsA((context), AsetDirectContext) || \
-       IsA((context), MPoolContext) ))
-
+	 (IsA((context), AllocSetContext)))
 
 #endif   /* MEMNODES_H */

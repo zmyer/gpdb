@@ -162,6 +162,9 @@ typedef enum FaultInjectorIdentifier_e {
 	
 	MallocFailure,
 	AbortTransactionFail,
+	WorkfileCreationFail,
+	WorkfileWriteFail,
+	WorkfileHashJoinFailure,
 
 	UpdateCommittedEofInPersistentTable,
 
@@ -170,6 +173,7 @@ typedef enum FaultInjectorIdentifier_e {
 
 	ExecSortBeforeSorting,
 	ExecSortMKSortMergeRuns,
+	ExecShareInputNext,
 	BaseBackupPostCreateCheckpoint,
 
 	CompactionBeforeSegmentFileDropPhase,
@@ -206,6 +210,13 @@ typedef enum FaultInjectorIdentifier_e {
 	OptTaskAllocateStringBuffer,
 	OptRelcacheTranslatorCatalogAccess,
 
+	SendQEDetailsInitBackend,
+	ProcessStartupPacketFault,
+	QuickDie,
+	AfterOneSliceDispatched,
+
+	InterconnectStopAckIsLost,
+	CursorQEReaderAfterSnapshot,
 	/* INSERT has to be done before that line */
 	FaultInjectorIdMax,
 	
@@ -329,8 +340,9 @@ typedef struct FaultInjectorEntry_s {
 	char					tableName[NAMEDATALEN];
 	
 	volatile	int			occurrence;
-	
+	volatile	 int	numTimesTriggered;
 	volatile	FaultInjectorState_e	faultInjectorState;
+
 		/* the state of the fault injection */
 	char					bufOutput[2500];
 	

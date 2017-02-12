@@ -31,6 +31,53 @@
  * the illusion of N independent tape devices to tuplesort.c.  Note that
  * logtape.c itself depends on buffile.c to provide a "logical file" of
  * larger size than the underlying OS may support.
+ *
+ * For simplicity, we allocate and release space in the underlying file
+ * in BLCKSZ-size blocks.  Space allocation boils down to keeping track
+ * of which blocks in the underlying file belong to which logical tape,
+ * plus any blocks that are free (recycled and not yet reused).
+ * The blocks in each logical tape are remembered using a method borrowed
+ * from the Unix HFS filesystem: we store data block numbers in an
+ * "indirect block".  If an indirect block fills up, we write it out to
+ * the underlying file and remember its location in a second-level indirect
+ * block.  In the same way second-level blocks are remembered in third-
+ * level blocks, and so on if necessary (of course we're talking huge
+ * amounts of data here).  The topmost indirect block of a given logical
+ * tape is never actually written out to the physical file, but all lower-
+ * level indirect blocks will be.
+ *
+ * The initial write pass is guaranteed to fill the underlying file
+ * perfectly sequentially, no matter how data is divided into logical tapes.
+ * Once we begin merge passes, the access pattern becomes considerably
+ * less predictable --- but the seeking involved should be comparable to
+ * what would happen if we kept each logical tape in a separate file,
+ * so there's no serious performance penalty paid to obtain the space
+ * savings of recycling.  We try to localize the write accesses by always
+ * writing to the lowest-numbered free block when we have a choice; it's
+ * not clear this helps much, but it can't hurt.  (XXX perhaps a LIFO
+ * policy for free blocks would be better?)
+ *
+ * To support the above policy of writing to the lowest free block,
+ * ltsGetFreeBlock sorts the list of free block numbers into decreasing
+ * order each time it is asked for a block and the list isn't currently
+ * sorted.	This is an efficient way to handle it because we expect cycles
+ * of releasing many blocks followed by re-using many blocks, due to
+ * tuplesort.c's "preread" behavior.
+ *
+ * Since all the bookkeeping and buffer memory is allocated with palloc(),
+ * and the underlying file(s) are made with OpenTemporaryFile, all resources
+ * for a logical tape set are certain to be cleaned up even if processing
+ * is aborted by ereport(ERROR).  To avoid confusion, the caller should take
+ * care that all calls for a single LogicalTapeSet are made in the same
+ * palloc context.
+ *
+ * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1994, Regents of the University of California
+ *
+ * IDENTIFICATION
+ *	  $PostgreSQL: pgsql/src/backend/utils/sort/logtape.c,v 1.26 2008/01/01 19:45:55 momjian Exp $
+ *
+ *-------------------------------------------------------------------------
  */
 
 #include "postgres.h"
@@ -435,14 +482,15 @@ LogicalTapeSetForgetFreeSpace(LogicalTapeSet *lts)
  * There are no error returns; we ereport() on failure.
  */
 void
-LogicalTapeWrite(LogicalTapeSet *lts, LogicalTape *lt, void *ptr, size_t size)
+LogicalTapeWrite(LogicalTapeSet *lts, LogicalTape *lt,
+				 void *ptr, size_t size)
 {
 	long        tmpBlkNum;
 	size_t		nthistime;
 
 	Assert(lt->writing);
 
-	if(lt->firstBlkNum == -1)
+	if (lt->firstBlkNum == -1)
 	{
 		lt->firstBlkNum = ltsGetFreeBlock(lts);
 		lt->currBlk.prev_blk = -1L;
@@ -453,7 +501,7 @@ LogicalTapeWrite(LogicalTapeSet *lts, LogicalTape *lt, void *ptr, size_t size)
 		lt->currPos.offset = 0;
 	}
 
-	while(size > 0)
+	while (size > 0)
 	{
 		Assert(lt->currPos.offset == lt->currBlk.payload_tail);
 		Assert(lt->currPos.offset <= LOGTAPE_BLK_PAYLOAD_SIZE);
@@ -471,7 +519,7 @@ LogicalTapeWrite(LogicalTapeSet *lts, LogicalTape *lt, void *ptr, size_t size)
 			lt->currPos.offset = 0;
 		}
 
-		nthistime = size > (LOGTAPE_BLK_PAYLOAD_SIZE - lt->currPos.offset) ? 
+		nthistime = size > (LOGTAPE_BLK_PAYLOAD_SIZE - lt->currPos.offset) ?
 			(LOGTAPE_BLK_PAYLOAD_SIZE - lt->currPos.offset) : size;
 
 		memcpy(lt->currBlk.payload + lt->currBlk.payload_tail, ptr, nthistime);
@@ -488,7 +536,7 @@ LogicalTapeWrite(LogicalTapeSet *lts, LogicalTape *lt, void *ptr, size_t size)
  * Unless the tape has been "frozen" in read state, forWrite must be the
  * opposite of the previous tape state.
  */
-void 
+void
 LogicalTapeRewind(LogicalTapeSet *lts, LogicalTape *lt, bool forWrite)
 {
 	AssertEquivalent(lt->firstBlkNum==-1, lt->currPos.blkNum == -1);
@@ -542,7 +590,8 @@ LogicalTapeRewind(LogicalTapeSet *lts, LogicalTape *lt, bool forWrite)
  * Early EOF is indicated by return value less than #bytes requested.
  */
 size_t
-LogicalTapeRead(LogicalTapeSet *lts, LogicalTape *lt, void *ptr, size_t size)
+LogicalTapeRead(LogicalTapeSet *lts, LogicalTape *lt,
+				void *ptr, size_t size)
 {
 	size_t		nread = 0;
 	size_t		nthistime;

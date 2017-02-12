@@ -1,15 +1,10 @@
 /*-------------------------------------------------------------------------
  *
  * aoblkdir.h
- *
- *   This file contains some definitions to support creation of aoblkdir tables.
+ *   Definitions to support creation of aoblkdir tables.
  *
  * Copyright (c) 2009, Greenplum Inc.
  *
- * $Id: $
- * $Change: $
- * $DateTime: $
- * $Author: $
  *-------------------------------------------------------------------------
  */
 #ifndef AOBLKDIR_H
@@ -25,8 +20,6 @@
 #define Anum_pg_aoblkdir_firstrownum   3
 #define Anum_pg_aoblkdir_minipage      4
 
-extern void AlterTableCreateAoBlkdirTableWithOid(
-	Oid relOid, Oid newOid, Oid newIndexOid,
-	Oid * comptypeOid, bool is_part_child);
+extern void AlterTableCreateAoBlkdirTable(Oid relOid, bool is_part_child);
 
 #endif

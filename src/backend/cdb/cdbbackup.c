@@ -311,7 +311,7 @@ gp_backup_launch__(PG_FUNCTION_ARGS)
 		}
 	}
 
-	PQExpBuffer escapeBuf = createPQExpBuffer();
+	PQExpBuffer escapeBuf = NULL;
 
 	pszDBName = NULL;
 	pszUserName = (char *) NULL;
@@ -324,7 +324,16 @@ gp_backup_launch__(PG_FUNCTION_ARGS)
 	if (pszDBName == NULL)
 		pszDBName = "";
 	else
+	{
+		/*
+		 * pszDBName will be pointing to the data portion of the PQExpBuffer
+		 * once escpaped (escapeBuf->data), so we can't safely destroy the
+		 * escapeBuf buffer until the end of the function.
+		 */
+		escapeBuf = createPQExpBuffer();
 		pszDBName = shellEscape(pszDBName, escapeBuf, true);
+	}
+
 	if (pszUserName == NULL)
 		pszUserName = "";
 
@@ -704,7 +713,7 @@ gp_backup_launch__(PG_FUNCTION_ARGS)
 	}
 #endif
 
-	elog(LOG, "gp_dump_agent command line: %s", pszCmdLine),
+	elog(LOG, "gp_dump_agent command line: %s", pszCmdLine);
 
 
 	/* Fork off gp_dump_agent	*/
@@ -932,7 +941,7 @@ gp_backup_launch__(PG_FUNCTION_ARGS)
 	}
 #endif
 
-		elog(LOG, "gp_dump_agent command line : %s", pszCmdLine),
+		elog(LOG, "gp_dump_agent command line : %s", pszCmdLine);
 
 #ifdef _WIN32
 		exit(1);
@@ -974,6 +983,8 @@ gp_backup_launch__(PG_FUNCTION_ARGS)
 	restoreTimers(&savetimers);
 
 	assert(pszSaveBackupfileName != NULL && pszSaveBackupfileName[0] != '\0');
+
+	destroyPQExpBuffer(escapeBuf);
 
 	return DirectFunctionCall1(textin, CStringGetDatum(pszSaveBackupfileName));
 }
@@ -1196,7 +1207,6 @@ gp_restore_launch__(PG_FUNCTION_ARGS)
 	len_name = strlen(pszBackupFileName);
 
 	PQExpBuffer escapeBuf = NULL;
-	PQExpBuffer aclNameBuf = NULL;
 	pszDBName = NULL;
 	pszUserName = NULL;
 	if (MyProcPort != NULL)
@@ -1209,8 +1219,12 @@ gp_restore_launch__(PG_FUNCTION_ARGS)
 		pszDBName = "";
 	else
 	{
+		/*
+		 * pszDBName will be pointing to the data portion of the PQExpBuffer
+		 * once escpaped (escapeBuf->data), so we can't safely destroy the
+		 * escapeBuf buffer until the end of the function.
+		 */
 		escapeBuf = createPQExpBuffer();
-		aclNameBuf = createPQExpBuffer();
 		pszDBName = shellEscape(pszDBName, escapeBuf, true);
 	}
 
@@ -1435,7 +1449,6 @@ gp_restore_launch__(PG_FUNCTION_ARGS)
 	assert(pszBackupFileName != NULL && pszBackupFileName[0] != '\0');
 
 	destroyPQExpBuffer(escapeBuf);
-	destroyPQExpBuffer(aclNameBuf);
 
 	return DirectFunctionCall1(textin, CStringGetDatum(pszBackupFileName));
 }
@@ -1507,7 +1520,7 @@ gp_read_backup_file__(PG_FUNCTION_ARGS)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
-				 errmsg("Backup File %s Type %d could not be be found", pszFileName, fileType)));
+				 errmsg("Backup File %s Type %d could not be found", pszFileName, fileType)));
 	}
 
 	/* Read file */

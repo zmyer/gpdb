@@ -24,7 +24,7 @@
 extern Datum gp_fault_inject(PG_FUNCTION_ARGS) ;
 Datum gp_fault_inject(PG_FUNCTION_ARGS) 
 {
-#ifdef USE_TEST_UTILS
+#ifdef FAULT_INJECTOR
 	int64 reason = PG_GETARG_INT32(0);
 	int64 arg = PG_GETARG_INT64(1);
 
@@ -35,7 +35,7 @@ Datum gp_fault_inject(PG_FUNCTION_ARGS)
 #endif
 }
 
-#ifdef USE_TEST_UTILS
+#ifdef FAULT_INJECTOR
 
 static char * longmsg = 
 "12345678901234567890123456789012345678901234567890"
@@ -111,7 +111,7 @@ gp_fault_inject_impl(int32 reason, int64 arg)
 	switch(reason)
 	{
 		case GP_FAULT_USER_SEGV:
-			*(int *) 0 = 1234;
+			*(volatile int *) 0 = 1234;
 			break;
 		case GP_FAULT_USER_LEAK:
 			palloc(arg);
@@ -125,11 +125,17 @@ gp_fault_inject_impl(int32 reason, int64 arg)
 			}
 			break;
 		case GP_FAULT_USER_RAISE_ERROR:
-			elog(ERROR, "User fault injection raised error");
+			ereport(ERROR,
+					(errcode(ERRCODE_FAULT_INJECT),
+					 errmsg("User fault injection raised error")));
 		case GP_FAULT_USER_RAISE_FATAL:
-			elog(FATAL, "User fault injection raised fatal");
+			ereport(FATAL,
+					(errcode(ERRCODE_FAULT_INJECT),
+					 errmsg("User fault injection raised fatal")));
 		case GP_FAULT_USER_RAISE_PANIC:
-			elog(PANIC, "User fault injection raised panic");
+			ereport(PANIC,
+					(errcode(ERRCODE_FAULT_INJECT),
+					 errmsg("User fault injection raised panic")));
 		case GP_FAULT_USER_PROCEXIT:
 			{
 				extern void proc_exit(int);
@@ -160,13 +166,13 @@ gp_fault_inject_impl(int32 reason, int64 arg)
 
 		case GP_FAULT_USER_SEGV_CRITICAL:
 			START_CRIT_SECTION();
-			*(int *) 0 = 1234;
+			*(volatile int *) 0 = 1234;
 			END_CRIT_SECTION();
 			break;
 
 		case GP_FAULT_USER_SEGV_LWLOCK:
 			LWLockAcquire(WALInsertLock, LW_EXCLUSIVE);
-			*(int *) 0 = 1234;
+			*(volatile int *) 0 = 1234;
 			break;
  	
 		case GP_FAULT_USER_OPEN_MANY_FILES:

@@ -13,6 +13,7 @@
 
 #include "utils/pg_crc.h"
 #include "storage/relfilenode.h"
+#include "access/slru.h"
 #include "access/xlogdefs.h"
 #include "postmaster/primary_mirror_mode.h"
 #include "storage/fd.h"
@@ -355,7 +356,6 @@ outgoing message queue would always have 1 slot and incoming would have mailboxe
 //JNM TODO replace fileRepProcIndex with FILEREP_OUTGOING_MESSAGE_QUEUE ?
 #define FILEREP_OUTGOING_MESSAGE_QUEUE 0
 
-//must be 63 or less due to the gp_verification_history table
 #define FILEREP_VERIFY_MAX_REQUEST_TOKEN_LEN 63
 
 extern FileRepShmem_s	*fileRepShmemArray[FILEREP_SHMEM_MAX_SLOTS];
@@ -440,6 +440,9 @@ typedef enum FileRepStatus_e {
 	FileRepStatusMirrorLossOccurred,
 
 	FileRepStatusMirrorError,
+
+	/* checksum verification failed on the mirror */
+	FileRepStatusSlruChecksumFailed,
 
 	/* the number of values in this enumeration */
 	FileRepStatus__EnumerationCount
@@ -550,6 +553,12 @@ typedef enum FileRepOperation_e {
 
 	FileRepOperationDropTemporaryFiles,
 		/* Drop temporary files */
+
+	FileRepOperationStartSlruChecksum,
+		/* Start computing the checksum for a SLRU directory on mirror */
+
+	FileRepOperationVerifySlruDirectoryChecksum,
+		/* Verify checksum of a directory for a SLRU directory on mirror */
 
 	/*
 	  IMPORTANT: If add new operation, add to FileRepOperationToString
@@ -814,6 +823,27 @@ typedef struct FileRepOperationDescriptionCreate_s
 
 } FileRepOperationDescriptionCreate_s;
 
+
+/*
+ * Structure for the FileRepOperationStartSlruChecksum command
+ */
+typedef struct FileRepOperationDescriptionStartChecksum_s
+{
+	int  mirrorStatus;
+
+} FileRepOperationDescriptionStartChecksum_s;
+
+/*
+ * Structure for the FileRepOperationVerifySlruDirectoryChecksum command
+ */
+typedef struct FileRepOperationDescriptionVerifyDirectoryChecksum_s
+{
+	char md5[SLRU_MD5_BUFLEN];            /* md5 of the primary checksum file */
+
+	int mirrorStatus;
+
+} FileRepOperationDescriptionVerifyDirectoryChecksum_s;
+
 typedef enum FileRepOperationVerificationType_e
 {
 	FileRepOpVerifyType_NotInitialized=0,
@@ -959,6 +989,10 @@ typedef union FileRepOperationDescription_u
 	FileRepOperationDescriptionValidation_s validation;
 
 	FileRepOperationDescriptionCreate_s create;
+
+	FileRepOperationDescriptionStartChecksum_s startChecksum;
+
+	FileRepOperationDescriptionVerifyDirectoryChecksum_s verifyDirectoryChecksum;
 
 } FileRepOperationDescription_u;
 

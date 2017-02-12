@@ -216,7 +216,7 @@ typedef struct TMGXACT
 	
 	TransactionId				localXid;
 
-	LocalDistribXactRef			localDistribXactRef;
+	LocalDistribXactData		localDistribXactData;
 	
 	bool						explicitBeginRemembered;
 
@@ -277,7 +277,7 @@ typedef struct TmControlBlock
 
 
 #define TMCONTROLBLOCK_BYTES(num_gxacts) \
-            (SIZEOF_VARSTRUCT(num_gxacts, TmControlBlock, gxact_array))
+	(offsetof(TmControlBlock, gxact_array) + sizeof(TMGXACT) * (num_gxacts))
 
 extern DtxContext DistributedTransactionContext;
 
@@ -305,6 +305,7 @@ extern void getDtxLogInfo(TMGXACT_LOG *gxact_log);
 extern bool notifyCommittedDtxTransactionIsNeeded(void);
 extern void notifyCommittedDtxTransaction(void);
 extern void	rollbackDtxTransaction(void);
+extern DistributedTransactionId getMaxDistributedXid(void);
 
 extern void insertingDistributedCommitted(void);
 extern void insertedDistributedCommitted(void);
@@ -320,13 +321,11 @@ extern void descDistributedForgetCommitRecord(StringInfo buf, TMGXACT_LOG *gxact
 extern void dtmPreCommand(const char *debugCaller, const char *debugDetail, PlannedStmt *stmt,
 							bool needsTwoPhaseCommit, bool dispatchToPrimaries, bool dispatchToMirrors );
 extern bool isCurrentDtxTwoPhase(void);
-extern bool isCurrentDtxActive(void);
 extern DtxState getCurrentDtxState(void);
 
 extern void sendDtxExplicitBegin(void);
-extern int dtxCurrentPhase1Count(void);
 
-extern bool dispatchDtxCommand(const char *cmd, bool withSnapshot, bool raiseError);
+extern bool dispatchDtxCommand(const char *cmd);
 
 extern void tmShmemInit(void);
 extern int	tmShmemSize(void);
@@ -336,7 +335,6 @@ extern void restoreGxact(TMGXACT_LOG * gxact, DtxState state);
 extern void getDtxCheckPointInfoAndLock(char **result, int *result_size);
 extern void freeDtxCheckPointInfoAndUnlock(char *info, int info_size, XLogRecPtr *recptr);
 
-extern bool isTMInRecovery(void);
 extern void setRecoverTMOn(void);
 
 extern void verify_shared_snapshot_ready(void);
@@ -360,12 +358,9 @@ extern void performDtxProtocolCommand(DtxProtocolCommand dtxProtocolCommand,
 					int flags,
 					const char *loggingStr, const char *gid, 
 					DistributedTransactionId gxid, DtxContextInfo *contextInfo);
-extern void doDtxPhase2Retry(void);
 extern void UtilityModeFindOrCreateDtmRedoFile(void);
 extern void UtilityModeCloseDtmRedoFile(void);
 extern void PleaseDebugMe(char *caller);
-
-extern void cdbtm_performDeferredRecovery(void);
 
 extern bool doDispatchSubtransactionInternalCmd(DtxProtocolCommand cmdType);
 

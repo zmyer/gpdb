@@ -14,13 +14,9 @@
 //
 //---------------------------------------------------------------------------
 
-
 #include "postgres.h"
-#include "executor/executor.h"
-#include "nodes/nodes.h"
 
-#include "gpos/error/CAutoTrace.h"
-#include "gpos/memory/IMemoryPool.h"
+#include "executor/executor.h"
 
 #include "gpopt/utils/CConstExprEvaluatorProxy.h"
 
@@ -29,11 +25,6 @@
 
 #include "naucrates/exception.h"
 #include "naucrates/dxl/operators/CDXLNode.h"
-
-#include "naucrates/md/CMDIdGPDB.h"
-#include "naucrates/md/IMDType.h"
-
-#include "utils/guc.h"
 
 using namespace gpdxl;
 using namespace gpmd;
@@ -76,17 +67,18 @@ CConstExprEvaluatorProxy::PdxlnEvaluateExpr
 	)
 {
 	// Translate DXL -> GPDB Expr
-	int resultNodeTag = -1;
 	Expr *pexpr = m_trdxl2scalar.PexprFromDXLNodeScalar(pdxlnExpr, &m_emptymapcidvar);
 	GPOS_ASSERT(NULL != pexpr);
 
 	// Evaluate the expression
-	Expr *pexprResult = gpdb::PexprEvaluate(pexpr, gpdb::OidExprType((Node *)pexpr));
+	Expr *pexprResult = gpdb::PexprEvaluate(pexpr,
+						gpdb::OidExprType((Node *)pexpr),
+						gpdb::IExprTypeMod((Node *)pexpr));
 
 	if (!IsA(pexprResult, Const))
 	{
 		#ifdef GPOS_DEBUG
-		elog(NOTICE, "Expression did not evaluate to Const, but to an expression of type %d", resultNodeTag);
+		elog(NOTICE, "Expression did not evaluate to Const, but to an expression of type %d", pexprResult->type);
 		#endif
 		GPOS_RAISE(gpdxl::ExmaConstExprEval, gpdxl::ExmiConstExprEvalNonConst);
 	}

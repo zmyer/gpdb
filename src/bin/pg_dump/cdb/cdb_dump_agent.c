@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * pg_dump.c
+ * cdb_dump_agent.c
  *	  pg_dump is a utility for dumping out a postgres database
  *	  into a script file.
  *
@@ -220,6 +220,11 @@ static void dumpSequence(Archive *fout, TableInfo *tbinfo);
 static void dumpIndex(Archive *fout, IndxInfo *indxinfo);
 static void dumpConstraint(Archive *fout, ConstraintInfo *coninfo);
 static void dumpTableConstraintComment(Archive *fout, ConstraintInfo *coninfo);
+static void dumpTSParser(Archive *fout, TSParserInfo *prsinfo);
+static void dumpTSDictionary(Archive *fout, TSDictInfo *dictinfo);
+static void dumpTSTemplate(Archive *fout, TSTemplateInfo *tmplinfo);
+static void dumpTSConfig(Archive *fout, TSConfigInfo *cfginfo);
+static void dumpExtension(Archive *fout, ExtensionInfo *extinfo);
 
 static void dumpACL(Archive *fout, CatalogId objCatId, DumpId objDumpId,
 		const char *type, const char *name,
@@ -242,6 +247,7 @@ static char *format_table_function_columns(FuncInfo *finfo, int nallargs,
 							  char **argnames);
 static const char *convertRegProcReference(const char *proc);
 static const char *convertOperatorReference(const char *opr);
+static const char *convertTSFunction(Oid funcOid);
 static char *getFormattedTypeName(Oid oid, OidOptions opts);
 static bool hasBlobs(Archive *AH);
 static int	dumpBlobs(Archive *AH, void *arg __attribute__((unused)));
@@ -272,6 +278,8 @@ static bool isGPDB5000OrLater(void);
 Archive *makeArchive(char *filename);
 void updateDDBoostArchive(ArchiveHandle *AH);
 char *formPostDumpFilePathName(char *pszBackupDirectory, char *pszBackupKey, int pszInstID, int pszSegID);
+static void dumpDatabaseConfig(const char *dbname, PQExpBuffer *buf);
+static void makeAlterConfigCommand(const char *arrayitem, const char *type, const char *name, PQExpBuffer *buf);
 
 /* MPP additions end */
 
@@ -734,7 +742,13 @@ main(int argc, char **argv)
 					exit(1);
 				}
 				include_everything = false;
-                		strcpy(tableFileName, optarg);
+				if (strlcpy(tableFileName, optarg, sizeof(tableFileName)) >= sizeof(tableFileName))
+				{
+					fprintf(stderr,
+							_("%s: invalid --table-file option, filename too long\n"),
+							progname);
+					exit(1);
+				}
 				break;
 			case 4: 			/*	--exclude-table-file */
 				if (!open_file_and_append_to_list(optarg, &table_exclude_patterns, "exclude tables list"))
@@ -822,7 +836,13 @@ main(int argc, char **argv)
 			exit(1);
 		}
 		include_everything = false;
-		strncpy(tableFileName, incrementalFilter, sizeof(tableFileName));
+		if (strlcpy(tableFileName, incrementalFilter, sizeof(tableFileName)) >= sizeof(tableFileName))
+		{
+			fprintf(stderr,
+					_("%s: invalid --incremental-filter option -- filename too long\n"),
+					progname);
+			exit(1);
+		}
 	}
 
 	if (optind < (argc - 1))
@@ -878,7 +898,7 @@ main(int argc, char **argv)
 #ifdef USE_DDBOOST
 	if (dd_boost_enabled)
 	{
-		/* The storage unit is created by the gpcrondump.py, before all the agents are executed */
+		/* The storage unit is created by the gpcrondump, before all the agents are executed */
 		/* Hence it is always false here														*/
 		/* remote is always false when doing backup to primary DDR */
 		int err = DD_ERR_NONE;
@@ -1214,6 +1234,12 @@ dumpMain(bool oids, const char *dumpencoding, int outputBlobs, int plainText, Re
 	g_gp_supportsOpfamilies = g_fout->remoteVersion >= 80300;
 
 	g_gp_supportsAttributeEncoding = testAttributeEncodingSupport();
+
+	/* Let cdb_dump_include functions know whether to include full text */
+	g_gp_supportsFullText = g_fout->remoteVersion >= 80300;
+
+	/* Let cdb_dump_include functions know whether to handle lanowner col */
+	g_gp_supportsLanOwner = g_fout->remoteVersion >= 80300;
 
 	/*
 	 * Process the schema and table include/exclude lists and develop a list
@@ -1818,7 +1844,7 @@ dumpDatabase(Archive *AH)
 {
 	PQExpBuffer dbQry = createPQExpBuffer();
 	PQExpBuffer delQry = createPQExpBuffer();
-	PQExpBuffer creaQry = createPQExpBuffer();
+	PQExpBuffer createQry = createPQExpBuffer();
 	PGresult   *res;
 	int			ntups;
 	int			i_tableoid,
@@ -1885,17 +1911,17 @@ dumpDatabase(Archive *AH)
 	encoding = PQgetvalue(res, 0, i_encoding);
 	tablespace = PQgetvalue(res, 0, i_tablespace);
 
-	appendPQExpBuffer(creaQry, "CREATE DATABASE %s WITH TEMPLATE = template0",
+	appendPQExpBuffer(createQry, "CREATE DATABASE %s WITH TEMPLATE = template0",
 					  fmtId(datname));
 	if (strlen(encoding) > 0)
 	{
-		appendPQExpBuffer(creaQry, " ENCODING = ");
-		appendStringLiteralAH(creaQry, encoding, AH);
+		appendPQExpBuffer(createQry, " ENCODING = ");
+		appendStringLiteralAH(createQry, encoding, AH);
 	}
 	if (strlen(tablespace) > 0 && strcmp(tablespace, "pg_default") != 0)
-		appendPQExpBuffer(creaQry, " TABLESPACE = %s",
+		appendPQExpBuffer(createQry, " TABLESPACE = %s",
 						  fmtId(tablespace));
-	appendPQExpBuffer(creaQry, ";\n");
+	appendPQExpBuffer(createQry, ";\n");
 
 	appendPQExpBuffer(delQry, "DROP DATABASE %s;\n",
 					  fmtId(datname));
@@ -1911,7 +1937,7 @@ dumpDatabase(Archive *AH)
 				 dba,			/* Owner */
 				 false,			/* with oids */
 				 "DATABASE",	/* Desc */
-				 creaQry->data, /* Create */
+				 createQry->data, /* Create */
 				 delQry->data,	/* Del */
 				 NULL,			/* Copy */
 				 NULL,			/* Deps */
@@ -1943,7 +1969,7 @@ dumpDatabase(Archive *AH)
 
 	destroyPQExpBuffer(dbQry);
 	destroyPQExpBuffer(delQry);
-	destroyPQExpBuffer(creaQry);
+	destroyPQExpBuffer(createQry);
 }
 
 
@@ -2530,7 +2556,11 @@ dumpDumpableObject(Archive *fout, DumpableObject *dobj)
 	{
 		case DO_NAMESPACE:
 			if (!postDataSchemaOnly)
-			dumpNamespace(fout, (NamespaceInfo *) dobj);
+				dumpNamespace(fout, (NamespaceInfo *) dobj);
+			break;
+		case DO_EXTENSION:
+			if (!postDataSchemaOnly)
+				dumpExtension(fout, (ExtensionInfo *) dobj);
 			break;
 		case DO_TYPE:
 			if (!postDataSchemaOnly)
@@ -2611,8 +2641,20 @@ dumpDumpableObject(Archive *fout, DumpableObject *dobj)
 			if (!postDataSchemaOnly)
 			dumpTableData(fout, (TableDataInfo *) dobj);
 			break;
-		case DO_TABLE_TYPE:
-			/* table rowtypes are never dumped separately */
+		case DO_DUMMY_TYPE:
+			/* table rowtypes and array types are never dumped separately */
+			break;
+		case DO_TSPARSER:
+			dumpTSParser(fout, (TSParserInfo *) dobj);
+			break;
+		case DO_TSDICT:
+			dumpTSDictionary(fout, (TSDictInfo *) dobj);
+			break;
+		case DO_TSTEMPLATE:
+			dumpTSTemplate(fout, (TSTemplateInfo *) dobj);
+			break;
+		case DO_TSCONFIG:
+			dumpTSConfig(fout, (TSConfigInfo *) dobj);
 			break;
 		case DO_BLOBS:
 			if (!postDataSchemaOnly)
@@ -2629,6 +2671,14 @@ dumpDumpableObject(Archive *fout, DumpableObject *dobj)
 						 false, "BLOB COMMENTS", "", "", NULL,
 						 NULL, 0,
 						 dumpBlobComments, NULL);
+			break;
+		/*
+		 * The TYPE_CACHE object is only used for the pg_type cache during
+		 * binary_upgrade operation and should not be dumped. To keep the
+		 * compilers and static analyzers happy we still need to handle
+		 * the case though.
+		 */
+		case DO_TYPE_CACHE:
 			break;
 	}
 }
@@ -2684,6 +2734,55 @@ dumpNamespace(Archive *fout, NamespaceInfo *nspinfo)
 
 	destroyPQExpBuffer(q);
 	destroyPQExpBuffer(delq);
+}
+
+/*
+ * dumpExtension
+ *	  writes out to fout the queries to recreate an extension
+ */
+static void
+dumpExtension(Archive *fout, ExtensionInfo *extinfo)
+{
+	PQExpBuffer q;
+	PQExpBuffer delq;
+	PQExpBuffer labelq;
+	char	   *qextname;
+
+	/* Skip if not to be dumped */
+	if (!extinfo->dobj.dump || dataOnly)
+		return;
+
+	q = createPQExpBuffer();
+	delq = createPQExpBuffer();
+	labelq = createPQExpBuffer();
+
+	qextname = strdup(fmtId(extinfo->dobj.name));
+
+	appendPQExpBuffer(delq, "DROP EXTENSION %s;\n", qextname);
+	appendPQExpBuffer(q, "CREATE EXTENSION IF NOT EXISTS %s WITH SCHEMA %s;\n",
+					  qextname, fmtId(extinfo->namespace));
+
+	appendPQExpBuffer(labelq, "EXTENSION %s", qextname);
+
+	ArchiveEntry(fout, extinfo->dobj.catId, extinfo->dobj.dumpId,
+				 extinfo->dobj.name,
+				 NULL, NULL,
+				 "",
+				 false, "EXTENSION",
+				 q->data, delq->data, NULL,
+				 extinfo->dobj.dependencies, extinfo->dobj.nDeps,
+				 NULL, NULL);
+
+	/* Dump Extension Comments and Security Labels */
+	dumpComment(fout, labelq->data,
+				NULL, "",
+				extinfo->dobj.catId, 0, extinfo->dobj.dumpId);
+
+	free(qextname);
+
+	destroyPQExpBuffer(q);
+	destroyPQExpBuffer(delq);
+	destroyPQExpBuffer(labelq);
 }
 
 /*
@@ -3227,7 +3326,7 @@ dumpProcLang(Archive *fout, ProcLangInfo *plang)
 	FuncInfo   *inlineInfo = NULL;
 	FuncInfo   *validatorInfo = NULL;
 
-	if (dataOnly)
+	if (!plang->dobj.dump ||dataOnly)
 		return;
 
 	/*
@@ -3292,7 +3391,7 @@ dumpProcLang(Archive *fout, ProcLangInfo *plang)
 	{
 		appendPQExpBuffer(defqry, " HANDLER %s",
 						  fmtId(funcInfo->dobj.name));
-	
+
 		if (OidIsValid(plang->laninline))
 		{
 			appendPQExpBuffer(defqry, " INLINE ");
@@ -4013,7 +4112,7 @@ dumpCast(Archive *fout, CastInfo *cast)
 	TypeInfo   *sourceInfo;
 	TypeInfo   *targetInfo;
 
-	if (dataOnly)
+	if (!cast->dobj.dump || dataOnly)
 		return;
 
 	if (OidIsValid(cast->castfunc))
@@ -4446,6 +4545,42 @@ convertOperatorReference(const char *opr)
 	sprintf(oname, "OPERATOR(%s)", name);
 	free(name);
 	return oname;
+}
+
+/*
+ * Convert a function OID obtained from pg_ts_parser or pg_ts_template
+ *
+ * It is sufficient to use REGPROC rather than REGPROCEDURE, since the
+ * argument lists of these functions are predetermined.  Note that the
+ * caller should ensure we are in the proper schema, because the results
+ * are search path dependent!
+ */
+static const char *
+convertTSFunction(Oid funcOid)
+{
+	char	   *result;
+	char		query[128];
+	PGresult   *res;
+	int			ntups;
+
+	snprintf(query, sizeof(query),
+			 "SELECT '%u'::pg_catalog.regproc", funcOid);
+	res = PQexec(g_conn, query);
+	check_sql_result(res, g_conn, query, PGRES_TUPLES_OK);
+
+	ntups = PQntuples(res);
+	if (ntups != 1)
+	{
+		write_msg(NULL, "query returned %d rows instead of one: %s\n",
+				  ntups, query);
+		exit_nicely();
+	}
+
+	result = strdup(PQgetvalue(res, 0, 0));
+
+	PQclear(res);
+
+	return result;
 }
 
 /*
@@ -5466,6 +5601,348 @@ dumpExtProtocol(Archive *fout, ExtProtInfo *ptcinfo)
 			free (protoFuncs[i].name);
 }
 
+/*
+ * dumpTSParser
+ *	  write out a single text search parser
+ */
+static void
+dumpTSParser(Archive *fout, TSParserInfo *prsinfo)
+{
+	PQExpBuffer q;
+	PQExpBuffer delq;
+
+	/* Skip if not to be dumped */
+	if (!prsinfo->dobj.dump || dataOnly)
+		return;
+
+	q = createPQExpBuffer();
+	delq = createPQExpBuffer();
+
+	/* Make sure we are in proper schema */
+	selectSourceSchema(prsinfo->dobj.namespace->dobj.name);
+
+	appendPQExpBuffer(q, "CREATE TEXT SEARCH PARSER %s (\n",
+					  fmtId(prsinfo->dobj.name));
+
+	appendPQExpBuffer(q, "    START = %s,\n",
+					  convertTSFunction(prsinfo->prsstart));
+	appendPQExpBuffer(q, "    GETTOKEN = %s,\n",
+					  convertTSFunction(prsinfo->prstoken));
+	appendPQExpBuffer(q, "    END = %s,\n",
+					  convertTSFunction(prsinfo->prsend));
+	if (prsinfo->prsheadline != InvalidOid)
+		appendPQExpBuffer(q, "    HEADLINE = %s,\n",
+						  convertTSFunction(prsinfo->prsheadline));
+	appendPQExpBuffer(q, "    LEXTYPES = %s );\n",
+					  convertTSFunction(prsinfo->prslextype));
+
+	/*
+	 * DROP must be fully qualified in case same name appears in pg_catalog
+	 */
+	appendPQExpBuffer(delq, "DROP TEXT SEARCH PARSER %s",
+					  fmtId(prsinfo->dobj.namespace->dobj.name));
+	appendPQExpBuffer(delq, ".%s;\n",
+					  fmtId(prsinfo->dobj.name));
+
+	ArchiveEntry(fout, prsinfo->dobj.catId, prsinfo->dobj.dumpId,
+				 prsinfo->dobj.name,
+				 prsinfo->dobj.namespace->dobj.name,
+				 NULL,
+				 "",
+				 false, "TEXT SEARCH PARSER", q->data, delq->data, NULL,
+				 prsinfo->dobj.dependencies, prsinfo->dobj.nDeps,
+				 NULL, NULL);
+
+	/* Dump Parser Comments */
+	resetPQExpBuffer(q);
+	appendPQExpBuffer(q, "TEXT SEARCH PARSER %s",
+					  fmtId(prsinfo->dobj.name));
+	dumpComment(fout, q->data,
+				NULL, "",
+				prsinfo->dobj.catId, 0, prsinfo->dobj.dumpId);
+
+	destroyPQExpBuffer(q);
+	destroyPQExpBuffer(delq);
+}
+
+/*
+ * dumpTSDictionary
+ *	  write out a single text search dictionary
+ */
+static void
+dumpTSDictionary(Archive *fout, TSDictInfo *dictinfo)
+{
+	PQExpBuffer q;
+	PQExpBuffer delq;
+	PQExpBuffer query;
+	PGresult   *res;
+	int			ntups;
+	char	   *nspname;
+	char	   *tmplname;
+
+	/* Skip if not to be dumped */
+	if (!dictinfo->dobj.dump || dataOnly)
+		return;
+
+	q = createPQExpBuffer();
+	delq = createPQExpBuffer();
+	query = createPQExpBuffer();
+
+	/* Fetch name and namespace of the dictionary's template */
+	selectSourceSchema("pg_catalog");
+	appendPQExpBuffer(query, "SELECT nspname, tmplname "
+					  "FROM pg_ts_template p, pg_namespace n "
+					  "WHERE p.oid = '%u' AND n.oid = tmplnamespace",
+					  dictinfo->dicttemplate);
+	res = PQexec(g_conn, query->data);
+	check_sql_result(res, g_conn, query->data, PGRES_TUPLES_OK);
+	ntups = PQntuples(res);
+	if (ntups != 1)
+	{
+		write_msg(NULL, "query returned %d rows instead of one: %s\n",
+				  ntups, query->data);
+		exit_nicely();
+	}
+	nspname = PQgetvalue(res, 0, 0);
+	tmplname = PQgetvalue(res, 0, 1);
+
+	/* Make sure we are in proper schema */
+	selectSourceSchema(dictinfo->dobj.namespace->dobj.name);
+
+	appendPQExpBuffer(q, "CREATE TEXT SEARCH DICTIONARY %s (\n",
+					  fmtId(dictinfo->dobj.name));
+
+	appendPQExpBuffer(q, "    TEMPLATE = ");
+	if (strcmp(nspname, dictinfo->dobj.namespace->dobj.name) != 0)
+		appendPQExpBuffer(q, "%s.", fmtId(nspname));
+	appendPQExpBuffer(q, "%s", fmtId(tmplname));
+
+	PQclear(res);
+
+	/* the dictinitoption can be dumped straight into the command */
+	if (dictinfo->dictinitoption)
+		appendPQExpBuffer(q, ",\n    %s", dictinfo->dictinitoption);
+
+	appendPQExpBuffer(q, " );\n");
+
+	/*
+	 * DROP must be fully qualified in case same name appears in pg_catalog
+	 */
+	appendPQExpBuffer(delq, "DROP TEXT SEARCH DICTIONARY %s",
+					  fmtId(dictinfo->dobj.namespace->dobj.name));
+	appendPQExpBuffer(delq, ".%s;\n",
+					  fmtId(dictinfo->dobj.name));
+
+	ArchiveEntry(fout, dictinfo->dobj.catId, dictinfo->dobj.dumpId,
+				 dictinfo->dobj.name,
+				 dictinfo->dobj.namespace->dobj.name,
+				 NULL,
+				 dictinfo->rolname,
+				 false, "TEXT SEARCH DICTIONARY", q->data, delq->data, NULL,
+				 dictinfo->dobj.dependencies, dictinfo->dobj.nDeps,
+				 NULL, NULL);
+
+	/* Dump Dictionary Comments */
+	resetPQExpBuffer(q);
+	appendPQExpBuffer(q, "TEXT SEARCH DICTIONARY %s",
+					  fmtId(dictinfo->dobj.name));
+	dumpComment(fout, q->data,
+				NULL, dictinfo->rolname,
+				dictinfo->dobj.catId, 0, dictinfo->dobj.dumpId);
+
+	destroyPQExpBuffer(q);
+	destroyPQExpBuffer(delq);
+	destroyPQExpBuffer(query);
+}
+
+/*
+ * dumpTSTemplate
+ *	  write out a single text search template
+ */
+static void
+dumpTSTemplate(Archive *fout, TSTemplateInfo *tmplinfo)
+{
+	PQExpBuffer q;
+	PQExpBuffer delq;
+
+	/* Skip if not to be dumped */
+	if (!tmplinfo->dobj.dump || dataOnly)
+		return;
+
+	q = createPQExpBuffer();
+	delq = createPQExpBuffer();
+
+	/* Make sure we are in proper schema */
+	selectSourceSchema(tmplinfo->dobj.namespace->dobj.name);
+
+	appendPQExpBuffer(q, "CREATE TEXT SEARCH TEMPLATE %s (\n",
+					  fmtId(tmplinfo->dobj.name));
+
+	if (tmplinfo->tmplinit != InvalidOid)
+		appendPQExpBuffer(q, "    INIT = %s,\n",
+						  convertTSFunction(tmplinfo->tmplinit));
+	appendPQExpBuffer(q, "    LEXIZE = %s );\n",
+					  convertTSFunction(tmplinfo->tmpllexize));
+
+	/*
+	 * DROP must be fully qualified in case same name appears in pg_catalog
+	 */
+	appendPQExpBuffer(delq, "DROP TEXT SEARCH TEMPLATE %s",
+					  fmtId(tmplinfo->dobj.namespace->dobj.name));
+	appendPQExpBuffer(delq, ".%s;\n",
+					  fmtId(tmplinfo->dobj.name));
+
+	ArchiveEntry(fout, tmplinfo->dobj.catId, tmplinfo->dobj.dumpId,
+				 tmplinfo->dobj.name,
+				 tmplinfo->dobj.namespace->dobj.name,
+				 NULL,
+				 "",
+				 false, "TEXT SEARCH TEMPLATE", q->data, delq->data, NULL,
+				 tmplinfo->dobj.dependencies, tmplinfo->dobj.nDeps,
+				 NULL, NULL);
+
+	/* Dump Template Comments */
+	resetPQExpBuffer(q);
+	appendPQExpBuffer(q, "TEXT SEARCH TEMPLATE %s",
+					  fmtId(tmplinfo->dobj.name));
+	dumpComment(fout, q->data,
+				NULL, "",
+				tmplinfo->dobj.catId, 0, tmplinfo->dobj.dumpId);
+
+	destroyPQExpBuffer(q);
+	destroyPQExpBuffer(delq);
+}
+
+/*
+ * dumpTSConfig
+ *	  write out a single text search configuration
+ */
+static void
+dumpTSConfig(Archive *fout, TSConfigInfo *cfginfo)
+{
+	PQExpBuffer q;
+	PQExpBuffer delq;
+	PQExpBuffer query;
+	PGresult   *res;
+	char	   *nspname;
+	char	   *prsname;
+	int			ntups,
+				i;
+	int			i_tokenname;
+	int			i_dictname;
+
+	/* Skip if not to be dumped */
+	if (!cfginfo->dobj.dump || dataOnly)
+		return;
+
+	q = createPQExpBuffer();
+	delq = createPQExpBuffer();
+	query = createPQExpBuffer();
+
+	/* Fetch name and namespace of the config's parser */
+	selectSourceSchema("pg_catalog");
+	appendPQExpBuffer(query, "SELECT nspname, prsname "
+					  "FROM pg_ts_parser p, pg_namespace n "
+					  "WHERE p.oid = '%u' AND n.oid = prsnamespace",
+					  cfginfo->cfgparser);
+	res = PQexec(g_conn, query->data);
+	check_sql_result(res, g_conn, query->data, PGRES_TUPLES_OK);
+	ntups = PQntuples(res);
+	if (ntups != 1)
+	{
+		write_msg(NULL, "query returned %d rows instead of one: %s\n",
+				  ntups, query->data);
+		exit_nicely();
+	}
+	nspname = PQgetvalue(res, 0, 0);
+	prsname = PQgetvalue(res, 0, 1);
+
+	/* Make sure we are in proper schema */
+	selectSourceSchema(cfginfo->dobj.namespace->dobj.name);
+
+	appendPQExpBuffer(q, "CREATE TEXT SEARCH CONFIGURATION %s (\n",
+					  fmtId(cfginfo->dobj.name));
+
+	appendPQExpBuffer(q, "    PARSER = ");
+	if (strcmp(nspname, cfginfo->dobj.namespace->dobj.name) != 0)
+		appendPQExpBuffer(q, "%s.", fmtId(nspname));
+	appendPQExpBuffer(q, "%s );\n", fmtId(prsname));
+
+	PQclear(res);
+
+	resetPQExpBuffer(query);
+	appendPQExpBuffer(query,
+					  "SELECT \n"
+					  "  ( SELECT alias FROM pg_catalog.ts_token_type('%u'::pg_catalog.oid) AS t \n"
+					  "    WHERE t.tokid = m.maptokentype ) AS tokenname, \n"
+					  "  m.mapdict::pg_catalog.regdictionary AS dictname \n"
+					  "FROM pg_catalog.pg_ts_config_map AS m \n"
+					  "WHERE m.mapcfg = '%u' \n"
+					  "ORDER BY m.mapcfg, m.maptokentype, m.mapseqno",
+					  cfginfo->cfgparser, cfginfo->dobj.catId.oid);
+
+	res = PQexec(g_conn, query->data);
+	check_sql_result(res, g_conn, query->data, PGRES_TUPLES_OK);
+	ntups = PQntuples(res);
+
+	i_tokenname = PQfnumber(res, "tokenname");
+	i_dictname = PQfnumber(res, "dictname");
+
+	for (i = 0; i < ntups; i++)
+	{
+		char	   *tokenname = PQgetvalue(res, i, i_tokenname);
+		char	   *dictname = PQgetvalue(res, i, i_dictname);
+
+		if (i == 0 ||
+			strcmp(tokenname, PQgetvalue(res, i - 1, i_tokenname)) != 0)
+		{
+			/* starting a new token type, so start a new command */
+			if (i > 0)
+				appendPQExpBuffer(q, ";\n");
+			appendPQExpBuffer(q, "\nALTER TEXT SEARCH CONFIGURATION %s\n",
+							  fmtId(cfginfo->dobj.name));
+			/* tokenname needs quoting, dictname does NOT */
+			appendPQExpBuffer(q, "    ADD MAPPING FOR %s WITH %s",
+							  fmtId(tokenname), dictname);
+		}
+		else
+			appendPQExpBuffer(q, ", %s", dictname);
+	}
+
+	if (ntups > 0)
+		appendPQExpBuffer(q, ";\n");
+
+	PQclear(res);
+
+	/*
+	 * DROP must be fully qualified in case same name appears in pg_catalog
+	 */
+	appendPQExpBuffer(delq, "DROP TEXT SEARCH CONFIGURATION %s",
+					  fmtId(cfginfo->dobj.namespace->dobj.name));
+	appendPQExpBuffer(delq, ".%s;\n",
+					  fmtId(cfginfo->dobj.name));
+
+	ArchiveEntry(fout, cfginfo->dobj.catId, cfginfo->dobj.dumpId,
+				 cfginfo->dobj.name,
+				 cfginfo->dobj.namespace->dobj.name,
+				 NULL,
+				 cfginfo->rolname,
+			   false, "TEXT SEARCH CONFIGURATION", q->data, delq->data, NULL,
+				 cfginfo->dobj.dependencies, cfginfo->dobj.nDeps,
+				 NULL, NULL);
+
+	/* Dump Configuration Comments */
+	resetPQExpBuffer(q);
+	appendPQExpBuffer(q, "TEXT SEARCH CONFIGURATION %s",
+					  fmtId(cfginfo->dobj.name));
+	dumpComment(fout, q->data,
+				NULL, cfginfo->rolname,
+				cfginfo->dobj.catId, 0, cfginfo->dobj.dumpId);
+
+	destroyPQExpBuffer(q);
+	destroyPQExpBuffer(delq);
+	destroyPQExpBuffer(query);
+}
 /*----------
  * Write out grant/revoke information
  *
@@ -5657,8 +6134,8 @@ dumpExternal(TableInfo *tbinfo, PQExpBuffer query, PQExpBuffer q, PQExpBuffer de
 		int j;
 		for (j = 0; j < tbinfo->numatts; j++)
 		{
-			/* Is this one of the table's own attrs, and not dropped ? */
-			if (!tbinfo->inhAttrs[j] && !tbinfo->attisdropped[j])
+			/* Is the attribute not dropped? */
+			if (!tbinfo->attisdropped[j])
 			{
 				/* Format properly if not first attr */
 				if (actual_atts > 0)
@@ -5962,7 +6439,7 @@ dumpTableSchema(Archive *fout, TableInfo *tbinfo)
 		for (j = 0; j < tbinfo->numatts; j++)
 		{
 			/* Is this one of the table's own attrs, and not dropped ? */
-			if (!tbinfo->inhAttrs[j] && !tbinfo->attisdropped[j])
+			if (tbinfo->attislocal[j] && !tbinfo->attisdropped[j])
 			{
 				/* Format properly if not first attr */
 				if (actual_atts > 0)
@@ -6013,7 +6490,7 @@ dumpTableSchema(Archive *fout, TableInfo *tbinfo)
 		for (j = 0; j < tbinfo->numatts; j++)
 		{
 			/* Is this one of the table's own attrs, and not dropped ? */
-			if (!tbinfo->inhAttrs[j] && !tbinfo->attisdropped[j])
+			if (tbinfo->attislocal[j] && !tbinfo->attisdropped[j])
 			{
 				/* Format properly if not first attr */
 				if (actual_atts > 0)
@@ -6033,7 +6510,6 @@ dumpTableSchema(Archive *fout, TableInfo *tbinfo)
 				 * and not to be printed separately.
 				 */
 				if (tbinfo->attrdefs[j] != NULL &&
-					!tbinfo->inhAttrDef[j] &&
 					!tbinfo->attrdefs[j]->separate)
 					appendPQExpBuffer(q, " DEFAULT %s",
 									  tbinfo->attrdefs[j]->adef_expr);
@@ -6387,10 +6863,6 @@ dumpAttrDef(Archive *fout, AttrDefInfo *adinfo)
 	if (!tbinfo->dobj.dump || !adinfo->separate || dataOnly)
 		return;
 
-	/* Don't print inherited defaults, either */
-	if (tbinfo->inhAttrDef[adnum - 1])
-		return;
-
 	q = createPQExpBuffer();
 	delq = createPQExpBuffer();
 
@@ -6498,7 +6970,7 @@ dumpIndex(Archive *fout, IndxInfo *indxinfo)
 		 * DROP must be fully qualified in case same name appears in
 		 * pg_catalog
 		 */
-		appendPQExpBuffer(delq, "DROP INDEX %s.",
+		appendPQExpBuffer(delq, "DROP INDEX IF EXISTS %s.",
 						  fmtId(tbinfo->dobj.namespace->dobj.name));
 		appendPQExpBuffer(delq, "%s;\n",
 						  fmtId(indxinfo->dobj.name));
@@ -6599,11 +7071,11 @@ dumpConstraint(Archive *fout, ConstraintInfo *coninfo)
 		 * DROP must be fully qualified in case same name appears in
 		 * pg_catalog
 		 */
-		appendPQExpBuffer(delq, "ALTER TABLE ONLY %s.",
+		appendPQExpBuffer(delq, "select pg_temp.drop_table_constraint_only_if_exists('%s',",
 						  fmtId(tbinfo->dobj.namespace->dobj.name));
-		appendPQExpBuffer(delq, "%s ",
+		appendPQExpBuffer(delq, " '%s',",
 						  fmtId(tbinfo->dobj.name));
-		appendPQExpBuffer(delq, "DROP CONSTRAINT %s;\n",
+		appendPQExpBuffer(delq, " '%s');\n",
 						  fmtId(coninfo->dobj.name));
 
 		ArchiveEntry(fout, coninfo->dobj.catId, coninfo->dobj.dumpId,
@@ -6631,11 +7103,11 @@ dumpConstraint(Archive *fout, ConstraintInfo *coninfo)
 		 * DROP must be fully qualified in case same name appears in
 		 * pg_catalog
 		 */
-		appendPQExpBuffer(delq, "ALTER TABLE ONLY %s.",
+		appendPQExpBuffer(delq, "select pg_temp.drop_table_constraint_only_if_exists('%s',",
 						  fmtId(tbinfo->dobj.namespace->dobj.name));
-		appendPQExpBuffer(delq, "%s ",
+		appendPQExpBuffer(delq, " '%s',",
 						  fmtId(tbinfo->dobj.name));
-		appendPQExpBuffer(delq, "DROP CONSTRAINT %s;\n",
+		appendPQExpBuffer(delq, " '%s');\n",
 						  fmtId(coninfo->dobj.name));
 
 		ArchiveEntry(fout, coninfo->dobj.catId, coninfo->dobj.dumpId,
@@ -6968,7 +7440,7 @@ dumpTrigger(Archive *fout, TriggerInfo *tginfo)
 	/*
 	 * DROP must be fully qualified in case same name appears in pg_catalog
 	 */
-	appendPQExpBuffer(delqry, "DROP TRIGGER %s ",
+	appendPQExpBuffer(delqry, "DROP TRIGGER IF EXISTS %s ",
 					  fmtId(tginfo->dobj.name));
 	appendPQExpBuffer(delqry, "ON %s.",
 					  fmtId(tbinfo->dobj.namespace->dobj.name));
@@ -7173,7 +7645,7 @@ dumpRule(Archive *fout, RuleInfo *rinfo)
 	/*
 	 * DROP must be fully qualified in case same name appears in pg_catalog
 	 */
-	appendPQExpBuffer(delcmd, "DROP RULE %s ",
+	appendPQExpBuffer(delcmd, "DROP RULE IF EXISTS %s ",
 					  fmtId(rinfo->dobj.name));
 	appendPQExpBuffer(delcmd, "ON %s.",
 					  fmtId(tbinfo->dobj.namespace->dobj.name));
@@ -7264,7 +7736,7 @@ getDependencies(void)
 	appendPQExpBuffer(query, "SELECT "
 					  "classid, objid, refclassid, refobjid, deptype "
 					  "FROM pg_depend "
-					  "WHERE deptype != 'p' "
+					  "WHERE deptype != 'p' AND deptype != 'e' "
 					  "ORDER BY 1,2");
 
 	res = PQexec(g_conn, query->data);
@@ -7770,12 +8242,14 @@ formGenericFilePathName(char *keyword, char *pszBackupDirectory, char *pszBackup
 	{
 		mpp_err_msg(logWarn, progname, "Backup catalog FileName based on path %s and key %s too long",
 					pszBackupDirectory, pszBackupKey);
+		exit_nicely();
 	}
 
 	pszBackupFileName = (char *) malloc(sizeof(char) * (1 + len));
 	if (pszBackupFileName == NULL)
 	{
 		mpp_err_msg(logError, progname, "out of memory");
+		exit_nicely();
 	}
 
 	strcpy(pszBackupFileName, pszBackupDirectory);
@@ -7806,7 +8280,7 @@ dumpDatabaseDefinition()
 	FILE	   *fcat;
 	char	   *pszBackupFileName;
 	PQExpBuffer dbQry = createPQExpBuffer();
-	PQExpBuffer creaQry = createPQExpBuffer();
+	PQExpBuffer createQry = createPQExpBuffer();
 	int			ntups;
 	int			i_dba,
 				i_encoding,
@@ -7876,33 +8350,35 @@ dumpDatabaseDefinition()
 	encoding = PQgetvalue(res, 0, i_encoding);
 	tablespace = PQgetvalue(res, 0, i_tablespace);
 
-	appendPQExpBuffer(creaQry, "CREATE DATABASE %s WITH TEMPLATE = template0",
+	appendPQExpBuffer(createQry, "CREATE DATABASE %s WITH TEMPLATE = template0",
 					  fmtId(datname));
 	if (strlen(encoding) > 0)
 	{
-		appendPQExpBuffer(creaQry, " ENCODING = ");
-		appendStringLiteralConn(creaQry, encoding, g_conn);
+		appendPQExpBuffer(createQry, " ENCODING = ");
+		appendStringLiteralConn(createQry, encoding, g_conn);
 	}
 	if (strlen(dba) > 0)
 	{
-		appendPQExpBuffer(creaQry, " OWNER = %s", dba);
+		appendPQExpBuffer(createQry, " OWNER = %s", fmtId(dba));
 	}
 
 	if (strlen(tablespace) > 0 && strcmp(tablespace, "pg_default") != 0)
-		appendPQExpBuffer(creaQry, " TABLESPACE = %s",
+		appendPQExpBuffer(createQry, " TABLESPACE = %s",
 						  fmtId(tablespace));
-	appendPQExpBuffer(creaQry, ";\n");
+	appendPQExpBuffer(createQry, ";\n");
 
-	/* write the CREATE DATABASE command to the file */
+    dumpDatabaseConfig(datname, &createQry);
+
+	/* write the CREATE DATABASE and ALTER DATABASE commands to the file */
 	if (fcat != NULL)
 	{
-		fprintf(fcat, "%s", creaQry->data);
+		fprintf(fcat, "%s", createQry->data);
 		fclose(fcat);
 	}
 
 	PQclear(res);
 	destroyPQExpBuffer(dbQry);
-	destroyPQExpBuffer(creaQry);
+	destroyPQExpBuffer(createQry);
 }
 
 #ifdef USE_DDBOOST
@@ -7918,7 +8394,7 @@ dumpDatabaseDefinitionToDDBoost()
 	PGresult   *res;
 	char	   *pszBackupFileName;
 	PQExpBuffer dbQry = createPQExpBuffer();
-	PQExpBuffer creaQry = createPQExpBuffer();
+	PQExpBuffer createQry = createPQExpBuffer();
 	int			ntups;
 	int			i_dba,
 				i_encoding,
@@ -8014,26 +8490,28 @@ dumpDatabaseDefinitionToDDBoost()
 	encoding = PQgetvalue(res, 0, i_encoding);
 	tablespace = PQgetvalue(res, 0, i_tablespace);
 
-	appendPQExpBuffer(creaQry, "CREATE DATABASE %s WITH TEMPLATE = template0",
+	appendPQExpBuffer(createQry, "CREATE DATABASE %s WITH TEMPLATE = template0",
 					  fmtId(datname));
 	if (strlen(encoding) > 0)
 	{
-		appendPQExpBuffer(creaQry, " ENCODING = ");
-		appendStringLiteralConn(creaQry, encoding, g_conn);
+		appendPQExpBuffer(createQry, " ENCODING = ");
+		appendStringLiteralConn(createQry, encoding, g_conn);
 	}
 	if (strlen(dba) > 0)
 	{
-		appendPQExpBuffer(creaQry, " OWNER = %s", dba);
+		appendPQExpBuffer(createQry, " OWNER = %s", dba);
 	}
 
 	if (strlen(tablespace) > 0 && strcmp(tablespace, "pg_default") != 0)
-		appendPQExpBuffer(creaQry, " TABLESPACE = %s",
+		appendPQExpBuffer(createQry, " TABLESPACE = %s",
 						  fmtId(tablespace));
-	appendPQExpBuffer(creaQry, ";\n");
+	appendPQExpBuffer(createQry, ";\n");
 
-	/* write the CREATE DATABASE command to the file */
-	nmemb = strlen(creaQry->data);
-	err = ddp_write(handle, creaQry->data, nmemb, offset, &ret_count);
+	dumpDatabaseConfig(datname, &createQry);
+
+	/* write the CREATE DATABASE and ALTER DATABASE commands to the file */
+	nmemb = strlen(createQry->data);
+	err = ddp_write(handle, createQry->data, nmemb, offset, &ret_count);
 	if (ret_count != nmemb)
 	{
 		mpp_err_msg(logError, progname, "write to cdatabase file failed on ddboost\n");
@@ -8043,10 +8521,77 @@ dumpDatabaseDefinitionToDDBoost()
 	ddp_close_file(handle);
 	PQclear(res);
 	destroyPQExpBuffer(dbQry);
-	destroyPQExpBuffer(creaQry);
+	destroyPQExpBuffer(createQry);
 }
 #endif
 
+/*
+ * Dump database-specific configuration such as search_path,
+ * optimizer, and gp_default_storage_options
+ */
+static void
+dumpDatabaseConfig(const char *dbname, PQExpBuffer *buf)
+{
+	int			count = 1;
+    PQExpBuffer qryBuf = createPQExpBuffer();
+
+	for (;;)
+	{
+		PGresult   *res;
+
+		printfPQExpBuffer(qryBuf, "SELECT datconfig[%d] FROM pg_database WHERE datname = ", count);
+		appendStringLiteralConn(qryBuf, dbname, g_conn);
+		appendPQExpBuffer(qryBuf, ";");
+
+		res = PQexec(g_conn, qryBuf->data);
+		if (!PQgetisnull(res, 0, 0))
+		{
+			makeAlterConfigCommand(PQgetvalue(res, 0, 0),
+								   "DATABASE", dbname, buf);
+			PQclear(res);
+			count++;
+		}
+		else
+		{
+			PQclear(res);
+			break;
+		}
+	}
+
+	destroyPQExpBuffer(qryBuf);
+}
+
+/*
+ * Helper function for dumpDatabaseConfig().
+ */
+static void
+makeAlterConfigCommand(const char *arrayitem,
+					   const char *type, const char *name, PQExpBuffer *buf)
+{
+	char	   *pos;
+	char	   *mine;
+
+	mine = strdup(arrayitem);
+	pos = strchr(mine, '=');
+	if (pos == NULL)
+		return;
+
+	*pos = 0;
+	appendPQExpBuffer(*buf, "ALTER %s %s ", type, fmtId(name));
+	appendPQExpBuffer(*buf, "SET %s TO ", fmtId(mine));
+
+	/*
+	 * Some GUC variable names are 'LIST' type and hence must not be quoted.
+	 */
+	if (pg_strcasecmp(mine, "DateStyle") == 0
+		|| pg_strcasecmp(mine, "search_path") == 0)
+		appendPQExpBuffer(*buf, "%s", pos + 1);
+	else
+		appendStringLiteralConn(*buf, pos + 1, g_conn);
+	appendPQExpBuffer(*buf, ";\n");
+
+	free(mine);
+}
 
 static int
 _parse_version(ArchiveHandle *AH, const char *versionString)

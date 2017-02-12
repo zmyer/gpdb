@@ -8,12 +8,16 @@
 
 #include <float.h>
 #include <math.h>
+#include <unistd.h>
 
+#include "pgstat.h"
 #include "access/transam.h"
 #include "access/xact.h"
 #include "catalog/pg_language.h"
 #include "catalog/pg_type.h"
 #include "cdb/memquota.h"
+#include "cdb/cdbgang.h"
+#include "cdb/cdbvars.h"
 #include "commands/sequence.h"
 #include "commands/trigger.h"
 #include "executor/executor.h"
@@ -71,12 +75,32 @@ extern Datum checkResourceQueueMemoryLimits(PG_FUNCTION_ARGS);
 
 extern Datum checkRelationAfterInvalidation(PG_FUNCTION_ARGS);
 
+/* Gang management test support */
+extern Datum gangRaiseInfo(PG_FUNCTION_ARGS);
+
+/* brutally cleanup all gangs */
+extern Datum cleanupAllGangs(PG_FUNCTION_ARGS);
+
+/* check if QD has gangs exist */
+extern Datum hasGangsExist(PG_FUNCTION_ARGS);
+
+/*
+ * check if backends exist
+ * Args:
+ * timeout: = 0, retrun result immediately
+ * timeout: > 0, block until no backends exist or timeout expired.
+ */
+extern Datum hasBackendsExist(PG_FUNCTION_ARGS);
+
 /*
  * test_atomic_ops was backported from 9.5. This prototype doesn't appear
  * in the upstream version, because the PG_FUNCTION_INFO_V1() macro includes
  * it since 9.4.
  */
 extern Datum test_atomic_ops(PG_FUNCTION_ARGS);
+
+extern Datum udf_setenv(PG_FUNCTION_ARGS);
+extern Datum udf_unsetenv(PG_FUNCTION_ARGS);
 
 #ifdef PG_MODULE_MAGIC
 PG_MODULE_MAGIC;
@@ -2186,10 +2210,14 @@ project_describe(PG_FUNCTION_ARGS)
 	 */
 	avalue = DatumGetInt32(ExecEvalFunctionArgToConst(fexpr, 1, &isnull));
 	if (isnull)
-		elog(ERROR, "unable to resolve type for function");
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("unable to resolve type for function")));
 
 	if (avalue < 1 || avalue > tdesc->natts)
-		elog(ERROR, "invalid column position %d", avalue);
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid column position %d", avalue)));
 
 	/* Build an output tuple a single column based on the column number above */
 	odesc = CreateTemplateTupleDesc(1, false);
@@ -2409,6 +2437,78 @@ checkRelationAfterInvalidation(PG_FUNCTION_ARGS)
 	relation_close(relation, AccessShareLock);
 
 	PG_RETURN_BOOL(true);
+}
+
+/*
+ * Helper function to raise an INFO with options including DETAIL, HINT
+ * From PostgreSQL 8.4, we can do this in plpgsql by RAISE statement, but now we
+ * use PL/C.
+ */
+PG_FUNCTION_INFO_V1(gangRaiseInfo);
+Datum
+gangRaiseInfo(PG_FUNCTION_ARGS)
+{
+	ereport(INFO,
+			(errmsg("testing hook function MPPnoticeReceiver"),
+			 errdetail("this test aims at covering code paths not hit before"),
+			 errhint("no special hint"),
+			 errcontext("PL/C function defined in regress.c"),
+			 errposition(0)));
+
+	PG_RETURN_BOOL(true);
+}
+
+PG_FUNCTION_INFO_V1(cleanupAllGangs);
+Datum
+cleanupAllGangs(PG_FUNCTION_ARGS)
+{
+	if (Gp_role != GP_ROLE_DISPATCH)
+		elog(ERROR, "cleanupAllGangs can only be executed on master");
+	DisconnectAndDestroyAllGangs(false);
+	PG_RETURN_BOOL(true);
+}
+
+PG_FUNCTION_INFO_V1(hasGangsExist);
+Datum
+hasGangsExist(PG_FUNCTION_ARGS)
+{
+	if (Gp_role != GP_ROLE_DISPATCH)
+		elog(ERROR, "hasGangsExist can only be executed on master");
+	if (GangsExist())
+		PG_RETURN_BOOL(true);
+	PG_RETURN_BOOL(false);
+}
+
+PG_FUNCTION_INFO_V1(hasBackendsExist);
+Datum
+hasBackendsExist(PG_FUNCTION_ARGS)
+{
+	int beid;
+	int32 result;
+	int timeout = PG_GETARG_INT32(0);
+	if (timeout < 0)
+		elog(ERROR, "timeout is expected not to be negative");
+	int pid = getpid();
+	while (timeout >= 0)
+	{
+		result = 0;
+		pgstat_clear_snapshot();
+		int tot_backends = pgstat_fetch_stat_numbackends();
+		for (beid = 1; beid <= tot_backends; beid++)
+		{
+			PgBackendStatus *beentry = pgstat_fetch_stat_beentry(beid);
+			if (beentry && beentry->st_procpid >0 && beentry->st_procpid != pid)
+				result++;
+		}
+		if (result == 0 || timeout == 0)
+			break;
+		sleep(1); /* 1 second */
+		timeout--;
+	}
+	
+	if (result > 0)
+		PG_RETURN_BOOL(true);
+	PG_RETURN_BOOL(false);
 }
 
 #ifndef PG_HAVE_ATOMIC_FLAG_SIMULATION
@@ -2647,4 +2747,25 @@ test_atomic_ops(PG_FUNCTION_ARGS)
 #endif
 
 	PG_RETURN_BOOL(true);
+}
+
+PG_FUNCTION_INFO_V1(udf_setenv);
+Datum
+udf_setenv(PG_FUNCTION_ARGS)
+{
+	const char *name = (const char *) PG_GETARG_CSTRING(0);
+	const char *value = (const char *) PG_GETARG_CSTRING(1);
+	int ret = setenv(name, value, 1);
+
+	PG_RETURN_BOOL(ret == 0);
+}
+
+
+PG_FUNCTION_INFO_V1(udf_unsetenv);
+Datum
+udf_unsetenv(PG_FUNCTION_ARGS)
+{
+	const char *name = (const char *) PG_GETARG_CSTRING(0);
+	int ret = unsetenv(name);
+	PG_RETURN_BOOL(ret == 0);
 }

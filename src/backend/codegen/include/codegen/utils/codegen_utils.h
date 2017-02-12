@@ -23,12 +23,14 @@
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <unordered_map>
 #include <vector>
 
 #include "codegen/utils/annotated_type.h"
 #include "codegen/utils/macros.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
+#include "llvm/Analysis/CallGraph.h"
 #include "llvm/ExecutionEngine/ExecutionEngine.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
@@ -40,7 +42,9 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Value.h"
+#include "llvm/Transforms/Utils/Cloning.h"
 
 namespace gpcodegen {
 
@@ -48,7 +52,17 @@ namespace gpcodegen {
 namespace codegen_utils_detail {
 template <typename, typename> class ConstantMaker;
 template <typename> class FunctionTypeUnpacker;
+template <typename, typename> class ArithOpMaker;
 }  // namespace codegen_utils_detail
+
+
+// Easy static check to match integer macros with enum equivalents
+#define STATIC_ASSERT_OPTIMIZATION_LEVEL(ename, mname) \
+    static_assert(gpcodegen::CodegenUtils::OptimizationLevel::ename == \
+    gpcodegen::CodegenUtils::OptimizationLevel(mname), \
+    "gpcodegen::CodegenUtils::OptimizationLevel::" #ename  \
+    " == " #mname)
+
 
 /** \addtogroup gpcodegen
  *  @{
@@ -80,7 +94,7 @@ class CodegenUtils {
    **/
   explicit CodegenUtils(llvm::StringRef module_name);
 
-  ~CodegenUtils() {
+  virtual ~CodegenUtils() {
   }
 
   /**
@@ -260,25 +274,96 @@ class CodegenUtils {
    **/
   llvm::BasicBlock* CreateBasicBlock(const llvm::Twine& name,
                                      llvm::Function* parent) {
-#ifdef GPCODEGEN_DEBUG
+#ifdef CODEGEN_DEBUG
     // DEBUG-only assertion to make sure that caller does not try to generate IR
     // for an external function.
     assert(!parent->getName().startswith(kExternalFunctionNamePrefix));
-#endif  // GPCODEGEN_DEBUG
+#endif  // CODEGEN_DEBUG
     return llvm::BasicBlock::Create(context_, name, parent, nullptr);
   }
 
   /**
-   * @brief Register an external function from the calling environment so that
-   *        it can be called from generated code.
+   * @brief Use LLVM intrinsic to create Multiplication with overflow
+   *        instruction
    *
-   * @note This works for plain functions and for static methods of classes,
-   *       but not instance methods of classes.
-   * @note If a function has multiple overloaded versions, then the template
-   *       parameters of this method can be explicitly set to disambiguate
-   *       which version of the function is desired. For non-overloaded
-   *       functions, this is not necessary and the function's type signature
-   *       can be automatically inferred.
+   * @tparam CppType  CppType for multiplication
+   * @param arg0  First argument
+   * @param arg1  Second argument
+   *
+   * @return LLVM Value as a pair of results and overflow flag.
+   **/
+  template <typename CppType>
+  llvm::Value* CreateMulOverflow(llvm::Value* arg0, llvm::Value* arg1);
+
+  /**
+   * @brief Use LLVM intrinsic to create Add with overflow
+   *        instruction
+   *
+   * @tparam CppType  CppType for add
+   * @param arg0  First argument
+   * @param arg1  Second argument
+   *
+   * @return LLVM Value as a pair of results and overflow flag.
+   **/
+  template <typename CppType>
+  llvm::Value* CreateAddOverflow(llvm::Value* arg0, llvm::Value* arg1);
+
+  /**
+     * @brief Use LLVM intrinsic to increase the value of a variable by one
+     *        with overflow instruction
+     *
+     * @tparam CppType  CppType for add
+     * @param arg       Input variable
+     *
+     * @return LLVM Value as a pair of results and overflow flag.
+     **/
+  template <typename CppType>
+  llvm::Value* CreateIncOverflow(llvm::Value* arg);
+
+  /**
+   * @brief Use LLVM intrinsic to create Subtract with overflow
+   *        instruction
+   *
+   * @tparam CppType  CppType for subtract
+   * @param arg0  First argument
+   * @param arg1  Second argument
+   *
+   * @return LLVM Value as a pair of results and overflow flag.
+   **/
+  template <typename CppType>
+  llvm::Value* CreateSubOverflow(llvm::Value* arg0, llvm::Value* arg1);
+
+  /**
+   * @brief Cast given llvm::value to DestType.
+   *
+   * @tparam DestType  Destination type
+   * @tparam SrcType   Source type
+   * @param value  Value that needs to be casted. Expected to be of same type as
+   *               SrcType
+   *
+   * @return LLVM Value of DestType
+   **/
+  template <typename DestType, typename SrcType>
+  llvm::Value* CreateCast(llvm::Value* value);
+
+  /**
+   * @brief Similar to tuple in C++, this helps to create fixed-size collection
+   *        of hetrogeneous values.
+   *
+   * @param members Different types of values that needs to be in the
+   *                collection
+   * @param name    Optional arguments to specify the name of the returned
+   *                variable in IR
+   *
+   * @return Struct object allocated in stack, that contains all members.
+   **/
+  llvm::AllocaInst* CreateMakeTuple(const std::vector<llvm::Value*>& members,
+                                const std::string& name = "");
+
+  /**
+   * @brief Register an external function if previously unregistered. Otherwise
+   *        return a pointer to the previously registered llvm::Function
+   *
    * @warning This method returns a pointer to an llvm::Function object. The
    *          caller should NOT attempt to add BasicBlocks to the function, as
    *          that would cause conflicts when mapping the function to its
@@ -299,35 +384,40 @@ class CodegenUtils {
    *        ClangCompiler::GenerateExternalFunctionDeclarations()).
    * @param is_var_arg Whether the function has trailing variable arguments list
    * @return A callable LLVM function.
-   **/
+   */
   template <typename ReturnType, typename... ArgumentTypes>
-  llvm::Function* RegisterExternalFunction(
+  llvm::Function* GetOrRegisterExternalFunction(
       ReturnType (*external_function)(ArgumentTypes...),
       const std::string& name = "",
       const bool is_var_arg = false) {
-    external_functions_.emplace_back(
+    std::unordered_map<std::uint64_t, std::string>::iterator it;
+    bool key_absent;
+
+    std::tie(it, key_absent) = external_functions_.emplace(
+        reinterpret_cast<std::uint64_t>(external_function),
         name.empty() ? GenerateExternalFunctionName()
-                     : name,
-        reinterpret_cast<std::uint64_t>(external_function));
+                     : name);
 
-    if (!name.empty()) {
-      RecordNamedExternalFunction<ReturnType, ArgumentTypes...>(name);
+    if (!key_absent) {
+      return module()->getFunction(it->second);
+    } else {
+      if (!name.empty()) {
+        RecordNamedExternalFunction<ReturnType, ArgumentTypes...>(name);
+      }
+      return CreateFunctionImpl<ReturnType, ArgumentTypes...>(
+          it->second, is_var_arg);
     }
-
-    return CreateFunctionImpl<ReturnType, ArgumentTypes...>(
-        external_functions_.back().first, is_var_arg);
   }
 
   template <typename ReturnType, typename... ArgumentTypes>
-  llvm::Function* RegisterExternalFunction(
+  llvm::Function* GetOrRegisterExternalFunction(
       ReturnType (*external_function)(ArgumentTypes..., ...),
       const std::string& name = "") {
-    return RegisterExternalFunction(
-        reinterpret_cast<ReturnType (*) (ArgumentTypes...)>(external_function),
+    return GetOrRegisterExternalFunction(
+        reinterpret_cast<ReturnType (*)(ArgumentTypes...)>(external_function),
         name,
         true);
   }
-
 
   /**
    * @brief Optimize the code in the module managed by this CodegenUtils before
@@ -410,6 +500,39 @@ class CodegenUtils {
   void CreateFallback(llvm::Function* regular_function,
                       llvm::Function* generated_function);
 
+  /*
+   * @brief Force inline an LLVM function at the call site. Note that this only
+   *        does one level of inlining.
+   *
+   * @param LLVM call Instruction where the called function should be inlined
+   * @return false if it is not possible to inline. true otherwise.
+   */
+  bool InlineFunction(llvm::CallInst* call_inst) {
+    // Check that the call instruction belongs to a BasicBlock which is part of
+    // a valid function
+    if (!(call_inst && call_inst->getParent()
+          && call_inst->getParent()->getParent())) {
+      return false;
+    }
+    llvm::InlineFunctionInfo info;
+    return llvm::InlineFunction(llvm::CallSite(call_inst), info);
+  }
+
+  /*
+   * @brief Dump the IR of all underlying LLVM modules.
+   *
+   * @param out  Stream to send the output to - as required by llvm::Value::print
+   */
+  void PrintUnderlyingModules(llvm::raw_ostream& out); // NOLINT
+
+ protected:
+  /**
+   * @return LLVMContext
+   **/
+  llvm::LLVMContext* context() {
+    return &context_;
+  }
+
  private:
   // Give ClangCompiler access to 'context_' add allow it to add compiled C++
   // sources to 'auxiliary_modules_'.
@@ -417,6 +540,9 @@ class CodegenUtils {
 
   template <typename, typename>
   friend class codegen_utils_detail::ConstantMaker;
+
+  template <typename, typename>
+  friend class codegen_utils_detail::ArithOpMaker;
 
   template <typename>
   friend class codegen_utils_detail::FunctionTypeUnpacker;
@@ -495,6 +621,13 @@ class CodegenUtils {
       MemberType StructType::* pointer_to_member,
       TailPointerToMemberTypes&&... tail_pointers_to_members);
 
+  // Helper method to call any llvm intrinsic feature. E.g. CreateMulOverflow.
+  // TODO(krajaramn) : Support any number of arguments
+  llvm::Value* CreateIntrinsicInstrCall(llvm::Intrinsic::ID Id,
+                                        llvm::ArrayRef<llvm::Type*> Tys,
+                                        llvm::Value* arg0,
+                                        llvm::Value* arg1);
+
   // Helper method for RegisterExternalFunction() that appends an entry for an
   // external function to 'named_external_functions_'.
   template <typename ReturnType, typename... ArgumentTypes>
@@ -511,11 +644,10 @@ class CodegenUtils {
 
   std::unique_ptr<llvm::ExecutionEngine> engine_;
 
-  // Pairs of (function_name, address) for each external function registered by
-  // RegisterExternalFunction(). PrepareForExecution() adds a mapping for each
-  // such function to '*engine_' after creating it.
-  std::vector<std::pair<const std::string, const std::uint64_t>>
-      external_functions_;
+  // Map of (address, function_name) for each external function registered by
+  // GetOrRegisterExternalFunction(). PrepareForExecution() adds a mapping for
+  // each such function to '*engine_' after creating it.
+  std::unordered_map<std::uint64_t, std::string> external_functions_;
 
   // Keep track of additional information about named external functions so that
   // ClangCompiler can reconstruct accurate declarations for them.
@@ -741,6 +873,18 @@ class TypeMaker<ReferentType&> {
   }
 };
 
+// Partial specialization for C/C++ array types, which are converted to their
+// corresponding llvm array types
+template <typename ArrayElementType, size_t N>
+class TypeMaker<ArrayElementType[N]> {
+ public:
+  static llvm::Type* Get(llvm::LLVMContext* context) {
+    llvm::Type* unit_type =
+      codegen_utils_detail::TypeMaker<ArrayElementType>::Get(context);
+    return llvm::ArrayType::get(unit_type, N);
+  }
+};
+
 }  // namespace codegen_utils_detail
 
 template <typename CppType>
@@ -817,7 +961,9 @@ llvm::FunctionType* CodegenUtils::GetFunctionType(const bool is_var_arg) {
   codegen_utils_detail::TypeVectorBuilder<ArgumentTypes...>::AppendTypes(
       this,
       &argument_types);
-  return llvm::FunctionType::get(GetType<ReturnType>(), argument_types, is_var_arg);
+  return llvm::FunctionType::get(GetType<ReturnType>(),
+                                 argument_types,
+                                 is_var_arg);
 }
 
 // ----------------------------------------------------------------------------
@@ -1063,7 +1209,7 @@ template <typename ReturnType, typename... ArgumentTypes>
 auto CodegenUtils::GetFunctionPointerImpl(const std::string& function_name)
     -> ReturnType (*)(ArgumentTypes...) {
   if (engine_) {
-#ifdef GPCODEGEN_DEBUG
+#ifdef CODEGEN_DEBUG
     CheckFunctionType(function_name,
                       GetFunctionType<ReturnType, ArgumentTypes...>());
 #endif
@@ -1077,7 +1223,6 @@ auto CodegenUtils::GetFunctionPointerImpl(const std::string& function_name)
 template <typename FunctionType>
 void CodegenUtils::CreateFallback(llvm::Function* regular_function,
                                   llvm::Function* generated_function) {
-
   assert(regular_function != nullptr);
   assert(generated_function != nullptr);
 
@@ -1089,11 +1234,495 @@ void CodegenUtils::CreateFallback(llvm::Function* regular_function,
   llvm::CallInst* call_fallback_func = ir_builder()->CreateCall(
       regular_function, forwarded_args);
   /* Return the result of the call, or void if the function returns void. */
-  if (std::is_same<typename codegen_utils_detail::FunctionTypeUnpacker<FunctionType>::R, void>::value) {
+  if (std::is_same<typename
+      codegen_utils_detail::FunctionTypeUnpacker<FunctionType>::R,
+                                                 void>::value) {
     ir_builder()->CreateRetVoid();
   } else {
     ir_builder()->CreateRet(call_fallback_func);
   }
+}
+
+// ----------------------------------------------------------------------------
+// Implementation of CodegenUtils::CreateMulOverflow, CreateSubOverflow...
+
+// Helper template classes are nested in this namespace and are not considered
+// part of the public API.
+namespace codegen_utils_detail {
+
+// ArithOpMaker has various template specializations to handle different
+// categories of C++ types. The specializations provide a static method
+// CreateMulOverflow(), CreateAddOverflow(), CreateSubOverflow() etc..
+// that takes an CodegenUtils and arguments and call respective llvm instruction
+// for given CppType.
+// The base version of this template is empty.
+template <typename CppType, typename Enable = void>
+class ArithOpMaker {
+};
+
+// Partial specialization for unsigned integer types (including bool).
+template <typename UnsignedIntType>
+class ArithOpMaker<
+UnsignedIntType,
+typename std::enable_if<
+std::is_integral<UnsignedIntType>::value
+&& std::is_unsigned<UnsignedIntType>::value>::type> {
+ public:
+  static llvm::Value* CreateAddOverflow(CodegenUtils* generator,
+                                        llvm::Value* arg0,
+                                        llvm::Value* arg1) {
+    Checker(generator->GetType<UnsignedIntType>(), arg0, arg1);
+    return generator->CreateIntrinsicInstrCall(
+        llvm::Intrinsic::uadd_with_overflow,
+        generator->GetType<UnsignedIntType>(),
+        arg0,
+        arg1);
+  }
+  static llvm::Value* CreateSubOverflow(CodegenUtils* generator,
+                                        llvm::Value* arg0,
+                                        llvm::Value* arg1) {
+    Checker(generator->GetType<UnsignedIntType>(), arg0, arg1);
+    return generator->CreateIntrinsicInstrCall(
+        llvm::Intrinsic::usub_with_overflow,
+        generator->GetType<UnsignedIntType>(),
+        arg0,
+        arg1);
+  }
+  static llvm::Value* CreateMulOverflow(CodegenUtils* generator,
+                                        llvm::Value* arg0,
+                                        llvm::Value* arg1) {
+    Checker(generator->GetType<UnsignedIntType>(), arg0, arg1);
+    return generator->CreateIntrinsicInstrCall(
+        llvm::Intrinsic::umul_with_overflow,
+        generator->GetType<UnsignedIntType>(),
+        arg0,
+        arg1);
+  }
+
+ private:
+  static void Checker(llvm::Type* llvm_unsigned_type,
+                      llvm::Value* arg0,
+                      llvm::Value* arg1) {
+    assert(nullptr != arg0 && nullptr != arg0->getType());
+    assert(nullptr != arg1 && nullptr != arg1->getType());
+    assert(arg0->getType()->isIntegerTy());
+    assert(arg0->getType()->getScalarSizeInBits() ==
+        llvm_unsigned_type->getScalarSizeInBits());
+    assert(arg1->getType()->isIntegerTy());
+    assert(arg1->getType()->getScalarSizeInBits() ==
+            llvm_unsigned_type->getScalarSizeInBits());
+  }
+};
+
+// Partial specialization for signed integer types.
+template <typename SignedIntType>
+class ArithOpMaker<
+SignedIntType,
+typename std::enable_if<
+std::is_integral<SignedIntType>::value
+&& std::is_signed<SignedIntType>::value>::type> {
+ public:
+  static llvm::Value* CreateAddOverflow(CodegenUtils* generator,
+                                        llvm::Value* arg0,
+                                        llvm::Value* arg1) {
+    Checker(generator->GetType<SignedIntType>(), arg0, arg1);
+    return generator->CreateIntrinsicInstrCall(
+        llvm::Intrinsic::sadd_with_overflow,
+        generator->GetType<SignedIntType>(),
+        arg0,
+        arg1);
+  }
+
+  static llvm::Value* CreateSubOverflow(CodegenUtils* generator,
+                                        llvm::Value* arg0,
+                                        llvm::Value* arg1) {
+    Checker(generator->GetType<SignedIntType>(), arg0, arg1);
+    return generator->CreateIntrinsicInstrCall(
+        llvm::Intrinsic::ssub_with_overflow,
+        generator->GetType<SignedIntType>(),
+        arg0,
+        arg1);
+  }
+
+  static llvm::Value* CreateMulOverflow(CodegenUtils* generator,
+                                        llvm::Value* arg0,
+                                        llvm::Value* arg1) {
+    Checker(generator->GetType<SignedIntType>(), arg0, arg1);
+    return generator->CreateIntrinsicInstrCall(
+        llvm::Intrinsic::smul_with_overflow,
+        generator->GetType<SignedIntType>(),
+        arg0,
+        arg1);
+  }
+ private:
+  static void Checker(llvm::Type* llvm_signed_type,
+                      llvm::Value* arg0,
+                      llvm::Value* arg1) {
+    assert(nullptr != arg0 && nullptr != arg0->getType());
+    assert(nullptr != arg1 && nullptr != arg1->getType());
+    assert(arg0->getType()->isIntegerTy());
+    assert(arg0->getType()->getScalarSizeInBits() ==
+        llvm_signed_type->getScalarSizeInBits());
+    assert(arg1->getType()->isIntegerTy());
+    assert(arg1->getType()->getScalarSizeInBits() ==
+            llvm_signed_type->getScalarSizeInBits());
+  }
+};
+
+// Partial specialization for enums (mapped to the underlying integer type).
+template <typename EnumType>
+class ArithOpMaker<
+EnumType,
+typename std::enable_if<std::is_enum<EnumType>::value>::type> {
+ public:
+};
+
+// Explicit specialization for 32-bit float.
+template <>
+class ArithOpMaker<float> {
+ public:
+};
+
+// Explicit specialization for 64-bit double.
+template <>
+class ArithOpMaker<double> {
+ public:
+  static llvm::Value* CreateAddOverflow(CodegenUtils* generator,
+                                        llvm::Value* arg0,
+                                        llvm::Value* arg1) {
+    Checker(arg0, arg1);
+
+    auto irb = generator->ir_builder();
+    llvm::Value* llvm_result = irb->CreateFAdd(arg0, arg1);
+
+    llvm::AllocaInst* llvm_tuple_ptr =
+        CreateResultWithOverflow(generator,
+                                 llvm_result,
+                                 arg0,
+                                 arg1,
+                                 generator->GetConstant<bool>(true));
+    return irb->CreateLoad(llvm_tuple_ptr);
+  }
+
+  static llvm::Value* CreateSubOverflow(CodegenUtils* generator,
+                                        llvm::Value* arg0,
+                                        llvm::Value* arg1) {
+    Checker(arg0, arg1);
+    auto irb = generator->ir_builder();
+    llvm::Value* llvm_result = irb->CreateFSub(arg0, arg1);
+
+    llvm::AllocaInst* llvm_tuple_ptr =
+        CreateResultWithOverflow(generator,
+                                 llvm_result,
+                                 arg0,
+                                 arg1,
+                                 generator->GetConstant<bool>(true));
+    return irb->CreateLoad(llvm_tuple_ptr);
+  }
+
+  static llvm::Value* CreateMulOverflow(CodegenUtils* generator,
+                                        llvm::Value* arg0,
+                                        llvm::Value* arg1) {
+    Checker(arg0, arg1);
+    auto irb = generator->ir_builder();
+    llvm::Value* llvm_result = irb->CreateFMul(arg0, arg1);
+
+    llvm::Value* llvm_arg0_zero = irb->
+        CreateFCmpOEQ(arg0, generator->GetConstant<double>(0), "is_arg0_zero");
+    llvm::Value* llvm_arg1_zero = irb->
+        CreateFCmpOEQ(arg1, generator->GetConstant<double>(0), "is_arg1_zero");
+    llvm::Value* llvm_zero_valid = irb->CreateOr(llvm_arg0_zero,
+                                                 llvm_arg1_zero,
+                                                 "llvm_zero_valid");
+    llvm::AllocaInst* llvm_tuple_ptr =
+        CreateResultWithOverflow(generator,
+                                 llvm_result,
+                                 arg0,
+                                 arg1,
+                                 llvm_zero_valid);
+    return irb->CreateLoad(llvm_tuple_ptr);
+  }
+
+
+ private:
+  static void Checker(llvm::Value* arg0,
+                      llvm::Value* arg1) {
+    assert(nullptr != arg0 && nullptr != arg0->getType());
+    assert(nullptr != arg1 && nullptr != arg1->getType());
+    assert(arg0->getType()->isDoubleTy());
+    assert(arg1->getType()->isDoubleTy());
+  }
+
+
+  // Implements CHECKFLOATVAL(float_utils.h), but instead of error out,
+  // it returns true when an overflow occurs.
+  static bool CheckDoubleVal(double val,
+                             double arg0,
+                             double arg1,
+                             bool zero_is_valid) {
+    bool inf_is_valid = isinf(arg0) || isinf(arg1);
+    if (isinf(val) && !(inf_is_valid)) {
+      return true;
+    }
+    if ((val) == 0.0 && !(zero_is_valid)) {
+      return true;
+    }
+    return false;
+  }
+
+  // Returns a struct that contains the result value and the overflow flag of
+  // the operation. It mimics llvm integer intrinsics.
+  static llvm::AllocaInst* CreateResultWithOverflow(
+      CodegenUtils* generator,
+      llvm::Value* llvm_result,
+      llvm::Value* arg0,
+      llvm::Value* arg1,
+      llvm::Value* zero_is_valid) {
+    auto irb = generator->ir_builder();
+    llvm::Function* llvm_float_overflow_func =
+        generator->GetOrRegisterExternalFunction(
+            CheckDoubleVal, "CheckDoubleVal");
+    llvm::Value* llvm_overflow = irb->CreateCall(
+        llvm_float_overflow_func,
+        { llvm_result, arg0, arg1, zero_is_valid});
+    llvm::AllocaInst* llvm_tuple_ptr = generator->CreateMakeTuple(
+        { llvm_result, llvm_overflow }, "float_result");
+    return llvm_tuple_ptr;
+  }
+};
+
+}  // namespace codegen_utils_detail
+
+
+template <typename CppType>
+llvm::Value* CodegenUtils::CreateAddOverflow(llvm::Value* arg0,
+                                             llvm::Value* arg1) {
+  return codegen_utils_detail::ArithOpMaker<CppType>::CreateAddOverflow(this,
+                                                                        arg0,
+                                                                        arg1);
+}
+
+template <typename CppType>
+llvm::Value* CodegenUtils::CreateIncOverflow(llvm::Value* arg) {
+  return codegen_utils_detail::ArithOpMaker<CppType>::
+      CreateAddOverflow(this, arg, GetConstant<CppType>(1));
+}
+
+template <typename CppType>
+llvm::Value* CodegenUtils::CreateSubOverflow(llvm::Value* arg0,
+                                             llvm::Value* arg1) {
+  return codegen_utils_detail::ArithOpMaker<CppType>::CreateSubOverflow(this,
+                                                                        arg0,
+                                                                        arg1);
+}
+
+template <typename CppType>
+llvm::Value* CodegenUtils::CreateMulOverflow(llvm::Value* arg0,
+                                             llvm::Value* arg1) {
+  return codegen_utils_detail::ArithOpMaker<CppType>::CreateMulOverflow(this,
+                                                                        arg0,
+                                                                        arg1);
+}
+
+// ----------------------------------------------------------------------------
+// Implementation of CodegenUtils::CreateCast().
+
+// Helper template classes are nested in this namespace and are not considered
+// part of the public API.
+namespace codegen_utils_detail {
+
+// CastMaker has various template specializations to handle casting of
+// different C++ types. The specialized versions have a static method
+// CreateCast() that takes an 'llvm::Value' of SrcType and a pointer to
+// CodegenUtils object,  and returns a pointer to an
+// 'llvm::Value' equivalent to DestType
+template <typename DestType,
+          typename SrcType,
+          typename Enable = void>
+class CastMaker {
+};
+
+// Partial specialization for unsigned int to signed / unsigned integer.
+template <typename IntegerType, typename UnsignedIntType>
+class CastMaker<
+    IntegerType,
+    UnsignedIntType,
+    typename std::enable_if<
+        std::is_integral<IntegerType>::value
+        && std::is_integral<UnsignedIntType>::value
+        && std::is_unsigned<UnsignedIntType>::value>::type> {
+ public:
+  static llvm::Value* CreateCast(llvm::Value* value,
+                                 CodegenUtils* codegen_utils) {
+    assert(nullptr != codegen_utils);
+    llvm::Type* llvm_dest_type = codegen_utils->GetType<IntegerType>();
+    Checker(value, llvm_dest_type);
+    return codegen_utils->ir_builder()->CreateZExtOrTrunc(value,
+                                                         llvm_dest_type);
+  }
+ private:
+  static void Checker(llvm::Value* value,
+               llvm::Type* llvm_dest_type) {
+    assert(nullptr != value);
+    assert(nullptr != value->getType());
+    assert(value->getType()->isIntegerTy());
+    assert(nullptr != llvm_dest_type);
+    assert(llvm_dest_type->isIntegerTy());
+  }
+};
+
+// Partial specialization for signed int to signed / unsigned integer.
+template <typename IntegerType, typename SignedIntType>
+class CastMaker<
+    IntegerType,
+    SignedIntType,
+    typename std::enable_if<
+        std::is_integral<IntegerType>::value
+        && std::is_integral<SignedIntType>::value
+        && std::is_signed<SignedIntType>::value>::type> {
+ public:
+  static llvm::Value* CreateCast(llvm::Value* value,
+                                 CodegenUtils* codegen_utils) {
+    assert(nullptr != codegen_utils);
+    llvm::Type* llvm_dest_type = codegen_utils->GetType<IntegerType>();
+    Checker(value, llvm_dest_type);
+
+    return codegen_utils->ir_builder()->CreateSExtOrTrunc(value,
+                                                          llvm_dest_type);
+  }
+ private:
+  static void Checker(llvm::Value* value,
+               llvm::Type* llvm_dest_type) {
+    assert(nullptr != value);
+    assert(nullptr != value->getType());
+    assert(value->getType()->isIntegerTy());
+    assert(nullptr != llvm_dest_type);
+    assert(llvm_dest_type->isIntegerTy());
+  }
+};
+
+// Partial specialization for any floating point to 32-bit float
+template <typename FloatingPoint>
+class CastMaker<
+    float,
+    FloatingPoint,
+    typename std::enable_if<
+            std::is_floating_point<FloatingPoint>::value>::type> {
+ public:
+  static llvm::Value* CreateCast(llvm::Value* value,
+                                 CodegenUtils* codegen_utils) {
+    assert(nullptr != codegen_utils);
+    llvm::Type* llvm_dest_type = codegen_utils->GetType<float>();
+    Checker(value, llvm_dest_type);
+    if (value->getType()->isFloatTy()) { return value; }
+    return codegen_utils->ir_builder()->CreateFPTrunc(
+        value, llvm_dest_type);
+  }
+ private:
+  static void Checker(llvm::Value* value,
+                 llvm::Type* llvm_dest_type) {
+      assert(nullptr != value);
+      assert(nullptr != value->getType());
+      assert(value->getType()->isFloatTy() ||
+             value->getType()->isDoubleTy());
+      assert(nullptr != llvm_dest_type);
+      assert(llvm_dest_type->isFloatTy());
+    }
+};
+
+// Partial specialization for any floating point to 64-bit float
+template <typename FloatingPoint>
+class CastMaker<
+    double,
+    FloatingPoint,
+    typename std::enable_if<
+            std::is_floating_point<FloatingPoint>::value>::type> {
+ public:
+  static llvm::Value* CreateCast(llvm::Value* value,
+                                 CodegenUtils* codegen_utils) {
+    assert(nullptr != codegen_utils);
+    llvm::Type* llvm_dest_type = codegen_utils->GetType<double>();
+    Checker(value, llvm_dest_type);
+    if (value->getType()->isDoubleTy()) { return value; }
+    return codegen_utils->ir_builder()->CreateFPExt(
+        value, llvm_dest_type);
+  }
+ private:
+  static void Checker(llvm::Value* value,
+                      llvm::Type* llvm_dest_type) {
+    assert(nullptr != value);
+    assert(nullptr != value->getType());
+    assert(value->getType()->isFloatTy() ||
+           value->getType()->isDoubleTy());
+    assert(nullptr != llvm_dest_type);
+    assert(llvm_dest_type->isDoubleTy());
+  }
+};
+
+// Partial specialization for any signed integer to 64-bit float
+template <typename SignedIntType>
+class CastMaker<
+    double,
+    SignedIntType,
+    typename std::enable_if<
+        std::is_integral<SignedIntType>::value &&
+        std::is_signed<SignedIntType>::value>::type> {
+ public:
+  static llvm::Value* CreateCast(llvm::Value* value,
+                                 CodegenUtils* codegen_utils) {
+    assert(nullptr != codegen_utils);
+
+    llvm::Type* llvm_dest_type = codegen_utils->GetType<double>();
+    Checker(value, llvm_dest_type);
+    return codegen_utils->ir_builder()->CreateSIToFP(
+        value, llvm_dest_type);
+  }
+ private:
+  static void Checker(llvm::Value* value,
+                      llvm::Type* llvm_dest_type) {
+    assert(nullptr != value);
+    assert(nullptr != value->getType());
+    assert(value->getType()->isIntegerTy());
+    assert(nullptr != llvm_dest_type);
+    assert(llvm_dest_type->isDoubleTy());
+  }
+};
+
+// Partial specialization for any unsigned integer to 64-bit float
+template <typename UnsignedIntType>
+class CastMaker<
+    double,
+    UnsignedIntType,
+    typename std::enable_if<
+        std::is_integral<UnsignedIntType>::value &&
+        std::is_unsigned<UnsignedIntType>::value>::type> {
+ public:
+  static llvm::Value* CreateCast(llvm::Value* value,
+                                 CodegenUtils* codegen_utils) {
+    assert(nullptr != codegen_utils);
+
+    llvm::Type* llvm_dest_type = codegen_utils->GetType<double>();
+    Checker(value, llvm_dest_type);
+    return codegen_utils->ir_builder()->CreateUIToFP(
+        value, llvm_dest_type);
+  }
+ private:
+  static void Checker(llvm::Value* value,
+                      llvm::Type* llvm_dest_type) {
+    assert(nullptr != value);
+    assert(nullptr != value->getType());
+    assert(value->getType()->isIntegerTy());
+    assert(nullptr != llvm_dest_type);
+    assert(llvm_dest_type->isDoubleTy());
+  }
+};
+
+}  // namespace codegen_utils_detail
+
+template <typename DestType, typename SrcType>
+llvm::Value* CodegenUtils::CreateCast(llvm::Value* value) {
+  return codegen_utils_detail::CastMaker<DestType, SrcType>::CreateCast(
+      value, this);
 }
 
 }  // namespace gpcodegen

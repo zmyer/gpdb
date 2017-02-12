@@ -138,21 +138,6 @@ FileRepAckPrimary_StartReceiver(void)
 	
 	Insist(fileRepRole == FileRepPrimaryRole);
 	
-	if (filerep_inject_listener_fault)
-	{
-		status = STATUS_ERROR;
-		ereport(WARNING,
-				(errmsg("mirror failure, "
-						"injected fault by guc filerep_inject_listener_fault, "
-						"failover requested"), 
-				 FileRep_errcontext()));												
-		
-		FileRep_SetSegmentState(SegmentStateFault, FaultTypeMirror);
-		FileRepSubProcess_SetState(FileRepStateFault);
-		FileRepSubProcess_ProcessSignals();
-		return;
-	}
-	
 	status = FileRepConnServer_StartListener(
 								 fileRepPrimaryHostAddress,
 								 fileRepPrimaryPort);
@@ -317,13 +302,7 @@ FileRepAckPrimary_RunReceiver(void)
 			break;
 		}		
 		
-#ifdef FAULT_INJECTOR
-		FaultInjector_InjectFaultIfSet(
-									   FileRepReceiver,
-									   DDLNotSpecified,
-									   "",	//databaseName
-									   ""); // tableName
-#endif				
+		SIMPLE_FAULT_INJECTOR(FileRepReceiver);
 		
 		fileRepShmemMessageDescr = 
 		(FileRepShmemMessageDescr_s*) msgPositionInsert;	
@@ -1037,13 +1016,7 @@ FileRepAckPrimary_RunConsumer(void)
 			break;
 		}
 		
-#ifdef FAULT_INJECTOR
-		FaultInjector_InjectFaultIfSet(
-									   FileRepConsumer,
-									   DDLNotSpecified,
-									   "",	//databaseName
-									   ""); // tableName
-#endif				
+		SIMPLE_FAULT_INJECTOR(FileRepConsumer);
 		
 		/* Calculate and compare FileRepMessageHeader_s Crc */
 		fileRepMessageHeader = (FileRepMessageHeader_s*) (fileRepAckShmem->positionConsume + 
@@ -1115,6 +1088,34 @@ FileRepAckPrimary_RunConsumer(void)
 					ereport(LOG,
 						(errmsg("ack create status '%s' ",
 								FileRepStatusToString[mirrorStatus])));	
+
+				break;
+
+			case FileRepOperationStartSlruChecksum:
+				mirrorStatus =
+					fileRepMessageHeader->fileRepOperationDescription.startChecksum.mirrorStatus;
+
+				if (Debug_filerep_print)
+				{
+					ereport(LOG,
+						(errmsg("ack start SLRU checksum: status = '%s', directory = '%s' ",
+								FileRepStatusToString[mirrorStatus],
+								fileRepMessageHeader->fileRepIdentifier.fileRepFlatFileIdentifier.directorySimpleName)));
+				}
+
+				break;
+
+			case FileRepOperationVerifySlruDirectoryChecksum:
+				mirrorStatus =
+					fileRepMessageHeader->fileRepOperationDescription.verifyDirectoryChecksum.mirrorStatus;
+
+				if (Debug_filerep_print)
+				{
+					ereport(LOG,
+						(errmsg("ack verify SLRU directory checksum: status = '%s', directory = '%s' ",
+								FileRepStatusToString[mirrorStatus],
+								fileRepMessageHeader->fileRepIdentifier.fileRepFlatFileIdentifier.directorySimpleName)));
+				}
 
 				break;
 				

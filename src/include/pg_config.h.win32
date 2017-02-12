@@ -45,7 +45,6 @@
  * HAVE_STRTOLL, HAVE_STRTOULL, HAVE_STRUCT_OPTION, ENABLE_THREAD_SAFETY,
  * USE_SSE42_CRC32C_WITH_RUNTIME_CHECK
  *
- * For now, also HAVE_IPV6
  */
 
 /* Define to the type of arg 1 of 'accept' */
@@ -143,9 +142,6 @@
 
 /* Define to 1 if you have the <editline/readline.h> header file. */
 /* #undef HAVE_EDITLINE_READLINE_H */
-
-/* Define to 1 if you have the <endian.h> header file. */
-/* #undef HAVE_ENDIAN_H */
 
 /* Define to 1 if you have the `fcvt' function. */
 #define HAVE_FCVT 1
@@ -594,6 +590,21 @@
 /* Define to 1 if you have __get_cpuid. */
 #undef HAVE__GET_CPUID
 
+/* Define to 1 if your compiler understands __builtin_constant_p. */
+/* #undef HAVE__BUILTIN_CONSTANT_P */
+
+/* Define to 1 if your compiler understands __builtin_types_compatible_p. */
+/* #undef HAVE__BUILTIN_TYPES_COMPATIBLE_P */
+
+/* Define to 1 if your compiler understands __builtin_unreachable. */
+/* #undef HAVE__BUILTIN_UNREACHABLE */
+
+/* Define to 1 if your compiler understands _Static_assert. */
+/* #undef HAVE__STATIC_ASSERT */
+
+/* Define to 1 if your compiler understands __VA_ARGS__ in macros. */
+#define HAVE__VA_ARGS 1
+
 /* Define to the appropriate snprintf format for 64-bit ints, if any. */
 #define INT64_FORMAT "%lld"
 
@@ -619,13 +630,13 @@
 #define PACKAGE_STRING "Greenplum Database 8.3devel"
 
 /* Define to the version of this package. */
-#define PACKAGE_VERSION "8.3"
+#define PACKAGE_VERSION "8.3.23"
 
 /* PostgreSQL version as a string */
-#define PG_VERSION "8.3"
+#define PG_VERSION "8.3.23"
 
 /* PostgreSQL version as a number */
-#define PG_VERSION_NUM 80300
+#define PG_VERSION_NUM 80323
 
 /* Define to the one symbol short name of this package. */
 #define PACKAGE_TARNAME "greenplum"

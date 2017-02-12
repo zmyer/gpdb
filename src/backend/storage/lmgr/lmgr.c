@@ -9,7 +9,7 @@
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/storage/lmgr/lmgr.c,v 1.90 2007/01/05 22:19:38 momjian Exp $
+ *	  $PostgreSQL: pgsql/src/backend/storage/lmgr/lmgr.c,v 1.96.2.1 2008/03/04 19:54:13 tgl Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -376,7 +376,7 @@ LockRelationForResynchronize(RelFileNode *relFileNode, LOCKMODE lockmode)
 						 relFileNode->dbNode,
 						 relFileNode->relNode);
 
-	LockAcquire(&tag, lockmode, false, false);
+	(void) LockAcquire(&tag, lockmode, false, false);
 }
 
 void
@@ -534,8 +534,8 @@ UnlockTuple(Relation relation, ItemPointer tid, LOCKMODE lockmode)
  *		XactLockTableInsert
  *
  * Insert a lock showing that the given transaction ID is running ---
- * this is done during xact startup.  The lock can then be used to wait
- * for the transaction to finish.
+ * this is done when an XID is acquired by a transaction or subtransaction.
+ * The lock can then be used to wait for the transaction to finish.
  */
 void
 XactLockTableInsert(TransactionId xid)
@@ -559,8 +559,7 @@ XactLockTableInsert(TransactionId xid)
  *
  * Delete the lock showing that the given transaction ID is running.
  * (This is never used for main transaction IDs; those locks are only
- * released implicitly at transaction end.	But we do use it for subtrans
- * IDs.)
+ * released implicitly at transaction end.	But we do use it for subtrans IDs.)
  */
 void
 XactLockTableDelete(TransactionId xid)
@@ -592,7 +591,7 @@ XactLockTableWait(TransactionId xid)
 	for (;;)
 	{
 		Assert(TransactionIdIsValid(xid));
-		Assert(!TransactionIdEquals(xid, GetTopTransactionId()));
+		Assert(!TransactionIdEquals(xid, GetTopTransactionIdIfAny()));
 
 		SET_LOCKTAG_TRANSACTION(tag, xid);
 
@@ -620,7 +619,7 @@ ConditionalXactLockTableWait(TransactionId xid)
 	for (;;)
 	{
 		Assert(TransactionIdIsValid(xid));
-		Assert(!TransactionIdEquals(xid, GetTopTransactionId()));
+		Assert(!TransactionIdEquals(xid, GetTopTransactionIdIfAny()));
 
 		SET_LOCKTAG_TRANSACTION(tag, xid);
 
@@ -636,6 +635,70 @@ ConditionalXactLockTableWait(TransactionId xid)
 
 	return true;
 }
+
+
+/*
+ *		VirtualXactLockTableInsert
+ *
+ * Insert a lock showing that the given virtual transaction ID is running ---
+ * this is done at main transaction start when its VXID is assigned.
+ * The lock can then be used to wait for the transaction to finish.
+ */
+void
+VirtualXactLockTableInsert(VirtualTransactionId vxid)
+{
+	LOCKTAG		tag;
+
+	Assert(VirtualTransactionIdIsValid(vxid));
+
+	SET_LOCKTAG_VIRTUALTRANSACTION(tag, vxid);
+
+	(void) LockAcquire(&tag, ExclusiveLock, false, false);
+}
+
+/*
+ *		VirtualXactLockTableWait
+ *
+ * Waits until the lock on the given VXID is released, which shows that
+ * the top-level transaction owning the VXID has ended.
+ */
+void
+VirtualXactLockTableWait(VirtualTransactionId vxid)
+{
+	LOCKTAG		tag;
+
+	Assert(VirtualTransactionIdIsValid(vxid));
+
+	SET_LOCKTAG_VIRTUALTRANSACTION(tag, vxid);
+
+	(void) LockAcquire(&tag, ShareLock, false, false);
+
+	LockRelease(&tag, ShareLock, false);
+}
+
+/*
+ *		ConditionalVirtualXactLockTableWait
+ *
+ * As above, but only lock if we can get the lock without blocking.
+ * Returns TRUE if the lock was acquired.
+ */
+bool
+ConditionalVirtualXactLockTableWait(VirtualTransactionId vxid)
+{
+	LOCKTAG		tag;
+
+	Assert(VirtualTransactionIdIsValid(vxid));
+
+	SET_LOCKTAG_VIRTUALTRANSACTION(tag, vxid);
+
+	if (LockAcquire(&tag, ShareLock, false, true) == LOCKACQUIRE_NOT_AVAIL)
+		return false;
+
+	LockRelease(&tag, ShareLock, false);
+
+	return true;
+}
+
 
 /*
  *		LockDatabaseObject
@@ -721,10 +784,112 @@ UnlockSharedObject(Oid classid, Oid objid, uint16 objsubid,
 
 
 /*
+ * Append a description of a lockable object to buf.
+ *
+ * Ideally we would print names for the numeric values, but that requires
+ * getting locks on system tables, which might cause problems since this is
+ * typically used to report deadlock situations.
+ */
+void
+DescribeLockTag(StringInfo buf, const LOCKTAG *tag)
+{
+	switch ((LockTagType) tag->locktag_type)
+	{
+		case LOCKTAG_RELATION:
+			appendStringInfo(buf,
+							 _("relation %u of database %u"),
+							 tag->locktag_field2,
+							 tag->locktag_field1);
+			break;
+		case LOCKTAG_RELATION_EXTEND:
+			appendStringInfo(buf,
+							 _("extension of relation %u of database %u"),
+							 tag->locktag_field2,
+							 tag->locktag_field1);
+			break;
+		case LOCKTAG_PAGE:
+			appendStringInfo(buf,
+							 _("page %u of relation %u of database %u"),
+							 tag->locktag_field3,
+							 tag->locktag_field2,
+							 tag->locktag_field1);
+			break;
+		case LOCKTAG_TUPLE:
+			appendStringInfo(buf,
+							 _("tuple (%u,%u) of relation %u of database %u"),
+							 tag->locktag_field3,
+							 tag->locktag_field4,
+							 tag->locktag_field2,
+							 tag->locktag_field1);
+			break;
+		case LOCKTAG_RELATION_RESYNCHRONIZE:
+			appendStringInfo(buf,
+							 _("resynchronize relation %u of database %u"),
+							 tag->locktag_field1,
+							 tag->locktag_field2);
+			break;
+		case LOCKTAG_RELATION_APPENDONLY_SEGMENT_FILE:
+			appendStringInfo(buf,
+							 _("segment file %u of appendonly relation %u of database %u"),
+							 tag->locktag_field3,
+							 tag->locktag_field2,
+							 tag->locktag_field1);
+			break;
+		case LOCKTAG_TRANSACTION:
+			appendStringInfo(buf,
+							 _("transaction %u"),
+							 tag->locktag_field1);
+			break;
+		case LOCKTAG_VIRTUALTRANSACTION:
+			appendStringInfo(buf,
+							 _("virtual transaction %d/%u"),
+							 tag->locktag_field1,
+							 tag->locktag_field2);
+			break;
+		case LOCKTAG_OBJECT:
+			appendStringInfo(buf,
+							 _("object %u of class %u of database %u"),
+							 tag->locktag_field3,
+							 tag->locktag_field2,
+							 tag->locktag_field1);
+			break;
+		case LOCKTAG_USERLOCK:
+			/* reserved for old contrib code, now on pgfoundry */
+			appendStringInfo(buf,
+							 _("user lock [%u,%u,%u]"),
+							 tag->locktag_field1,
+							 tag->locktag_field2,
+							 tag->locktag_field3);
+			break;
+		case LOCKTAG_ADVISORY:
+			appendStringInfo(buf,
+							 _("advisory lock [%u,%u,%u,%u]"),
+							 tag->locktag_field1,
+							 tag->locktag_field2,
+							 tag->locktag_field3,
+							 tag->locktag_field4);
+			break;
+		default:
+			appendStringInfo(buf,
+							 _("unrecognized locktag type %d"),
+							 (int) tag->locktag_type);
+			break;
+	}
+}
+
+/*
  * LockTagIsTemp
  *		Determine whether a locktag is for a lock on a temporary object
  *
- * We need this because 2PC cannot deal with temp objects
+ * In PostgreSQL, 2PC cannot deal with temporary objects. Commit
+ * f3032cbe377ecc570989e1bd2fe1aea455c12cc3 replace this method with global
+ * variable MyXactAccessedTempRel, so it's no longer needed.
+ *
+ * However, GPDB supports 2PC with temporary objects. Hence, it still relies
+ * on this method to check certain LOCKTAG is on temporary object or not, so
+ * that GPDB can skip the lock information in `TwoPhaseRecordOnDisk` for the
+ * temporary objects. That's to prevent replay redundant lock acquiring and
+ * releasing during `xact_redo()` on non-existent temporary objects.
  */
 bool
 LockTagIsTemp(const LOCKTAG *tag)

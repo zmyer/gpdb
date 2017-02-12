@@ -10,7 +10,7 @@
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/bootstrap/bootparse.y,v 1.86 2007/01/09 02:14:11 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/bootstrap/bootparse.y,v 1.91 2008/01/01 19:45:48 momjian Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -27,12 +27,6 @@
 #include "access/xact.h"
 #include "bootstrap/bootstrap.h"
 #include "catalog/catalog.h"
-#include "catalog/gp_configuration.h"
-#include "catalog/gp_persistent.h"
-#include "catalog/gp_global_sequence.h"
-#include "catalog/gp_fastsequence.h"
-#include "catalog/gp_san_config.h"
-#include "catalog/gp_segment_config.h"
 #include "catalog/heap.h"
 #include "catalog/pg_am.h"
 #include "catalog/pg_attribute.h"
@@ -40,15 +34,9 @@
 #include "catalog/pg_auth_members.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_database.h"
-#include "catalog/pg_extprotocol.h"
 #include "catalog/pg_filespace.h"
-#include "catalog/pg_filespace_entry.h"
 #include "catalog/pg_namespace.h"
-#include "catalog/pg_resqueue.h"
-#include "catalog/pg_statistic.h"
 #include "catalog/pg_tablespace.h"
-#include "catalog/pg_type.h"
-#include "catalog/pg_tidycat.h"
 #include "catalog/toasting.h"
 #include "commands/defrem.h"
 #include "miscadmin.h"
@@ -229,56 +217,7 @@ Boot_CreateStmt:
 					else
 					{
 						Oid id;
-						Oid typid = InvalidOid;
 
-						/*
-						 * Some relations need to have a fixed relation type
-						 * OID, because it is referenced in code.
-						 *
-						 * 90MERGE_FIXME: In PostgreSQL 9.0, there's a
-						 * new BKI directive, BKI_ROWTYPE_OID(<oid>), for
-						 * doing the same. Replace this hack with that once
-						 * we merge with 9.0.
-						 */
-						switch ($6)
-						{
-							case GpPersistentRelationNodeRelationId:
-								typid = GP_PERSISTENT_RELATION_NODE_OID;
-								break;
-							case GpPersistentDatabaseNodeRelationId:
-								typid = GP_PERSISTENT_DATABASE_NODE_OID;
-								break;
-							case GpPersistentTablespaceNodeRelationId:
-								typid = GP_PERSISTENT_TABLESPACE_NODE_OID;
-								break;
-							case GpPersistentFilespaceNodeRelationId:
-								typid = GP_PERSISTENT_FILESPACE_NODE_OID;
-								break;
-							case GpRelationNodeRelationId:
-								typid = GP_RELATION_NODE_OID;
-								break;
-
-							case GpGlobalSequenceRelationId:
-								typid = GP_GLOBAL_SEQUENCE_RELTYPE_OID;
-								break;
-
-							case DatabaseRelationId:
-								typid = PG_DATABASE_RELTYPE_OID;
-								break;
-
-							case AuthIdRelationId:
-								typid = PG_AUTHID_RELTYPE_OID;
-								break;
-
-							case AuthMemRelationId:
-								typid = PG_AUTH_MEMBERS_RELTYPE_OID;
-								break;
-
-							default:
-								break;
-						}
-
-						Oid typarrayid = InvalidOid;
 						id = heap_create_with_catalog(LexIDStr($5),
 													  PG_CATALOG_NAMESPACE,
 													  $3 ? GLOBALTABLESPACE_OID : 0,
@@ -297,8 +236,6 @@ Boot_CreateStmt:
 													  (Datum) 0,
 													  true,
 													  /* valid_opts */ false,
-													  &typid,
-													  &typarrayid,
 						 					  		  /* persistentTid */ NULL,
 						 					  		  /* persistentSerialNum */ NULL);
 						elog(DEBUG4, "relation created with oid %u", id);
@@ -340,10 +277,10 @@ Boot_DeclareIndexStmt:
 								LexIDStr($8),
 								NULL,
 								$10,
-								NULL, NIL, NIL,
+								NULL, NIL,
 								false, false, false,
 								false, false, true, false, false,
-								false, NULL);
+								NULL);
 					do_end();
 				}
 		;
@@ -359,10 +296,9 @@ Boot_DeclareUniqueIndexStmt:
 								LexIDStr($9),
 								NULL,
 								$11,
-								NULL, NIL, NIL,
+								NULL, NIL,
 								true, false, false,
 								false, false, true, false, false,
-								false,
 								NULL);
 					do_end();
 				}

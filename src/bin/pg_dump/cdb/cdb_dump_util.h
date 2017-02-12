@@ -10,6 +10,7 @@
 
 #include <regex.h>
 #include "cdb_seginst.h"
+#include "libpq-int.h"
 
 #define CDB_BACKUP_KEY_LEN 14
 
@@ -22,6 +23,10 @@
 
 #define DDBOOST_CONFIG_FILE ".ddconfig"
 #define DDBOOST_USERNAME_MAXLENGTH 30
+/*
+ * NOTE: If you increase this, you must also increase OBFUSCATE_PAYLOAD_LENGTH
+ * in cdb_lockbox.c!
+ */
 #define DDBOOST_PASSWORD_MAXLENGTH 40
 #define DDBOOST_LOG_NUM_OF_FILES 10
 #ifndef DDBOOST_POOL_SIZE
@@ -30,7 +35,6 @@
 
 extern int getDDBoostCredential(char** hostname, char** user, char** password, char** log_level ,char** log_size, char **default_backup_directory, char **ddboost_storage_unit, bool remote);
 extern int  setDDBoostCredential(char *hostname, char *user, char *password, char *log_level ,char *log_size, char *default_backup_directory, char *ddboost_storage_unit,  bool remote);
-extern int  parseDDBoostCredential(char *hostname, char *user, char *password, const char *progName);
 extern void rotate_dd_logs(const char *file_name, unsigned int num_of_files, unsigned int log_size);
 extern void _ddp_test_log(const void *session_ptr, const ddp_char_t *log_msg, ddp_severity_t severity);
 extern int initDDSystem(ddp_inst_desc_t *ddp_inst, ddp_conn_desc_t *ddp_conn, ddp_client_info_t *cl_info,
@@ -154,35 +158,10 @@ extern const char* getBackupTypeString(bool incremental);
 /* Base64 Encoding and Decoding Routines */
 /* Base64 Data is assumed to be in a NULL terminated string */
 /* Data is just assumed to be an array of chars, with a length */
-extern char *DataToBase64(char *pszIn, unsigned int InLen);
-extern char *Base64ToData(char *pszIn, unsigned int *pOutLen);
+extern char *DataToBase64(const char *pszIn, unsigned int InLen);
+extern char *Base64ToData(const char *pszIn, unsigned int *pOutLen);
 extern char *nextToken(register char **stringp, register const char *delim);
 extern int	parseDbidSet(int *dbidset, char *dump_set);
-extern char* formCompressionProgramString(char* compPg);
-extern void formDDBoostPsqlCommandLine(char** retVal, bool compUsed, const char* ddboostPg, const char* compProg,
-							const char* ddp_file_name, const char* dd_boost_buf_size,
-							const char* filter_script, const char* table_filter_file,
-							int role, const char* psqlPg, bool postSchemaOnly,
-							const char* change_schema_file, const char *schema_level_file,
-							const char* ddboost_storage_unit);
-
-extern void formSegmentPsqlCommandLine(char** retVal, const char* inputFileSpec,
-						bool compUsed, const char* compProg, const char* filter_script,
-						const char* table_filter_file, int role, const char* psqlPg, const char* catPg,
-                        const char* gpNBURestorePg, const char* netbackupServiceHost, const char* netbackupBlockSize,
-						const char* change_schema, const char* schema_level_file);
-
-extern void formPostDataSchemaOnlyPsqlCommandLine(char** retVal, const char* inputFileSpec,
-						bool compUsed, const char* compProg, const char* post_data_filter_script,
-                        const char* table_filter_file, const char* psqlPg, const char* catPg,
-                        const char* gpNBURestorePg, const char* netbackupServiceHost, const char* netbackupBlockSize,
-			const char* change_schema_file, const char *schema_level_file);
-
-extern void formFilterCommandLine(char** retVal, const char* filter_script, const char* table_filter_file,
-				int role, const char* change_schema_file, const char *schema_level_file);
-
-extern void formPostDataFilterCommandLine(char** retVal, const char* post_data_filter_script, const char* table_filter_file,
-					const char* change_schema_file, const char *schema_level_file);
 
 /* prototypes for hash table */
 
@@ -198,5 +177,5 @@ char getTypstorage(Oid o);
 
 int removeNode(Oid o);
 
-extern char* shellEscape(const char *shellArg, PQExpBuffer escapeBuf);
+extern char *shellEscape(const char *shellArg, PQExpBuffer escapeBuf, bool addQuote, bool reset);
 #endif   /* CDB_DUMP_UTIL_H */

@@ -46,7 +46,6 @@ endif
 STREAM_DIR=$(SRC)/src/stream
 stream:
 	@echo "--- stream"
-	pwd
 	cd $(STREAM_DIR) && NO_M64=TRUE $(CC) stream.c -o stream
 	cp $(STREAM_DIR)/stream $(SERVER_SRC)/lib/stream
 
@@ -60,13 +59,17 @@ pygresql:
 	@echo "--- PyGreSQL"
 	. $(prefix)/greenplum_path.sh && unset PYTHONHOME && \
 	if [ `uname -s` = 'HP-UX' ]; then \
-	    cd $(PYLIB_SRC)/$(PYGRESQL_DIR) && CC="$(CC)" LDFLAGS="-L../../../../gpAux/ext/hpux_ia64/python-2.5.6/lib" python setup.py build; \
+	    cd $(PYLIB_SRC)/$(PYGRESQL_DIR) && DESTDIR="$(DESTDIR)" CC="$(CC)" LDFLAGS="-L../../../../gpAux/ext/hpux_ia64/python-2.5.6/lib" python setup.py build; \
 	else \
-	    cd $(PYLIB_SRC)/$(PYGRESQL_DIR) && CC="$(CC)" python setup.py build; \
+	    cd $(PYLIB_SRC)/$(PYGRESQL_DIR) && DESTDIR="$(DESTDIR)" CC="$(CC)" python setup.py build; \
 	fi
 
 	mkdir -p $(PYLIB_DIR)/pygresql
-	cp -r $(PYLIB_SRC)/$(PYGRESQL_DIR)/build/lib.*/* $(PYLIB_DIR)/pygresql
+	if [ `uname -s` = 'Darwin' ]; then \
+	  cp -r $(PYLIB_SRC)/$(PYGRESQL_DIR)/build/lib.macosx*/* $(PYLIB_DIR)/pygresql; \
+	else \
+	  cp -r $(PYLIB_SRC)/$(PYGRESQL_DIR)/build/lib.linux*/* $(PYLIB_DIR)/pygresql; \
+	fi
 	touch $(PYLIB_DIR)/__init__.py
 
 #
@@ -221,14 +224,6 @@ PYTHON_FILES=`grep -l --exclude=Makefile --exclude=gplogfilter "/bin/env python"
 			 `find ./gppylib -name "*.py"`\
 			 `find $(SRC)/../sbin -name "*.py"`
 
-behave: $(BEHAVE_BIN)
-	@echo "Running behave on management scripts..."
-	@if [ -n ""$(tags)"" ]; then \
-		PYTHONPATH=$(SERVER_SRC):$(SERVER_SBIN):$(PYTHONSRC_INSTALL_PYTHON_PATH) python $(BEHAVE_BIN) $(SERVER_SRC)/gppylib/test/behave/* --no-color -s -k --tags=$(tags) 2>&1 ; \
-	else \
-		PYTHONPATH=$(SERVER_SRC):$(SERVER_SBIN):$(PYTHONSRC_INSTALL_PYTHON_PATH) python $(BEHAVE_BIN) $(SERVER_SRC)/gppylib/test/behave/* --no-color -s 2>&1; \
-	fi
-
 checkcode: pylint
 	@echo "Running pylint on management scripts..."
 	@PYTHONPATH=$(PYTHONPATH):$(PYLINT_PYTHONPATH) $(PYLIB_SRC_EXT)/$(PYLINT_DIR)/bin/pylint -i y $(PYTHON_FILES) --rcfile=.rcfile > $(SRC)/../pylint.txt || true
@@ -242,9 +237,9 @@ check-regress:
 
 check: $(MOCK_BIN) unittest2
 	@echo "Running pure unit and also "unit" tests that require cluster to be up..."
-	@PYTHONPATH=$(SERVER_SRC):$(SERVER_SBIN):$(SRC)/ext:$(PYTHONPATH):$(PYTHONSRC_INSTALL_PYTHON_PATH):$(SBIN_DIR):$(LIB_DIR):$(PYLIB_DIR)/mock-1.0.1 \
+	@TMPDIR=/tmp PYTHONPATH=$(SERVER_SRC):$(SERVER_SBIN):$(PYTHONPATH):$(PYTHONSRC_INSTALL_PYTHON_PATH):$(SRC)/ext:$(SBIN_DIR):$(LIB_DIR):$(PYLIB_DIR)/mock-1.0.1 \
 	gppylib/gpunit discover --verbose -s $(SRC)/gppylib -p "test_unit*.py" 2> $(SRC)/../gpMgmt_testunit_results.log 1> $(SRC)/../gpMgmt_testunit_output.log
-	@PYTHONPATH=$(SERVER_SRC):$(SERVER_SBIN):$(SRC)/ext:$(PYTHONPATH):$(PYTHONSRC_INSTALL_PYTHON_PATH):$(SBIN_DIR):$(LIB_DIR):$(PYLIB_DIR)/mock-1.0.1 \
+	@TMPDIR=/tmp PYTHONPATH=$(SERVER_SRC):$(SERVER_SBIN):$(PYTHONPATH):$(PYTHONSRC_INSTALL_PYTHON_PATH):$(SRC)/ext:$(SBIN_DIR):$(LIB_DIR):$(PYLIB_DIR)/mock-1.0.1 \
 	gppylib/gpunit discover --verbose -s $(SRC)/gppylib -p "test_cluster*.py" 2>> $(SRC)/../gpMgmt_testunit_results.log 1>> $(SRC)/../gpMgmt_testunit_output.log
 
 unitdevel:
@@ -273,6 +268,7 @@ docs: epydoc
 	@echo "Running epydoc on management scripts..."
 	@PYTHONPATH=$(PYTHONPATH):$(EPYDOC_PYTHONPATH) $(PYLIB_SRC_EXT)/$(EPYDOC_DIR)/build/scripts-2.6/epydoc --config=.epydoc.config
 
+.PHONY: clean
 clean :
 	@rm -rf $(PYLIB_SRC_EXT)/$(LOCKFILE_DIR)
 	@rm -rf $(PYLIB_SRC_EXT)/$(PARAMIKO_DIR)
@@ -282,3 +278,7 @@ clean :
 	@rm -rf $(PYLIB_SRC_EXT)/$(LOGILAB_ASTNG_DIR)
 	@rm -rf $(STREAM_DIR)/stream lib/stream  
 	@rm -rf *.pyc lib/*.pyc
+	@rm -f gpcheckcatc gpcrondumpc gpexpandc gptransferc
+
+.PHONY: disclean
+distclean: clean

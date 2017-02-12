@@ -211,7 +211,8 @@ CTranslatorDXLToPlStmt::InitTranslators()
 PlannedStmt *
 CTranslatorDXLToPlStmt::PplstmtFromDXL
 	(
-	const CDXLNode *pdxln
+	const CDXLNode *pdxln,
+	bool canSetTag
 	)
 {
 	GPOS_ASSERT(NULL != pdxln);
@@ -248,7 +249,7 @@ CTranslatorDXLToPlStmt::PplstmtFromDXL
 
 	// store partitioned table indexes in planned stmt
 	pplstmt->queryPartOids = m_pctxdxltoplstmt->PlPartitionedTables();
-	pplstmt->canSetTag = true;
+	pplstmt->canSetTag = canSetTag;
 	pplstmt->relationOids = plOids;
 	pplstmt->numSelectorsPerScanId = m_pctxdxltoplstmt->PlNumPartitionSelectors();
 
@@ -370,8 +371,7 @@ CTranslatorDXLToPlStmt::SetInitPlanVariables(PlannedStmt* pplstmt)
 		pplstmt->planTree->nInitPlans = m_pctxdxltoplstmt->UlCurrentParamId();
 	}
 
-	pplstmt->planTree->nParamExec = m_pctxdxltoplstmt->UlCurrentParamId();
-	pplstmt->nCrossLevelParams = m_pctxdxltoplstmt->UlCurrentParamId();
+	pplstmt->nParamExec = m_pctxdxltoplstmt->UlCurrentParamId();
 
 	// Extract all subplans defined in the planTree
 	List *plSubPlans = gpdb::PlExtractNodesPlan(pplstmt->planTree, T_SubPlan, true);
@@ -503,9 +503,9 @@ CTranslatorDXLToPlStmt::MapLocationsFile
 		BOOL fMatchFound = false;
 
 		// try to find a segment database that can handle this uri
-		for (ULONG ul = 0; ul < pcdbCompDB->total_segment_dbs && !fMatchFound; ul++)
+		for (int i = 0; i < pcdbCompDB->total_segment_dbs && !fMatchFound; i++)
 		{
-			CdbComponentDatabaseInfo *pcdbCompDBInfo = &pcdbCompDB->segment_db_info[ul];
+			CdbComponentDatabaseInfo *pcdbCompDBInfo = &pcdbCompDB->segment_db_info[i];
 			INT iSegInd = pcdbCompDBInfo->segindex;
 			if (SEGMENT_IS_ACTIVE_PRIMARY(pcdbCompDBInfo))
 			{
@@ -623,16 +623,16 @@ CTranslatorDXLToPlStmt::MapLocationsFdist
 		BOOL fCandidateFound = false;
 		BOOL fMatchFound = false;
 
-		for (ULONG ul = 0; ul < pcdbCompDB->total_segment_dbs && !fMatchFound; ul++)
+		for (int i = 0; i < pcdbCompDB->total_segment_dbs && !fMatchFound; i++)
 		{
-			CdbComponentDatabaseInfo *pcdbCompDBInfo = &pcdbCompDB->segment_db_info[ul];
+			CdbComponentDatabaseInfo *pcdbCompDBInfo = &pcdbCompDB->segment_db_info[i];
 			INT iSegInd = pcdbCompDBInfo->segindex;
 
 			if (SEGMENT_IS_ACTIVE_PRIMARY(pcdbCompDBInfo))
 			{
 				if (fSkipRandomly)
 				{
-					GPOS_ASSERT(iSegInd < ulTotalPrimaries);
+					GPOS_ASSERT(iSegInd < (INT) ulTotalPrimaries);
 					if (rgfSkipMap[iSegInd])
 					{
 						continue;
@@ -750,9 +750,9 @@ CTranslatorDXLToPlStmt::MapLocationsExecuteAllSegments
 	CdbComponentDatabases *pcdbCompDB
 	)
 {
-	for (ULONG ul = 0; ul < pcdbCompDB->total_segment_dbs; ul++)
+	for (int i = 0; i < pcdbCompDB->total_segment_dbs; i++)
 	{
-		CdbComponentDatabaseInfo *pcdbCompDBInfo = &pcdbCompDB->segment_db_info[ul];
+		CdbComponentDatabaseInfo *pcdbCompDBInfo = &pcdbCompDB->segment_db_info[i];
 		INT iSegInd = pcdbCompDBInfo->segindex;
 		if (SEGMENT_IS_ACTIVE_PRIMARY(pcdbCompDBInfo))
 		{
@@ -778,9 +778,9 @@ CTranslatorDXLToPlStmt::MapLocationsExecutePerHost
 	)
 {
 	List *plVisitedHosts = NIL;
-	for (ULONG ul = 0; ul < pcdbCompDB->total_segment_dbs; ul++)
+	for (int i = 0; i < pcdbCompDB->total_segment_dbs; i++)
 	{
-		CdbComponentDatabaseInfo *pcdbCompDBInfo = &pcdbCompDB->segment_db_info[ul];
+		CdbComponentDatabaseInfo *pcdbCompDBInfo = &pcdbCompDB->segment_db_info[i];
 		INT iSegInd = pcdbCompDBInfo->segindex;
 		if (SEGMENT_IS_ACTIVE_PRIMARY(pcdbCompDBInfo))
 		{
@@ -827,9 +827,9 @@ CTranslatorDXLToPlStmt::MapLocationsExecuteOneHost
 	)
 {
 	BOOL fMatchFound = false;
-	for (ULONG ul = 0; ul < pcdbCompDB->total_segment_dbs; ul++)
+	for (int i = 0; i < pcdbCompDB->total_segment_dbs; i++)
 	{
-		CdbComponentDatabaseInfo *pcdbCompDBInfo = &pcdbCompDB->segment_db_info[ul];
+		CdbComponentDatabaseInfo *pcdbCompDBInfo = &pcdbCompDB->segment_db_info[i];
 		INT iSegInd = pcdbCompDBInfo->segindex;
 
 		if (SEGMENT_IS_ACTIVE_PRIMARY(pcdbCompDBInfo) &&
@@ -865,9 +865,9 @@ CTranslatorDXLToPlStmt::MapLocationsExecuteOneSegment
 	)
 {
 	BOOL fMatchFound = false;
-	for (ULONG ul = 0; ul < pcdbCompDB->total_segment_dbs; ul++)
+	for (int i = 0; i < pcdbCompDB->total_segment_dbs; i++)
 	{
-		CdbComponentDatabaseInfo *pcdbCompDBInfo = &pcdbCompDB->segment_db_info[ul];
+		CdbComponentDatabaseInfo *pcdbCompDBInfo = &pcdbCompDB->segment_db_info[i];
 		INT iSegInd = pcdbCompDBInfo->segindex;
 		if (SEGMENT_IS_ACTIVE_PRIMARY(pcdbCompDBInfo) && iSegInd == iTargetSegInd)
 		{
@@ -910,13 +910,13 @@ CTranslatorDXLToPlStmt::MapLocationsExecuteRandomSegments
 	ULONG ulSkip = ulTotalPrimaries - ulSegments;
 	BOOL *rgfSkipMap = gpdb::RgfRandomSegMap(ulTotalPrimaries, ulSkip);
 
-	for (ULONG ul = 0; ul < pcdbCompDB->total_segment_dbs; ul++)
+	for (int i = 0; i < pcdbCompDB->total_segment_dbs; i++)
 	{
-		CdbComponentDatabaseInfo *pcdbCompDBInfo = &pcdbCompDB->segment_db_info[ul];
+		CdbComponentDatabaseInfo *pcdbCompDBInfo = &pcdbCompDB->segment_db_info[i];
 		INT iSegInd = pcdbCompDBInfo->segindex;
 		if (SEGMENT_IS_ACTIVE_PRIMARY(pcdbCompDBInfo))
 		{
-			GPOS_ASSERT(iSegInd < ulTotalPrimaries);
+			GPOS_ASSERT(iSegInd < (INT) ulTotalPrimaries);
 			if (rgfSkipMap[iSegInd])
 			{
 				continue;
@@ -944,9 +944,9 @@ CTranslatorDXLToPlStmt::MapLocationsHdfs
 	CHAR *szFirstUri
 	)
 {
-	for (ULONG ul = 0; ul < pcdbCompDB->total_segment_dbs; ul++)
+	for (int i = 0; i < pcdbCompDB->total_segment_dbs; i++)
 	{
-		CdbComponentDatabaseInfo *pcdbCompDBInfo = &pcdbCompDB->segment_db_info[ul];
+		CdbComponentDatabaseInfo *pcdbCompDBInfo = &pcdbCompDB->segment_db_info[i];
 		rgszSegFileMap[pcdbCompDBInfo->segindex] = PStrDup(szFirstUri);
 	}
 }
@@ -976,9 +976,9 @@ CTranslatorDXLToPlStmt::PlExternalScanUriList
 	//get the total valid primary segdb count
 	CdbComponentDatabases *pcdbCompDB = gpdb::PcdbComponentDatabases();
 	ULONG ulTotalPrimaries = 0;
-	for (ULONG ul = 0; ul < pcdbCompDB->total_segment_dbs; ul++)
+	for (int i = 0; i < pcdbCompDB->total_segment_dbs; i++)
 	{
-		CdbComponentDatabaseInfo *pcdbCompDBInfo = &pcdbCompDB->segment_db_info[ul];
+		CdbComponentDatabaseInfo *pcdbCompDBInfo = &pcdbCompDB->segment_db_info[i];
 		if (SEGMENT_IS_ACTIVE_PRIMARY(pcdbCompDBInfo))
 		{
 			ulTotalPrimaries++;
@@ -1087,10 +1087,8 @@ CTranslatorDXLToPlStmt::PtsFromDXLTblScan
 	Index iRel = gpdb::UlListLength(m_pctxdxltoplstmt->PlPrte()) + 1;
 
 	const CDXLTableDescr *pdxltabdesc = pdxlopTS->Pdxltabdesc();
-	
 	const IMDRelation *pmdrel = m_pmda->Pmdrel(pdxltabdesc->Pmdid());
-	const ULONG ulRelCols = pmdrel->UlColumns() - pmdrel->UlSystemColumns();
-	RangeTblEntry *prte = PrteFromTblDescr(pdxltabdesc, NULL /*pdxlid*/, ulRelCols, iRel, &dxltrctxbt);
+	RangeTblEntry *prte = PrteFromTblDescr(pdxltabdesc, NULL /*pdxlid*/, iRel, &dxltrctxbt);
 	GPOS_ASSERT(NULL != prte);
 	prte->requiredPerms |= ACL_SELECT;
 	m_pctxdxltoplstmt->AddRTE(prte);
@@ -1289,8 +1287,8 @@ CTranslatorDXLToPlStmt::PisFromDXLIndexScan
 	}
 
 	const IMDRelation *pmdrel = m_pmda->Pmdrel(pdxlopIndexScan->Pdxltabdesc()->Pmdid());
-	const ULONG ulRelCols = pmdrel->UlColumns() - pmdrel->UlSystemColumns();
-	RangeTblEntry *prte = PrteFromTblDescr(pdxlopIndexScan->Pdxltabdesc(), pdxlid, ulRelCols, iRel, &dxltrctxbt);
+
+	RangeTblEntry *prte = PrteFromTblDescr(pdxlopIndexScan->Pdxltabdesc(), pdxlid, iRel, &dxltrctxbt);
 	GPOS_ASSERT(NULL != prte);
 	prte->requiredPerms |= ACL_SELECT;
 	m_pctxdxltoplstmt->AddRTE(prte);
@@ -1451,7 +1449,13 @@ CTranslatorDXLToPlStmt::TranslateIndexConditions
 
 		Expr *pexprOrigIndexCond = m_pdxlsctranslator->PexprFromDXLNodeScalar(pdxlnIndexCond, &mapcidvarplstmt);
 		Expr *pexprIndexCond = m_pdxlsctranslator->PexprFromDXLNodeScalar(pdxlnIndexCond, &mapcidvarplstmt);
-		GPOS_ASSERT(IsA(pexprIndexCond, OpExpr) && "expected OpExpr in index qual");
+		GPOS_ASSERT((IsA(pexprIndexCond, OpExpr) || IsA(pexprIndexCond, ScalarArrayOpExpr))
+				&& "expected OpExpr or ScalarArrayOpExpr in index qual");
+
+		if (IsA(pexprIndexCond, ScalarArrayOpExpr) && IMDIndex::EmdindBitmap != pmdindex->Emdindt())
+		{
+			GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiDXL2PlStmtConversion, GPOS_WSZ_LIT("ScalarArrayOpExpr condition on index scan"));
+		}
 
 		// for indexonlyscan, we already have the attno referring to the index
 		if (!fIndexOnlyScan)
@@ -1462,7 +1466,16 @@ CTranslatorDXLToPlStmt::TranslateIndexConditions
 		}
 		
 		// find index key's attno
-		List *plistArgs = ((OpExpr *) pexprIndexCond)->args;
+		List *plistArgs = NULL;
+		if (IsA(pexprIndexCond, OpExpr))
+		{
+			plistArgs = ((OpExpr *) pexprIndexCond)->args;
+		}
+		else
+		{
+			plistArgs = ((ScalarArrayOpExpr *) pexprIndexCond)->args;
+		}
+
 		Node *pnodeFst = (Node *) lfirst(gpdb::PlcListHead(plistArgs));
 		Node *pnodeSnd = (Node *) lfirst(gpdb::PlcListTail(plistArgs));
 				
@@ -1480,13 +1493,19 @@ CTranslatorDXLToPlStmt::TranslateIndexConditions
 		
 		if (fRelabel)
 		{
-			List *plArgs = ((OpExpr *) pexprIndexCond)->args;
 			List *plNewArgs = ListMake2(pnodeFst, pnodeSnd);
-			gpdb::GPDBFree(plArgs);
-			((OpExpr *) pexprIndexCond)->args = plNewArgs;
+			gpdb::GPDBFree(plistArgs);
+			if (IsA(pexprIndexCond, OpExpr))
+			{
+				((OpExpr *) pexprIndexCond)->args = plNewArgs;
+			}
+			else
+			{
+				((ScalarArrayOpExpr *) pexprIndexCond)->args = plNewArgs;
+			}
 		}
 		
-		GPOS_ASSERT(IsA(pnodeFst, Var) || IsA(pnodeSnd, Var) && "expected index key in index qual");
+		GPOS_ASSERT((IsA(pnodeFst, Var) || IsA(pnodeSnd, Var)) && "expected index key in index qual");
 
 		INT iAttno = 0;
 		if (IsA(pnodeFst, Var) && ((Var *) pnodeFst)->varno != OUTER)
@@ -1508,13 +1527,13 @@ CTranslatorDXLToPlStmt::TranslateIndexConditions
 		
 		OID oidCmpOperator = CTranslatorUtils::OidCmpOperator(pexprIndexCond);
 		GPOS_ASSERT(InvalidOid != oidCmpOperator);
-		OID oidOpclass = CTranslatorUtils::OidIndexQualOpclass(iAttno, CMDIdGPDB::PmdidConvert(pmdindex->Pmdid())->OidObjectId());
-		GPOS_ASSERT(InvalidOid != oidOpclass);
-		gpdb::IndexOpProperties(oidCmpOperator, oidOpclass, &iSN, &oidIndexSubtype, &fRecheck);
+		OID oidOpFamily = CTranslatorUtils::OidIndexQualOpFamily(iAttno, CMDIdGPDB::PmdidConvert(pmdindex->Pmdid())->OidObjectId());
+		GPOS_ASSERT(InvalidOid != oidOpFamily);
+		gpdb::IndexOpProperties(oidCmpOperator, oidOpFamily, &iSN, &oidIndexSubtype, &fRecheck);
 		GPOS_ASSERT(!fRecheck);
 		
 		// create index qual
-		pdrgpindexqualinfo->Append(GPOS_NEW(m_pmp) CIndexQualInfo(iAttno, (OpExpr *)pexprIndexCond, (OpExpr *)pexprOrigIndexCond, (StrategyNumber) iSN, oidIndexSubtype));
+		pdrgpindexqualinfo->Append(GPOS_NEW(m_pmp) CIndexQualInfo(iAttno, pexprIndexCond, pexprOrigIndexCond, (StrategyNumber) iSN, oidIndexSubtype));
 	}
 
 	// the index quals much be ordered by attribute number
@@ -1524,8 +1543,8 @@ CTranslatorDXLToPlStmt::TranslateIndexConditions
 	for (ULONG ul = 0; ul < ulLen; ul++)
 	{
 		CIndexQualInfo *pindexqualinfo = (*pdrgpindexqualinfo)[ul];
-		*pplIndexConditions = gpdb::PlAppendElement(*pplIndexConditions, pindexqualinfo->m_popExpr);
-		*pplIndexOrigConditions = gpdb::PlAppendElement(*pplIndexOrigConditions, pindexqualinfo->m_popOriginalExpr);
+		*pplIndexConditions = gpdb::PlAppendElement(*pplIndexConditions, pindexqualinfo->m_pexpr);
+		*pplIndexOrigConditions = gpdb::PlAppendElement(*pplIndexOrigConditions, pindexqualinfo->m_pexprOriginal);
 		*pplIndexStratgey = gpdb::PlAppendInt(*pplIndexStratgey, pindexqualinfo->m_sn);
 		*pplIndexSubtype = gpdb::PlAppendOid(*pplIndexSubtype, pindexqualinfo->m_oidIndexSubtype);
 	}
@@ -3033,8 +3052,6 @@ CTranslatorDXLToPlStmt::PsortFromDXLSort
 	CDXLNode *pdxlnChild = (*pdxlnSort)[EdxlsortIndexChild];
 	CDXLNode *pdxlnPrL = (*pdxlnSort)[EdxlsortIndexProjList];
 	CDXLNode *pdxlnFilter = (*pdxlnSort)[EdxlsortIndexFilter];
-	CDXLNode *pdxlnLimitCount = (*pdxlnSort)[EdxlsortIndexLimitCount];
-	CDXLNode *pdxlnLimitOffset = (*pdxlnSort)[EdxlsortIndexLimitOffset];
 
 	CDXLTranslateContext dxltrctxChild(m_pmp, false, pdxltrctxOut->PhmColParam());
 
@@ -3074,41 +3091,6 @@ CTranslatorDXLToPlStmt::PsortFromDXLSort
 
 	TranslateSortCols(pdxlnSortColList, &dxltrctxChild, psort->sortColIdx, psort->sortOperators, psort->nullsFirst);
 
-	// translate limit information
-	if (0 < pdxlnLimitCount->UlArity())
-	{
-		GPOS_ASSERT(1 == pdxlnLimitCount->UlArity());
-		const CDXLNode *pdxlnLimitCountExpr = (*pdxlnLimitCount)[0];
-		CMappingColIdVarPlStmt mapcidvarplstmt = CMappingColIdVarPlStmt
-																(
-																m_pmp,
-																NULL,
-																pdrgpdxltrctx,
-																pdxltrctxOut,
-																m_pctxdxltoplstmt,
-																pplan
-																);
-
-		psort->limitCount = (Node *) m_pdxlsctranslator->PexprFromDXLNodeScalar(pdxlnLimitCountExpr, &mapcidvarplstmt);
-	}
-
-	if (0 < pdxlnLimitOffset->UlArity())
-	{
-		GPOS_ASSERT(1 == pdxlnLimitOffset->UlArity());
-		const CDXLNode *pdxlnLimitOffsetExpr = (*pdxlnLimitOffset)[0];
-
-		CMappingColIdVarPlStmt mapcidvarplstmt = CMappingColIdVarPlStmt
-																(
-																m_pmp,
-																NULL,
-																pdrgpdxltrctx,
-																pdxltrctxOut,
-																m_pctxdxltoplstmt,
-																pplan
-																);
-
-		psort->limitOffset = (Node *) m_pdxlsctranslator->PexprFromDXLNodeScalar(pdxlnLimitOffsetExpr, &mapcidvarplstmt);
-	}
 	SetParamIds(pplan);
 
 	// cleanup
@@ -3590,7 +3572,7 @@ CTranslatorDXLToPlStmt::PappendFromDXLAppend
 
 		TargetEntry *pte = MakeNode(TargetEntry);
 		pte->expr = (Expr *) pvar;
-		pte->resname = CTranslatorUtils::SzFromWsz(pdxlopScIdent->Pdxlcr()->Pmdname()->Pstr()->Wsz());
+		pte->resname = CTranslatorUtils::SzFromWsz(pdxlopPrel->PmdnameAlias()->Pstr()->Wsz());
 		pte->resno = attno;
 
 		// add column mapping to output translation context
@@ -3740,7 +3722,7 @@ CTranslatorDXLToPlStmt::PshscanFromDXLSharedScan
 
 	GPOS_ASSERT(SHARE_NOTSHARED != pshscan->share_type);
 
-	Plan *pplan = &(pshscan->plan);
+	Plan *pplan = &(pshscan->scan.plan);
 	pplan->plan_node_id = m_pctxdxltoplstmt->UlNextPlanId();
 	pplan->plan_parent_node_id = IPlanId(pplanParent);
 
@@ -3829,7 +3811,7 @@ CTranslatorDXLToPlStmt::PshscanFromDXLCTEProducer
 	// create the shared input scan representing the CTE Producer
 	ShareInputScan *pshscanCTEProducer = MakeNode(ShareInputScan);
 	pshscanCTEProducer->share_id = ulCTEId;
-	Plan *pplan = &(pshscanCTEProducer->plan);
+	Plan *pplan = &(pshscanCTEProducer->scan.plan);
 	pplan->plan_node_id = m_pctxdxltoplstmt->UlNextPlanId();
 	pplan->plan_parent_node_id = IPlanId(pplanParent);
 
@@ -3980,9 +3962,9 @@ CTranslatorDXLToPlStmt::InitializeSpoolingInfo
 		ShareInputScan *pshscanConsumer = (ShareInputScan *) lfirst(plcShscanCTEConsumer);
 		pshscanConsumer->share_type = share_type;
 		pshscanConsumer->driver_slice = -1; // default
-		if (NULL == (pshscanConsumer->plan).flow)
+		if (NULL == (pshscanConsumer->scan.plan).flow)
 		{
-			(pshscanConsumer->plan).flow = (Flow *) gpdb::PvCopyObject(pflow);
+			(pshscanConsumer->scan.plan).flow = (Flow *) gpdb::PvCopyObject(pflow);
 		}
 	}
 }
@@ -4008,7 +3990,7 @@ CTranslatorDXLToPlStmt::PflowCTEConsumer
 	ForEach (plcShscanCTEConsumer, plshscanCTEConsumer)
 	{
 		ShareInputScan *pshscanConsumer = (ShareInputScan *) lfirst(plcShscanCTEConsumer);
-		Flow *pflowCte = (pshscanConsumer->plan).flow;
+		Flow *pflowCte = (pshscanConsumer->scan.plan).flow;
 		if (NULL != pflowCte)
 		{
 			if (NULL == pflow)
@@ -4054,7 +4036,7 @@ CTranslatorDXLToPlStmt::PshscanFromDXLCTEConsumer
 	ShareInputScan *pshscanCTEConsumer = MakeNode(ShareInputScan);
 	pshscanCTEConsumer->share_id = ulCTEId;
 
-	Plan *pplan = &(pshscanCTEConsumer->plan);
+	Plan *pplan = &(pshscanCTEConsumer->scan.plan);
 	pplan->plan_node_id = m_pctxdxltoplstmt->UlNextPlanId();
 	pplan->plan_parent_node_id = IPlanId(pplanParent);
 
@@ -4216,10 +4198,7 @@ CTranslatorDXLToPlStmt::PplanDTS
 	// add the new range table entry as the last element of the range table
 	Index iRel = gpdb::UlListLength(m_pctxdxltoplstmt->PlPrte()) + 1;
 
-	const IMDRelation *pmdrel = m_pmda->Pmdrel(pdxlop->Pdxltabdesc()->Pmdid());
-	const ULONG ulRelCols = pmdrel->UlColumns() - pmdrel->UlSystemColumns();
-	
-	RangeTblEntry *prte = PrteFromTblDescr(pdxlop->Pdxltabdesc(), NULL /*pdxlid*/, ulRelCols, iRel, &dxltrctxbt);
+	RangeTblEntry *prte = PrteFromTblDescr(pdxlop->Pdxltabdesc(), NULL /*pdxlid*/, iRel, &dxltrctxbt);
 	GPOS_ASSERT(NULL != prte);
 	prte->requiredPerms |= ACL_SELECT;
 
@@ -4295,9 +4274,7 @@ CTranslatorDXLToPlStmt::PplanDIS
 	Index iRel = gpdb::UlListLength(m_pctxdxltoplstmt->PlPrte()) + 1;
 
 	const IMDRelation *pmdrel = m_pmda->Pmdrel(pdxlop->Pdxltabdesc()->Pmdid());
-	const ULONG ulRelCols = pmdrel->UlColumns() - pmdrel->UlSystemColumns();
-
-	RangeTblEntry *prte = PrteFromTblDescr(pdxlop->Pdxltabdesc(), NULL /*pdxlid*/, ulRelCols, iRel, &dxltrctxbt);
+	RangeTblEntry *prte = PrteFromTblDescr(pdxlop->Pdxltabdesc(), NULL /*pdxlid*/, iRel, &dxltrctxbt);
 	GPOS_ASSERT(NULL != prte);
 	prte->requiredPerms |= ACL_SELECT;
 	m_pctxdxltoplstmt->AddRTE(prte);
@@ -4457,10 +4434,9 @@ CTranslatorDXLToPlStmt::PplanDML
 	m_plResultRelations = gpdb::PlAppendInt(m_plResultRelations, iRel);
 
 	const IMDRelation *pmdrel = m_pmda->Pmdrel(pdxlop->Pdxltabdesc()->Pmdid());
-	const ULONG ulRelCols = pmdrel->UlColumns() - pmdrel->UlSystemColumns();
 
 	CDXLTableDescr *pdxltabdesc = pdxlop->Pdxltabdesc();
-	RangeTblEntry *prte = PrteFromTblDescr(pdxltabdesc, NULL /*pdxlid*/, ulRelCols, iRel, &dxltrctxbt);
+	RangeTblEntry *prte = PrteFromTblDescr(pdxltabdesc, NULL /*pdxlid*/, iRel, &dxltrctxbt);
 	GPOS_ASSERT(NULL != prte);
 	prte->requiredPerms |= aclmode;
 	m_pctxdxltoplstmt->AddRTE(prte);
@@ -4563,7 +4539,7 @@ CTranslatorDXLToPlStmt::PlDirectDispatchSegIds
 	
 	DrgPdrgPdxldatum *pdrgpdrgpdxldatum = pdxlddinfo->Pdrgpdrgpdxldatum();
 	
-	if (0 == pdrgpdrgpdxldatum->UlSafeLength())
+	if (pdrgpdrgpdxldatum == NULL || 0 == pdrgpdrgpdxldatum->UlLength())
 	{
 		return NIL;
 	}
@@ -4778,8 +4754,6 @@ CTranslatorDXLToPlStmt::PplanAssert
 
 	CDXLNode *pdxlnPrL = (*pdxlnAssert)[CDXLPhysicalAssert::EdxlassertIndexProjList];
 
-	List *plQuals = NULL;
-
 	DrgPdxltrctx *pdrgpdxltrctx = GPOS_NEW(m_pmp) DrgPdxltrctx(m_pmp);
 	pdrgpdxltrctx->Append(const_cast<CDXLTranslateContext*>(&dxltrctxChild));
 
@@ -4922,11 +4896,15 @@ CTranslatorDXLToPlStmt::PrteFromTblDescr
 	(
 	const CDXLTableDescr *pdxltabdesc,
 	const CDXLIndexDescr *pdxlid, // should be NULL unless we have an index-only scan
-	ULONG ulRelColumns,
 	Index iRel,
 	CDXLTranslateContextBaseTable *pdxltrctxbtOut
 	)
 {
+	GPOS_ASSERT(NULL != pdxltabdesc);
+
+	const IMDRelation *pmdrel = m_pmda->Pmdrel(pdxltabdesc->Pmdid());
+	const ULONG ulRelColumns = CTranslatorUtils::UlNonSystemColumns(pmdrel);
+
 	RangeTblEntry *prte = MakeNode(RangeTblEntry);
 	prte->rtekind = RTE_RELATION;
 
@@ -5088,7 +5066,7 @@ CTranslatorDXLToPlStmt::PlTargetListFromProjList
 				// the left or right child of the operator
 
 				GPOS_ASSERT(NULL != pdrgpdxltrctx);
-				GPOS_ASSERT(0 != pdrgpdxltrctx->UlSafeLength());
+				GPOS_ASSERT(0 != pdrgpdxltrctx->UlLength());
 				ULONG ulColId = CDXLScalarIdent::PdxlopConvert(pdxlnExpr->Pdxlop())->Pdxlcr()->UlID();
 
 				const CDXLTranslateContext *pdxltrctxLeft = (*pdrgpdxltrctx)[0];
@@ -5098,7 +5076,7 @@ CTranslatorDXLToPlStmt::PlTargetListFromProjList
 				if (NULL == pteOriginal)
 				{
 					// variable not found on the left side
-					GPOS_ASSERT(2 == pdrgpdxltrctx->UlSafeLength());
+					GPOS_ASSERT(2 == pdrgpdxltrctx->UlLength());
 					const CDXLTranslateContext *pdxltrctxRight = (*pdrgpdxltrctx)[1];
 
 					GPOS_ASSERT(NULL != pdxltrctxRight);
@@ -5845,7 +5823,7 @@ CTranslatorDXLToPlStmt::PdistrpolicyFromCtas
 {
 	DrgPul *pdrgpulDistrCols = pdxlop->PdrgpulDistr();
 
-	const ULONG ulDistrCols = pdrgpulDistrCols->UlSafeLength();
+	const ULONG ulDistrCols = (pdrgpulDistrCols == NULL) ? 0 : pdrgpulDistrCols->UlLength();
 
 	ULONG ulDistrColsAlloc = 1;
 	if (0 < ulDistrCols)
@@ -5972,9 +5950,8 @@ CTranslatorDXLToPlStmt::PplanBitmapTableScan
 	Index iRel = gpdb::UlListLength(m_pctxdxltoplstmt->PlPrte()) + 1;
 
 	const IMDRelation *pmdrel = m_pmda->Pmdrel(pdxltabdesc->Pmdid());
-	const ULONG ulRelCols = pmdrel->UlColumns() - pmdrel->UlSystemColumns();
 
-	RangeTblEntry *prte = PrteFromTblDescr(pdxltabdesc, NULL /*pdxlid*/, ulRelCols, iRel, &dxltrctxbt);
+	RangeTblEntry *prte = PrteFromTblDescr(pdxltabdesc, NULL /*pdxlid*/, iRel, &dxltrctxbt);
 	GPOS_ASSERT(NULL != prte);
 	prte->requiredPerms |= ACL_SELECT;
 

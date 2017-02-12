@@ -267,14 +267,6 @@ static const PQconninfoOption PQconninfoOptions[] = {
 		"gp-debug-qeid", "D", 40,
 	offsetof(struct pg_conn, gpqeid)},
 	
-	{"gpqdid", NULL, "", NULL,
-		"gp-debug-qdid", "D", 40,
-	offsetof(struct pg_conn, gpqdid)},
-	
-	{"gpdaid", NULL, "", NULL,
-		"gp-debug-daid", "D", 40,
-	offsetof(struct pg_conn, gpdaid)},
-
 	{"replication", NULL, NULL, NULL,
 		"Replication", "D", 5,
 	offsetof(struct pg_conn, replication)},
@@ -286,6 +278,12 @@ static const PQconninfoOption PQconninfoOptions[] = {
 
 static const PQEnvironmentOption EnvironmentOptions[] =
 {
+	/*
+	 * For QD-QE connections, we should ignore these environment variables,
+	 * since env variable of QD should not effect the GUCs of QE, otherwise, the SET
+	 * command would not work in the newly created Gang then
+	 */
+#if 0
 	/* common user-interface settings */
 	{
 		"PGDATESTYLE", "datestyle"
@@ -300,6 +298,7 @@ static const PQEnvironmentOption EnvironmentOptions[] =
 	{
 		"PGGEQO", "geqo"
 	},
+#endif
 	{
 		NULL, NULL
 	}
@@ -2416,10 +2415,6 @@ makeEmptyPGconn(void)
 	conn->status = CONNECTION_BAD;
 	conn->asyncStatus = PGASYNC_IDLE;
 	conn->xactStatus = PQTRANS_IDLE;
-	conn->QEWriter_HaveInfo = false;
-	conn->QEWriter_DistributedTransactionId = 0;
-	conn->QEWriter_CommandId = 0;
-	conn->QEWriter_Dirty = false;
 	conn->options_valid = false;
 	conn->nonblocking = false;
 	conn->setenv_state = SETENV_STATE_IDLE;
@@ -2524,14 +2519,10 @@ freePGconn(PGconn *conn)
 	if (conn->keepalives_count)
 		free(conn->keepalives_count);
 
-    if (conn->gpqeid)			/* CDB */
-        free(conn->gpqeid);
-    if (conn->gpqdid)			/* CDB */
-        free(conn->gpqdid);
-    if (conn->gpdaid)			/* CDB */
-        free(conn->gpdaid);
-    if (conn->qe_version)		/* CDB */
-        free(conn->qe_version);
+	if (conn->gpqeid)			/* CDB */
+		free(conn->gpqeid);
+	if (conn->qe_version)		/* CDB */
+		free(conn->qe_version);
 
 	/* Note that conn->Pfdebug is not ours to close or free */
 	if (conn->last_query)

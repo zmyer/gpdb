@@ -1,3 +1,6 @@
+================================================
+Diagnostic functions for Append-optimized tables
+================================================
 
  The procedure described in this utility will allow a user to retrieve 
  internal information about an AO or CO table.

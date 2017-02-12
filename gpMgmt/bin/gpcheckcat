@@ -19,14 +19,9 @@ Usage: gpcheckcat [<option>] [dbname]
 '''
 import getopt
 import re
-import stat
 import sys
+import time
 from datetime import datetime
-from time import localtime, strftime
-
-
-TIMESTAMP = datetime.now().strftime("%Y%m%d%H%M%S")
-REPAIR_SCRIPT = 'runsql_%s.sh' % TIMESTAMP
 
 try:
     from gppylib.db import dbconn
@@ -38,6 +33,11 @@ try:
     from pygresql import pg
     from gpcheckcat_modules.unique_index_violation_check import UniqueIndexViolationCheck
     from gpcheckcat_modules.leaked_schema_dropper import LeakedSchemaDropper
+    from gpcheckcat_modules.repair import Repair
+    from gpcheckcat_modules.foreign_key_check import ForeignKeyCheck
+    from gpcheckcat_modules.mirror_matching_check import MirrorMatchingCheck
+
+
 except ImportError, e:
     sys.exit('Error: unable to import module: ' + str(e))
 
@@ -103,7 +103,7 @@ class Global():
         self.opt['-V'] = False
         self.opt['-t'] = False
 
-        self.opt['-g'] = 'gpcheckcat.repair.' + strftime('%Y-%m-%d.%H.%M.%S', localtime())
+        self.opt['-g'] = 'gpcheckcat.repair.' + Repair.TIMESTAMP
         self.opt['-B'] = parallelism
         self.opt['-T'] = None
 
@@ -114,6 +114,8 @@ class Global():
         self.opt['-R'] = None
         self.opt['-C'] = None
         self.opt['-l'] = False
+
+        self.opt['-E'] = False
 
         self.cfg = None
         self.dbname = None
@@ -149,9 +151,6 @@ class Global():
         # array of SQL statements. Key is dbid
         self.ReSync = {}
 
-        # Indexes to rebuild
-        self.Reindex = []
-
         # constraints which are actually unenforcable
         self.Constraints = []
 
@@ -160,6 +159,9 @@ class Global():
 
         # fix distribution policies
         self.Policies = []
+
+        # Indexes to rebuild
+        self.Reindex = []
 
         self.missingEntryStatus = None
         self.inconsistentEntryStatus = None
@@ -187,7 +189,6 @@ def usage(exitarg=None):
 ###############################
 
 def getversion():
-    versions = ["3.2", "3.3", "4.0", "4.1", "main"]
     db = connect()
     curs = db.query('''
     select regexp_replace(version(),
@@ -216,7 +217,8 @@ def getalldbs():
 ###############################
 def parseCommandLine():
     try:
-        (options, args) = getopt.getopt(sys.argv[1:], '?p:P:U:B:vg:t:AOS:R:C:l')
+        # A colon following the flag indicates an argument is expected
+        (options, args) = getopt.getopt(sys.argv[1:], '?p:P:U:B:vg:t:AOS:R:C:lE')
     except Exception, e:
         usage('Error: ' + str(e))
 
@@ -225,7 +227,7 @@ def parseCommandLine():
             usage(0)
         elif switch[1] in 'pBPUgSRC':
             GV.opt[switch] = val
-        elif switch[1] in 'vtAOl':
+        elif switch[1] in 'vtAOlE':
             GV.opt[switch] = True
 
     def setdef(x, v):
@@ -529,6 +531,7 @@ def checkDistribPolicy():
         myprint('[ERROR] executing test: checkDistribPolicy')
         myprint('  Execution error: ' + str(e))
 
+    checkConstraintsRepair()
 
 #############
 def checkPartitionIntegrity():
@@ -726,6 +729,7 @@ def checkPartitionIntegrity():
 
     db.close()
 
+    checkPoliciesRepair()
 
 #############
 # A dictionary of SQL statements for checkPartitionRegularity()
@@ -1931,7 +1935,8 @@ def removeFastSequence(db):
                               union
                               select oid from gp_dist_random('pg_class')) AS c
                         ON (fs.objid = c.oid)
-                     WHERE c.oid IS NULL) AS r
+                        WHERE c.oid IS NULL
+                        ) AS r
                   ON r.gp_segment_id = cfg.content
                WHERE cfg.role = 'p';
               """
@@ -2132,7 +2137,6 @@ def checkOwners():
     from gp_dist_random('pg_class') r
       join pg_class c on (c.oid = r.oid)
       left join pg_appendonly ao on (c.oid = ao.segrelid or
-                                     c.oid = ao.segidxid or
                                      c.oid = ao.blkdirrelid or
                                      c.oid = ao.blkdiridxid)
       left join pg_class t on (t.reltoastidxid = c.oid)
@@ -2233,6 +2237,8 @@ def checkOwners():
         # Check owners in pg_operator
         # Check owners in pg_opclass
         # ...
+
+    checkOwnersRepair()
 
 
 def checkPersistentTables():
@@ -2529,23 +2535,35 @@ def checkPersistentTables():
 
     qname = "gp_persistent_relation_node   <=> gp_relation_node"
     qry = """
-    SELECT  coalesce(p.relfilenode_oid, r.relfilenode_oid) as relfilenode,
-        p.ctid, r.persistent_tid
-    FROM  (
-      SELECT p.ctid, p.* FROM gp_persistent_relation_node p
-      WHERE persistent_state = 2 AND p.database_oid in (
-        SELECT oid FROM pg_database WHERE datname = current_database()
-        UNION ALL
-        SELECT 0
-        )
-      ) p
-      FULL OUTER JOIN gp_relation_node r
-        ON (p.relfilenode_oid = r.relfilenode_oid and
-            p.segment_file_num = r.segment_file_num)
-    WHERE  (p.relfilenode_oid is NULL OR
-            r.relfilenode_oid is NULL OR
-            p.ctid != r.persistent_tid)
-    """
+    SELECT COALESCE(p.relfilenode_oid, r.relfilenode_oid) AS relfilenode,
+           p.ctid,
+           r.persistent_tid
+    FROM   (SELECT p.ctid,
+                   CASE
+                     WHEN p.tablespace_oid IN (SELECT dattablespace
+                                               FROM   pg_database
+                                               WHERE  datname = Current_database())
+                   THEN 0
+                     ELSE p.tablespace_oid
+                   END,
+                   p.database_oid,
+                   p.relfilenode_oid,
+                   p.segment_file_num,
+                   p.persistent_state
+            FROM   gp_persistent_relation_node p
+            WHERE  persistent_state = 2
+                   AND p.database_oid IN (SELECT oid
+                                          FROM   pg_database
+                                          WHERE  datname = Current_database()
+                                          UNION ALL
+                                          SELECT 0)) p
+           FULL OUTER JOIN gp_relation_node r
+                        ON ( p.relfilenode_oid = r.relfilenode_oid
+                             AND p.segment_file_num = r.segment_file_num
+                             AND p.tablespace_oid = r.tablespace_oid )
+    WHERE  ( p.relfilenode_oid IS NULL
+              OR r.relfilenode_oid IS NULL
+              OR p.ctid != r.persistent_tid ) """
     queries.append([qname, qry])
 
     qname = "gp_persistent_relation_node   <=> pg_class"
@@ -2711,9 +2729,9 @@ def checkACL():
 
     for cat in sorted(tables):
         checkTableACL(cat)
-
-
 # -------------------------------------------------------------------------------
+
+
 def checkTableACL(cat):
     catname = cat.getTableName()
     pkey = cat.getPrimaryKey()
@@ -2787,10 +2805,10 @@ def checkTableACL(cat):
         myprint('[ERROR] executing: Cross consistency check for ' + catname)
         myprint('  Execution error: ' + str(e))
         myprint(qry)
-
-
 # -------------------------------------------------------------------------------
-def checkForeignKey():
+
+
+def checkForeignKey(cat_tables=None):
     logger.info('-----------------------------------')
     logger.info('Performing foreign key tests')
 
@@ -2798,149 +2816,65 @@ def checkForeignKey():
         GV.foreignKeyStatus = True
 
     # looks up information in the catalog:
-    tables = GV.catalog.getCatalogTables()
+    if not cat_tables:
+        cat_tables = GV.catalog.getCatalogTables()
 
-    for cat in sorted(tables):
-        checkTableForeignKey(cat)
+    db_connection = connect2(GV.cfg[1], utilityMode=False)
+    try:
+        foreign_key_check = ForeignKeyCheck(db_connection, logger, GV.opt['-S'], autoCast)
+        foreign_key_issues = foreign_key_check.runCheck(cat_tables)
+        if foreign_key_issues:
+            GV.checkStatus = False
 
-
+        for catname, tuples in foreign_key_issues.iteritems():
+                for pkcatname, fields, results in tuples:
+                    processForeignKeyResult(catname, pkcatname, fields, results)
+                    if catname == 'gp_fastsequence' and pkcatname == 'pg_class':
+                        setError(ERROR_REMOVE)
+                        removeFastSequence(db_connection)
+                    else:
+                        setError(ERROR_NOREPAIR)
+    except Exception, ex:
+        setError(ERROR_NOREPAIR)
+        GV.foreignKeyStatus = False
+        myprint('  Execution error: ' + str(ex))
 # -------------------------------------------------------------------------------
-def checkTableForeignKey(cat):
-    catname = cat.getTableName()
-    fkeylist = cat.getForeignKeys()
-    isShared = cat.isShared()
-    pkeylist = cat.getPrimaryKey()
-    coltypes = cat.getTableColtypes()
-
-    # skip tables without fkey
-    if len(fkeylist) <= 0:
-        return
-    if len(cat.getPrimaryKey()) <= 0:
-        return
-
-    # skip these master-only tables
-    skipped_masteronly = ['gp_relation_node', 'pg_description', 'pg_shdescription',
-                          'pg_stat_last_operation', 'pg_stat_last_shoperation', 'pg_statistic']
-
-    if catname in skipped_masteronly:
-        return
-
-    # skip shared/non-shared tables
-    if GV.opt['-S']:
-        if re.match("none", GV.opt['-S'], re.I) and isShared:
-            return
-        if re.match("only", GV.opt['-S'], re.I) and not isShared:
-            return
-
-    # primary key lists
-    cat1pkeys = []
-    pkeys = []
-
-    # build array of catalog primary keys (with aliases) and
-    # primary key alias list
-    for pk in pkeylist:
-        cat1pkeys.append('cat1.' + pk + ' as %s_%s' % (catname, pk))
-        pkeys.append('%s_%s' % (catname, pk))
-
-    logger.info('Building %d queries to check FK constraint on table %s' % (len(fkeylist), catname))
-    for fkeydef in fkeylist:
-        castedFkey = [c + autoCast.get(coltypes[c], '') for c in fkeydef.getColumns()]
-        fkeystr = ', '.join(castedFkey)
-        cat1fkeystr = 'cat1.' + ', cat1.'.join(fkeydef.getColumns())
-        pkeystr = ', '.join(fkeydef.getPKey())
-        pkcatname = fkeydef.getPkeyTableName()
-
-        qry = fkQuery(catname, pkcatname, fkeystr, pkeystr, pkeys, cat1pkeys)
-
-        # Execute the query
-        try:
-            db = connect2(GV.cfg[1], utilityMode=False)
-            curs = db.query(qry)
-            nrows = curs.ntuples()
-
-            if nrows == 0:
-                logger.info('[OK] Foreign key check for %s(%s) referencing %s(%s)' %
-                            (catname, fkeystr, pkcatname, pkeystr))
-            else:
-                GV.checkStatus = False
-                setError(ERROR_NOREPAIR)
-                GV.foreignKeyStatus = False
-                logger.info('[FAIL] Foreign key check for %s(%s) referencing %s(%s)' %
-                            (catname, fkeystr, pkcatname, pkeystr))
-                logger.error('  %s has %d issue(s): entry has NULL reference of %s(%s)' %
-                             (catname, nrows, pkcatname, pkeystr))
-
-                fields = curs.listfields()
-                log_literal(logger, logging.ERROR, "    " + " | ".join(fields))
-                for row in curs.getresult():
-                    log_literal(logger, logging.ERROR, "    " + " | ".join(map(str, row)))
-                processForeignKeyResult(catname, pkcatname, fields, curs.getresult())
-
-                if catname == 'gp_fastsequence' and pkcatname == 'pg_class':
-                    setError(ERROR_REMOVE)
-                    removeFastSequence(db)
-
-        except Exception, e:
-            setError(ERROR_NOREPAIR)
-            GV.foreignKeyStatus = False
-            myprint('[ERROR] executing: Foreign key check for ' + catname)
-            myprint('  Execution error: ' + str(e))
-            myprint(qry)
 
 
-# -------------------------------------------------------------------------------
-def fkQuery(catname, pkcatname, fkeystr, pkeystr, pkeys, cat1pkeys):
-    qry = """
-          SELECT {primary_key_alias}, {cat2_dot_pk},
-                 array_agg(gp_segment_id order by gp_segment_id) as segids
-          FROM (
-                SELECT cat1.gp_segment_id, {cat1_dot_pk}, cat1.{FK1} as {cat2_dot_pk}
-                FROM
-                    gp_dist_random('{CATALOG1}') cat1 LEFT OUTER JOIN
-                    gp_dist_random('{CATALOG2}') cat2
-                    ON (cat1.gp_segment_id = cat2.gp_segment_id AND
-                        cat1.{FK1} = cat2.{PK2} )
-                WHERE cat2.{PK2} is NULL
-                  AND cat1.{FK1} != 0
-                UNION ALL
-                SELECT -1 as gp_segment_id, {cat1_dot_pk}, cat1.{FK1} as {cat2_dot_pk}
-                FROM
-                    {CATALOG1} cat1 LEFT OUTER JOIN
-                    {CATALOG2} cat2
-                    ON (cat1.gp_segment_id = cat2.gp_segment_id AND
-                        cat1.{FK1} = cat2.{PK2} )
-                WHERE cat2.{PK2} is NULL
-                  AND cat1.{FK1} != 0
-                ORDER BY {primary_key_alias}, gp_segment_id
-          ) allresults
-          GROUP BY {primary_key_alias}, {cat2_dot_pk}
-          """.format(FK1=fkeystr,
-                     PK2=pkeystr,
-                     CATALOG1=catname,
-                     CATALOG2=pkcatname,
-                     cat1_dot_pk=', '.join(cat1pkeys),
-                     cat2_dot_pk='%s_%s' % (pkcatname, pkeystr),
-                     primary_key_alias=', '.join(pkeys))
-
-    return qry
-
-
-# -------------------------------------------------------------------------------
 def checkMissingEntry():
     logger.info('-----------------------------------')
-    logger.info('Performing cross consistency tests: check for missing or extraneous entries')
+    logger.info('Performing cross consistency tests: check for missing or extraneous issues')
 
     if GV.missingEntryStatus == None:
         GV.missingEntryStatus = True
 
-    # looks up information in the catalog:
+    catalog_issues = _checkAllTablesForMissingEntries()
+
+    if len(catalog_issues) == 0:
+        return
+
+    if GV.opt['-E']:
+        do_repair_for_extra(catalog_issues)
+    else:
+        setError(ERROR_NOREPAIR)
+
+
+def _checkAllTablesForMissingEntries():
+    catalog_issues = {}
     tables = GV.catalog.getCatalogTables()
-
-    for cat in sorted(tables):
-        checkTableMissingEntry(cat)
-
-
+    for catalog_table_obj in sorted(tables):
+        issues = checkTableMissingEntry(catalog_table_obj)
+        if not issues:
+            continue
+        catalog_name = catalog_table_obj.getTableName()
+        _, pk_name = getPrimaryKeyColumn(catalog_name, catalog_table_obj.getPrimaryKey())
+        # We do this check in this function rather than getPrimaryKeyColumn as
+        # it is used in checkACL and we do not want to modify that functionality
+        catalog_issues[(catalog_table_obj, pk_name)] = issues
+    return catalog_issues
 # -------------------------------------------------------------------------------
+
+
 def checkTableMissingEntry(cat):
     catname = cat.getTableName()
     pkey = cat.getPrimaryKey()
@@ -2960,9 +2894,8 @@ def checkTableMissingEntry(cat):
             return
 
     # Skip catalogs without primary key
-    if pkey == []:
-        logger.warn("[WARN] Skipped missing/extra entry check for %s" %
-                    catname)
+    if len(pkey) == 0:
+        logger.warn("[WARN] Skipped missing/extra entry check for %s" % catname)
         return
 
     castedPkey = cat.getPrimaryKey()
@@ -2987,7 +2920,6 @@ def checkTableMissingEntry(cat):
                 log_level = logging.WARNING
             else:
                 GV.checkStatus = False
-                setError(ERROR_NOREPAIR)
                 GV.missingEntryStatus = False
                 logger_with_level = logger.error
                 log_level = logging.ERROR
@@ -3003,6 +2935,9 @@ def checkTableMissingEntry(cat):
             processMissingDuplicateEntryResult(catname, fields, results, "missing")
             if catname == 'pg_type':
                 generateVerifyFile(catname, fields, results, 'missing_extraneous')
+
+            return results
+
     except Exception, e:
         setError(ERROR_NOREPAIR)
         GV.missingEntryStatus = False
@@ -3010,6 +2945,19 @@ def checkTableMissingEntry(cat):
         myprint('  Execution error: ' + str(e))
         myprint(qry)
 
+
+def checkMirroringMatching():
+    # check that PT rebuild has not left behind mismatched mirroring states in the segments
+    db_connection = connect2(GV.cfg[1], utilityMode=True)
+    try:
+        mismatched_segments = MirrorMatchingCheck().run_check(db_connection, logger)
+        if len(mismatched_segments) > 0:
+            GV.checkStatus = False
+            setError(ERROR_NOREPAIR)
+    except Exception as ex:
+        setError(ERROR_NOREPAIR)
+        GV.checkStatus = False
+        myprint('  Execution error: ' + str(ex))
 
 # -------------------------------------------------------------------------------
 def missingEntryQuery(max_content, catname, pkey, castedPkey):
@@ -3452,26 +3400,6 @@ name_repair = {
             "description": "Check if needs repairing segment",
             "fn": lambda maybeRemove, catmod_guc, seg: checkSegmentRepair(maybeRemove, catmod_guc, seg)
         },
-    "reindex":
-        {
-            "description": "Check if needs repair file for reindex",
-            "fn": lambda: checkReindexRepair()
-        },
-    "constraints":
-        {
-            "description": "Check if needs repair file to fix constraints",
-            "fn": lambda: checkConstraintsRepair()
-        },
-    "owners":
-        {
-            "description": "Check if needs repair file to fix messed up ownership",
-            "fn": lambda: checkOwnersRepair()
-        },
-    "policies":
-        {
-            "description": "Check if needs repair file to fix distribution policy",
-            "fn": lambda: checkPoliciesRepair()
-        }
 }
 
 ############################################################################
@@ -3601,6 +3529,14 @@ all_checks = {
             "version": 'main',
             "order": 15,
             "online": True
+        },
+    "mirroring_matching":
+        {
+            "description": "Check that configured mirroring and segments' mirroring agree",
+            "fn": lambda: checkMirroringMatching(),
+            "version": 'main',
+            "order": 16,
+            "online": True
         }
 }
 
@@ -3616,16 +3552,17 @@ def listAllChecks():
 
 
 #-------------------------------------------------------------------------------
-def runCheckCatname(cat):
+def runCheckCatname(catalog_table_obj):
 
-    checks = {'missing_extraneous': lambda: checkTableMissingEntry(cat),
-             'inconsistent': lambda: checkTableInconsistentEntry(cat),
-             'foreign_key': lambda: checkTableForeignKey(cat),
-             'duplicate': lambda: checkTableDuplicateEntry(cat),
-             'acl': lambda: checkTableACL(cat)}
+    checks = {'missing_extraneous': lambda: checkTableMissingEntry(catalog_table_obj),
+             'inconsistent': lambda: checkTableInconsistentEntry(catalog_table_obj),
+             # We assume that everything is passed as a list to checkForeignKey
+             'foreign_key': lambda:  checkForeignKey([catalog_table_obj]),
+             'duplicate': lambda: checkTableDuplicateEntry(catalog_table_obj),
+             'acl': lambda: checkTableACL(catalog_table_obj)}
 
     for check in sorted(checks):
-        myprint("Performing test '%s' for %s" % (check,cat.getTableName()))
+        myprint("Performing test '%s' for %s" % (check, catalog_table_obj.getTableName()))
         stime = time.time()
         checks[check]()
         etime = time.time()
@@ -3660,7 +3597,6 @@ def runOneCheck(name):
             GV.failedChecks.append(name)
 
 
-
 #-------------------------------------------------------------------------------
 def runAllChecks():
     '''
@@ -3675,25 +3611,13 @@ def runAllChecks():
     fixes = (len(GV.Remove) > 0 or
              len(GV.AdjustConname) > 0 or
              len(GV.DemoteConstraint) > 0 or
-             len(GV.ReSync) > 0 or
-             len(GV.Reindex) > 0 or
-             len(GV.Constraints) > 0 or
-             len(GV.Owners) > 0 or
-             len(GV.Policies) > 0)
+             len(GV.ReSync) > 0)
     if GV.opt['-g'] != None and fixes:
-        try:
-            if not os.path.exists(GV.opt['-g']):
-                os.mkdir(GV.opt['-g'])
-        except Exception, e:
-            logger.fatal('Unable to create directory "%s": %s' % (GV.opt['-g'], str(e)))
-            sys.exit(1)
-
+        repair_obj = Repair(context=GV)
+        repair_dir_path = repair_obj.create_repair_dir()
         logger.debug('Building catalog repair scripts')
         # build a script to run these files
         script = ''
-        # if repair script already exist, do not have to add extra script type to head
-        if not os.path.isfile(os.path.join(GV.opt['-g'], REPAIR_SCRIPT)):
-            script = '#!/bin/bash\ncd $(dirname $0)\n'
         # set allow_system_table_mods GUC for gpdb >= 4.2
         catmod_guc = ""
         if GV.version >= "4.2":
@@ -3717,43 +3641,54 @@ def runAllChecks():
             segment_repair_script = name_repair["segment"]["fn"](maybeRemove, catmod_guc, seg)
             script += segment_repair_script
 
-        c = GV.cfg[1]
-        for name in name_repair:
-            # skip checking on the segment repeatedly
-            if name in ['segment']:
-                continue
-            description, repair_filename = name_repair[name]["fn"]()
-            if repair_filename != None:
-                script += description
-                script += 'psql -X -a -h %s -p %i -f %s "%s" > %s.out 2>&1\n' % \
-                          (c['hostname'], c['port'], repair_filename, GV.dbname, repair_filename)
+        repair_obj.append_content_to_bash_script(repair_dir_path, script)
 
-        generate_repair_script(script)
+        print_repair_issues(repair_dir_path)
 
     if GV.retcode >= ERROR_NOREPAIR:
         logger.warn('[WARN]: unable to generate repairs for some issues')
     logger.info("Check complete")
 
 
-def generate_repair_script(script):
-    try:
-        path = '%s/%s' % (GV.opt['-g'], REPAIR_SCRIPT)
-        file = open(path, 'a')
-        file.write(script)
-        file.close()
-        os.chmod(path, stat.S_IXUSR | stat.S_IRUSR | stat.S_IWUSR)
-    except Exception, e:
-        logger.fatal('Could not write script: %s' % str(e))
-        sys.exit(1)
+def do_repair(sql_repair_contents, issue_type, description):
+    if len(sql_repair_contents) == 0:
+        return
 
+    repair_dir_path = ""
+    try:
+        repair_obj = Repair(context=GV, issue_type=issue_type, desc=description)
+        repair_dir_path = repair_obj.create_repair(sql_repair_contents=sql_repair_contents)
+    except Exception, ex:
+        logger.fatal(str(ex))
+
+    print_repair_issues(repair_dir_path)
+
+
+def do_repair_for_extra(catalog_issues):
+    setError(ERROR_REMOVE)
+    repair_dir_path = ""
+    for (catalog_table_obj, pk_name), issues in catalog_issues.iteritems():
+        try:
+            repair_obj = Repair(context=GV, issue_type="extra", desc="Removing extra entries")
+            repair_dir_path = repair_obj.create_repair_for_extra_missing(catalog_table_obj=catalog_table_obj,
+                                                                         issues=issues,
+                                                                         pk_name=pk_name)
+        except Exception, ex:
+            logger.fatal(str(ex))
+
+    print_repair_issues(repair_dir_path)
+
+
+def print_repair_issues(repair_dir_path):
     myprint('')
-    myprint('[INFO]: repair scripts generated: %s' % path)
+    myprint("catalog issue(s) found , repair script(s) generated in dir {0}".format(repair_dir_path))
+    myprint('')
 
 
 def checkReindexRepair():
     if len(GV.Reindex) > 0:
         # dbname.type.timestamp.sql
-        filename = '%s.%s.%s.sql' % (GV.dbname, "reindex", TIMESTAMP)
+        filename = '%s.%s.%s.sql' % (GV.dbname, "reindex", Repair.TIMESTAMP)
         fullpath = '%s/%s' % (GV.opt['-g'], filename)
         try:
             file = open(fullpath, 'w')
@@ -3769,76 +3704,23 @@ def checkReindexRepair():
     else:
         return None, None
 
-
 def checkConstraintsRepair():
-    if len(GV.Constraints) > 0:
-        # dbname.type.timestamp.sql
-        filename = '%s.%s.%s.sql' % (GV.dbname, "removeconstraints", TIMESTAMP)
-        fullpath = '%s/%s' % (GV.opt['-g'], filename)
-        try:
-            file = open(fullpath, 'w')
-        except Exception, e:
-            logger.fatal('Unable to create file "%s": %s' % (fullpath, str(e)))
-            sys.exit(1)
-
-        description = '\necho "Dropping invalid unique constraints"\n'
-        GV.Constraints = list(set(GV.Constraints))
-        for r in GV.Constraints:
-            file.write('%s\n' % r)
-        file.close()
-        return description, filename
-    else:
-        return None, None
-
+    do_repair(GV.Constraints, issue_type="removeconstraints", description='Dropping invalid unique constraints')
 
 def checkOwnersRepair():
-    if len(GV.Owners) > 0:
-        # Previously we removed duplicate statements from the "Owners" list
-        # by casting it through a "list(set(...))", however this does not work
-        # since the order of items in the list is important for correct results.
-
-        # dbname.type.timestamp.sql
-        filename = '%s.%s.%s.sql' % (GV.dbname, "fixowners", TIMESTAMP)
-        fullpath = '%s/%s' % (GV.opt['-g'], filename)
-        try:
-            file = open(fullpath, 'w')
-        except Exception, e:
-            logger.fatal('Unable to create file "%s": %s' % (fullpath, str(e)))
-            sys.exit(1)
-
-        description = '\necho "Correcting table ownership"\n'
-        for r in GV.Owners:
-            file.write('%s\n' % r)
-        file.close()
-        return description, filename
-    else:
-        return None, None
+    # Previously we removed duplicate statements from the "Owners" list
+    # by casting it through a "list(set(...))", however this does not work
+    # since the order of items in the list is important for correct results.
+    do_repair(GV.Owners, issue_type="fixowner", description='Correcting table ownership')
 
 def checkPoliciesRepair():
     # changes to distribution policies
-    if len(GV.Policies) > 0:
-        # dbname.type.timestamp.sql
-        filename = '%s.%s.%s.sql' % (GV.dbname, "fixdistribution", TIMESTAMP)
-        fullpath = '%s/%s' % (GV.opt['-g'], filename)
-        try:
-            file = open(fullpath, 'w')
-        except Exception, e:
-            logger.fatal('Unable to create file "%s": %s' % (fullpath, str(e)))
-            sys.exit(1)
-
-        description = '\necho "Fixing distribution policies"\n'
-        for r in GV.Policies:
-            file.write('%s\n' % r)
-        file.close()
-        return description, filename
-    else:
-        return None, None
-
+    do_repair(GV.Policies, issue_type="fixdistribution", description='Fixing distribution policies')
 
 def checkSegmentRepair(maybeRemove, catmod_guc, seg):
     # dbid.host.port.dbname.timestamp.sql
     c = GV.cfg[seg]
-    filename = '%i.%s.%i.%s.%s.sql' % (seg, c['hostname'], c['port'], GV.dbname, TIMESTAMP)
+    filename = '%i.%s.%i.%s.%s.sql' % (seg, c['hostname'], c['port'], GV.dbname, Repair.TIMESTAMP)
     filename = filename.replace(' ', '_')
     fullpath = '%s/%s' % (GV.opt['-g'], filename)
     try:
@@ -3849,9 +3731,9 @@ def checkSegmentRepair(maybeRemove, catmod_guc, seg):
 
     # unique
     lines = set()
-    if GV.Remove.has_key(seg):
+    if GV.Remove.has_key(seg):#foreign_key check
         lines = lines.union(GV.Remove[seg])
-    if GV.AdjustConname.has_key(seg):
+    if GV.AdjustConname.has_key(seg):#part_constraint
         lines = lines.union(GV.AdjustConname[seg])
     if GV.DemoteConstraint.has_key(seg):
         lines = lines.union(GV.DemoteConstraint[seg])
@@ -3911,7 +3793,6 @@ GPObjectGraph = {}  # key = GPObject, value=[GPObject]
 # -------------------------------------------------------------------------------
 TableMainColumn = {}
 # Table with no OID
-TableMainColumn['gp_verification_history'] = ['vertoken', 'gp_verification_history']
 TableMainColumn['gp_version_at_initdb'] = ['schemaversion', 'gp_version_at_initdb']
 TableMainColumn['pg_aggregate'] = ['aggfnoid', 'pg_proc']
 TableMainColumn['pg_amop'] = ['amopclaid', 'pg_opclass']
@@ -4048,14 +3929,14 @@ def getResourceTypeOid(oid):
 def processMissingDuplicateEntryResult(catname, colname, allValues, type):
     # type = {"missing" | "duplicate"}
     '''
-    colname:       proname | pronamespace | proargtypes | exists | segids
-    allValues:         add | 2200 | 23 23 | extra | {2,3}
-                     scube | 2200 | 1700 | missing | {2}
-               scube_accum | 2200 | 1700 1700 | missing | {2}
+    colname:       proname | pronamespace | proargtypes | exists  | segids
+    allValues:         add | 2200         | 23 23       | extra   | {2,3}
+                     scube | 2200         | 1700        | missing | {2}
+               scube_accum | 2200         | 1700 1700   | missing | {2}
 
     colname:        oid | total | segids
-    allValues:    18853 | 2 | {-1,1}
-                  18853 | 3 | {0}
+    allValues:    18853 | 2     | {-1,1}
+                  18853 | 3     | {0}
     '''
     gpObjName = catname
     gpColName = None
@@ -4158,15 +4039,18 @@ def processInconsistentEntryResult(catname, pknames, colname, allValues):
 # -------------------------------------------------------------------------------
 def processForeignKeyResult(catname, pkcatname, colname, allValues):
     '''
-    colname:    pg_class_relname | pg_class_relnamespace | pg_type_oid | segids
-    allValues:            test11 | 2200 | 17389 | {-1,0,1,2,3}
-                           test4 | 2200 | 17077 | {-1,0,1,2,3}
+    colname:    pg_attribute_attrelid | pg_attribute_attname | missing_catalog | present_key | pg_class_oid | segids
+    allValues:  None                  | None                 | pg_attribute    | oid         | 190683       | {-1}
+    or
+    allValues:  12344                 | foo                  | pg_class        | attrelid    | 190683       | {-1}
     '''
 
     gpObjName = pkcatname
     gpColName = colname[-2].rsplit('_', 1)[1]
     fkeytab = catname
-    fkeylist = [name.rsplit('_', 1)[1] for name in colname[:-2]]
+    # The foreign keys are all entries except the last 4
+    # NOTE: We can't assume the first few rows are the expected issues anymore...
+    fkeylist = [name.rsplit('_', 1)[1] for name in colname[:-4]]
 
     # This catname may not be a GPObject (e.g. pg_attribute)
     #    1. pg_attrdef(adrelid) referencing pg_attribute(attrelid)
@@ -4179,10 +4063,32 @@ def processForeignKeyResult(catname, pkcatname, colname, allValues):
     for row in allValues:
         rowObjName = gpObjName
         segids = row[-1]
+
         oid = row[len(colname) - 2]
+        missing_cat = row[-4]
+
         # Build fkeys dict: used to find oid of pg_class
-        fkeys = dict((n, row[colname.index(fkeytab + '_' + n)]) for n in fkeylist)
-        issue = CatForeignKeyIssue(pkcatname, {gpColName: oid}, segids, catname, fkeys)
+        fkeys = dict((n, row[colname.index(catname + '_' + n)]) for n in fkeylist)
+
+        # Must get third column from end since fkeylist length can vary
+        if not fkeys:
+            fkeys = row[-3]
+
+        # We are flipping the values of the primary key and the foreign key
+        # depending on the missing catalog, since we want to print out the
+        # missing catalog at the front of the stderr
+        existing_cat = pkcatname
+        if missing_cat == pkcatname:
+            existing_cat = fkeytab
+
+        missing_pkeys={gpColName: oid}
+        existing_fkeys=fkeys
+        if catname == missing_cat:
+            missing_pkeys=fkeys
+            existing_fkeys={gpColName: oid}
+
+        issue = CatForeignKeyIssue(catname=missing_cat, pkeys=missing_pkeys,
+                                   segids=segids, fcatname=existing_cat, fkeys=existing_fkeys)
 
         # Special cases:
         #    1. pg_class(oid) referencing pg_type(oid) - relation & composite type
@@ -4195,6 +4101,16 @@ def processForeignKeyResult(catname, pkcatname, colname, allValues):
         gpObj = getGPObject(oid, rowObjName)
         gpObj.addForeignKeyIssue(issue)
 
+def getPrimaryKeyColumn(catname, pknames):
+    # We have to look up key to report (pg_pltemplate)
+    gpObjName = catname
+    gpColName = None
+    if catname in TableMainColumn:
+        gpColName = TableMainColumn[catname][0]
+        gpObjName = TableMainColumn[catname][1]
+    elif 'oid' in pknames:
+        gpColName = 'oid'
+    return gpObjName, gpColName
 
 # -------------------------------------------------------------------------------
 def processACLResult(catname, colname, allValues):
@@ -4204,16 +4120,9 @@ def processACLResult(catname, colname, allValues):
     				1 | gptest | None | {=Tc/nmiller,nmiller=CTc/nmiller,person2=CTc/nmiller}
     '''
 
-    gpObjName = catname
-    gpColName = None
     pknames = [i for i in colname[1:-2]]
 
-    # We have to look up key to report (pg_pltemplate)
-    if catname in TableMainColumn:
-        gpColName = TableMainColumn[catname][0]
-        gpObjName = TableMainColumn[catname][1]
-    elif 'oid' in pknames:
-        gpColName = 'oid'
+    gpObjName, gpColName = getPrimaryKeyColumn(catname, pknames)
 
     # Process entries
     for row in allValues:
@@ -4287,12 +4196,8 @@ class CatForeignKeyIssue:
                          (GV.report_cfg[i]['segname'], GV.report_cfg[i]['hostname'],
                           GV.report_cfg[i]['port'])
 
-        if self.fcatname == 'pg_attribute':
-            myprint("        No %s entry for %s column '%s' on %s" \
-                    % (self.catname, self.fcatname, self.fkeys['attname'], idstr))
-        else:
-            myprint("        No %s entry for %s %s on %s" \
-                    % (self.catname, self.fcatname, self.fkeys, idstr))
+        myprint("        No %s %s entry for %s %s on %s" \
+                % (self.catname, self.pkeys, self.fcatname, self.fkeys, idstr))
 
 
 # -------------------------------------------------------------------------------
@@ -4730,7 +4635,7 @@ def checkcatReport():
     myprint('SUMMARY REPORT')
     myprint('===================================================================')
     elapsed = datetime.timedelta(seconds=int(GV.elapsedTime))
-    endTime = datetime.datetime.now().strftime('%Y-%m-%d %H:%I:%S')
+    endTime = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     myprint('Completed %d test(s) on database \'%s\' at %s with elapsed time %s' \
             % (GV.totalCheckRun, GV.dbname, endTime, elapsed))
 
@@ -4825,7 +4730,7 @@ def generateVerifyFile(catname, fields, results, checkname):
           ) alltyprelids
           GROUP BY relname, oid ORDER BY count(*) desc
     '''.format(in_clause=in_clause)
-    filename = 'gpcheckcat.verify.%s.%s.%s.%s.sql' % (GV.dbname, catname, checkname, TIMESTAMP)
+    filename = 'gpcheckcat.verify.%s.%s.%s.%s.sql' % (GV.dbname, catname, checkname, Repair.TIMESTAMP)
     try:
         with open(filename, 'w') as fp:
             fp.write(verify_sql + '\n')
@@ -4883,8 +4788,8 @@ def main():
         elif GV.opt['-C']:
             namestr = GV.opt['-C']
             try:
-                cat = getCatObj(namestr)
-                runCheckCatname(cat)
+                catalog_table_obj = getCatObj(namestr)
+                runCheckCatname(catalog_table_obj)
             except Exception, e:
                 setError(ERROR_NOREPAIR)
                 sys.exit(GV.retcode)

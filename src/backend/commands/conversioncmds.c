@@ -8,18 +8,19 @@
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/commands/conversioncmds.c,v 1.31 2007/02/14 01:58:56 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/commands/conversioncmds.c,v 1.32.2.1 2009/02/27 16:35:31 heikki Exp $
  *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
 
 #include "access/heapam.h"
-#include "catalog/catquery.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
+#include "catalog/oid_dispatch.h"
 #include "catalog/pg_conversion.h"
 #include "catalog/pg_type.h"
+#include "commands/alter.h"
 #include "commands/conversioncmds.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
@@ -30,7 +31,7 @@
 #include "utils/syscache.h"
 
 #include "cdb/cdbvars.h"
-#include "cdb/cdbdisp.h"
+#include "cdb/cdbdisp_query.h"
 
 static void AlterConversionOwner_internal(Relation rel, Oid conversionOid,
 							  Oid newOwnerId);
@@ -110,16 +111,22 @@ CreateConversionCommand(CreateConversionStmt *stmt)
 					 CStringGetDatum(""),
 					 CStringGetDatum(result),
 					 Int32GetDatum(0));
+
 	/*
 	 * All seem ok, go ahead (possible failure would be a duplicate conversion
 	 * name)
 	 */
-	stmt->convOid = ConversionCreate(conversion_name, namespaceId, GetUserId(),
-					 from_encoding, to_encoding, funcoid, stmt->def, stmt->convOid);
+	ConversionCreate(conversion_name, namespaceId, GetUserId(),
+					 from_encoding, to_encoding, funcoid, stmt->def);
 					 
 	if (Gp_role == GP_ROLE_DISPATCH)
 	{
-		CdbDispatchUtilityStatement((Node *) stmt, "CreateConversionCommand");
+		CdbDispatchUtilityStatement((Node *) stmt,
+									DF_CANCEL_ON_ERROR|
+									DF_WITH_SNAPSHOT|
+									DF_NEED_TWO_PHASE,
+									GetAssignedOidsForDispatch(),
+									NULL);
 	}
 }
 
@@ -131,7 +138,7 @@ DropConversionCommand(List *name, DropBehavior behavior, bool missing_ok)
 {
 	Oid			conversionOid;
 
-	conversionOid = FindConversionByName(name);
+	conversionOid = get_conversion_oid(name, missing_ok);
 	if (!OidIsValid(conversionOid))
 	{
 		if (!missing_ok)
@@ -170,12 +177,7 @@ RenameConversion(List *name, const char *newname)
 
 	rel = heap_open(ConversionRelationId, RowExclusiveLock);
 
-	conversionOid = FindConversionByName(name);
-	if (!OidIsValid(conversionOid))
-		ereport(ERROR,
-				(errcode(ERRCODE_UNDEFINED_OBJECT),
-				 errmsg("conversion \"%s\" does not exist",
-						NameListToString(name))));
+	conversionOid = get_conversion_oid(name, false);
 
 	tup = SearchSysCacheCopy(CONVOID,
 							 ObjectIdGetDatum(conversionOid),
@@ -226,12 +228,7 @@ AlterConversionOwner(List *name, Oid newOwnerId)
 
 	rel = heap_open(ConversionRelationId, RowExclusiveLock);
 
-	conversionOid = FindConversionByName(name);
-	if (!OidIsValid(conversionOid))
-		ereport(ERROR,
-				(errcode(ERRCODE_UNDEFINED_OBJECT),
-				 errmsg("conversion \"%s\" does not exist",
-						NameListToString(name))));
+	conversionOid = get_conversion_oid(name, false);
 
 	AlterConversionOwner_internal(rel, conversionOid, newOwnerId);
 
@@ -321,4 +318,54 @@ AlterConversionOwner_internal(Relation rel, Oid conversionOid, Oid newOwnerId)
 								newOwnerId);
 
 	heap_freetuple(tup);
+}
+
+/*
+ * Execute ALTER CONVERSION SET SCHEMA
+ */
+void
+AlterConversionNamespace(List *name, const char *newschema)
+{
+	Oid			convOid,
+				nspOid;
+	Relation	rel;
+
+	rel = heap_open(ConversionRelationId, RowExclusiveLock);
+
+	convOid = get_conversion_oid(name, false);
+
+	/* get schema OID */
+	nspOid = LookupCreationNamespace(newschema);
+
+	AlterObjectNamespace(rel, CONVOID, CONNAMENSP,
+						 convOid, nspOid,
+						 Anum_pg_conversion_conname,
+						 Anum_pg_conversion_connamespace,
+						 Anum_pg_conversion_conowner,
+						 ACL_KIND_CONVERSION);
+
+	heap_close(rel, RowExclusiveLock);
+}
+
+/*
+ * Change conversion schema, by oid
+ */
+Oid
+AlterConversionNamespace_oid(Oid convOid, Oid newNspOid)
+{
+	Oid			oldNspOid;
+	Relation	rel;
+
+	rel = heap_open(ConversionRelationId, RowExclusiveLock);
+
+	oldNspOid = AlterObjectNamespace(rel, CONVOID, CONNAMENSP,
+									 convOid, newNspOid,
+									 Anum_pg_conversion_conname,
+									 Anum_pg_conversion_connamespace,
+									 Anum_pg_conversion_conowner,
+									 ACL_KIND_CONVERSION);
+
+	heap_close(rel, RowExclusiveLock);
+
+	return oldNspOid;
 }

@@ -7,7 +7,7 @@
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- * $PostgreSQL: pgsql/src/include/parser/parse_clause.h,v 1.48 2007/01/09 02:14:15 tgl Exp $
+ * $PostgreSQL: pgsql/src/include/parser/parse_clause.h,v 1.49 2008/01/01 19:45:58 momjian Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -28,8 +28,8 @@ extern Node *transformWhereClause(ParseState *pstate, Node *clause,
 extern Node *transformLimitClause(ParseState *pstate, Node *clause,
 					 const char *constructName);
 extern List *transformGroupClause(ParseState *pstate, List *grouplist,
-                                  List **targetlist, List *sortClause,
-                                  bool useSQL99);
+					 List **targetlist, List *sortClause,
+					 bool useSQL99);
 extern List *transformSortClause(ParseState *pstate, List *orderlist,
                                  List **targetlist, bool resolveUnknown,
                                  bool useSQL99);
@@ -44,8 +44,7 @@ extern List *addAllTargetsToSortList(ParseState *pstate,
 
 extern List *addTargetToSortList(ParseState *pstate, TargetEntry *tle,
 					List *sortlist, List *targetlist,
-					SortByDir sortby_dir, SortByNulls sortby_nulls,
-					List *sortby_opname, bool resolveUnknown);
+					SortBy *sortby, bool resolveUnknown);
 extern Index assignSortGroupRef(TargetEntry *tle, List *tlist);
 extern bool targetIsInSortGroupList(TargetEntry *tle, Oid sortop, List *sortList);
 

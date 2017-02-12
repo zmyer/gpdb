@@ -1,13 +1,13 @@
 /*-------------------------------------------------------------------------
  *
- * bitmappage.c
+ * bitmappages.c
  *	  Bitmap index page management code for the bitmap index.
  *
  * Copyright (c) 2006-2008, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL$
+ *	  src/backend/access/bitmap/bitmappages.c
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
@@ -109,18 +109,6 @@ _bitmap_wrtbuf(Buffer buf)
 
 	MarkBufferDirty(buf);
 	UnlockReleaseBuffer(buf);
-}
-
-/*
- * _bitmap_wrtnorelbuf() -- write a buffer page to disk without still holding
- *		the pin on this page.
- */
-void
-_bitmap_wrtnorelbuf(Buffer buf)
-{
-	MIRROREDLOCK_BUFMGR_MUST_ALREADY_BE_HELD;
-
-	MarkBufferDirty(buf);
 }
 
 /*
@@ -227,7 +215,7 @@ _bitmap_init_buildstate(Relation index, BMBuildState *bmstate)
 		optup = equality_oper(typid, false);
 		eq_opr = oprid(optup);
 		eq_function = oprfuncid(optup);
-		ReleaseOperator(optup);
+		ReleaseSysCache(optup);
 
 		if (!get_op_hash_functions(eq_opr,
 								   &left_hash_function,
@@ -361,10 +349,7 @@ _bitmap_cleanup_buildstate(Relation index, BMBuildState *bmstate)
  * those distinct values, and the first LOV page.
  */
 void
-_bitmap_init(Relation rel, Oid comptypeOid,
-			 Oid heapOid, Oid indexOid,
-			 Oid heapRelfilenode, Oid indexRelfilenode,
-			 bool use_wal)
+_bitmap_init(Relation indexrel, bool use_wal)
 {
 	MIRROREDLOCK_BUFMGR_DECLARE;
 
@@ -376,29 +361,27 @@ _bitmap_init(Relation rel, Oid comptypeOid,
 	OffsetNumber	newOffset;
 	Page			currLovPage;
 	OffsetNumber	o;
-  
+	Oid			lovHeapOid;
+	Oid			lovIndexOid;
+
 	/* sanity check */
-	if (RelationGetNumberOfBlocks(rel) != 0)
+	if (RelationGetNumberOfBlocks(indexrel) != 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_INDEX_CORRUPTED),
 				errmsg("cannot initialize non-empty bitmap index \"%s\"",
-				RelationGetRelationName(rel)),
+				RelationGetRelationName(indexrel)),
 				errSendAlert(true)));
 	
 	// -------- MirroredLock ----------
 	MIRROREDLOCK_BUFMGR_LOCK;
 	
 	/* create the metapage */
-	metabuf = _bitmap_getbuf(rel, P_NEW, BM_WRITE);
+	metabuf = _bitmap_getbuf(indexrel, P_NEW, BM_WRITE);
 	page = BufferGetPage(metabuf);
 	Assert(PageIsNew(page));
 
 	/* initialize the LOV metadata */
-	_bitmap_create_lov_heapandindex(rel, comptypeOid,
-									&(heapOid),
-									&(indexOid),
-									heapRelfilenode,
-									indexRelfilenode);
+	_bitmap_create_lov_heapandindex(indexrel, &lovHeapOid, &lovIndexOid);
 
 	START_CRIT_SECTION();
 
@@ -410,15 +393,15 @@ _bitmap_init(Relation rel, Oid comptypeOid,
 	
 	metapage->bm_magic = BITMAP_MAGIC;
 	metapage->bm_version = BITMAP_VERSION;
-	metapage->bm_lov_heapId = heapOid;
-	metapage->bm_lov_indexId = indexOid;
+	metapage->bm_lov_heapId = lovHeapOid;
+	metapage->bm_lov_indexId = lovIndexOid;
 
 	if (use_wal)
-		_bitmap_log_metapage(rel, page);
+		_bitmap_log_metapage(indexrel, page);
 
 	/* allocate the first LOV page. */
-	buf = _bitmap_getbuf(rel, P_NEW, BM_WRITE);
-	_bitmap_init_lovpage(rel, buf);
+	buf = _bitmap_getbuf(indexrel, P_NEW, BM_WRITE);
+	_bitmap_init_lovpage(indexrel, buf);
 
 	MarkBufferDirty(buf);
 
@@ -433,18 +416,18 @@ _bitmap_init(Relation rel, Oid comptypeOid,
 	 * after all, we have fixed size data
 	 */
 	o = PageAddItem(currLovPage, (Item)lovItem, sizeof(BMLOVItemData),
-                    newOffset, LP_USED);
+                    newOffset, false, false);
 
 	if (o == InvalidOffsetNumber)
 		ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("failed to add LOV item to \"%s\"",
-				 RelationGetRelationName(rel))));
+				 RelationGetRelationName(indexrel))));
 
 	metapage->bm_lov_lastpage = BufferGetBlockNumber(buf);
 
 	if(use_wal)
-		_bitmap_log_lovitem(rel, buf, newOffset, lovItem, metabuf, true);
+		_bitmap_log_lovitem(indexrel, buf, newOffset, lovItem, metabuf, true);
 
 	END_CRIT_SECTION();
 

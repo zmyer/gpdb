@@ -373,39 +373,6 @@ create table atsdb (i int, j text) distributed by (j);
 alter table atsdb set with(appendonly = true);
 drop table atsdb;
 
--- MPP-8474: Index relfilenode mismatch: entry db to segment db.
---
--- XXX This really belongs in alter_table.sql but this is not 
---     in use in current_good_schedule.
-drop table if exists mpp8474 cascade; --ignore
-
-create table mpp8474(a int, b int, c text) 
-    with (appendonly=true) 
-    distributed by (b);
-create index mpp8474_a 
-    on mpp8474(a);
-alter table mpp8474 
-    add column d int default 10;
-
-select 
-    'Mismatched relfilenodes:' as oops,
-    e.oid::regclass as entry_oid,
-    e.relkind,
-    e.relfilenode as entry_relfilenode,
-    s.segid,
-    s.segfilenode as segment_relfilenode
-from 
-    pg_class e,
-    (   select gp_execution_segment(), oid, relfilenode
-        from gp_dist_random('pg_class')
-    ) s (segid, segoid, segfilenode)
-where 
-    e.oid = s.segoid 
-    and e.relfilenode != s.segfilenode
-    and e.relname ~ '^mpp8474.*';
-
-drop table mpp8474;
-
 -- MPP-18660: duplicate entry in gp_distribution_policy
 set enable_indexscan=on;
 set enable_seqscan=off;
@@ -447,3 +414,29 @@ partition by list(col2)
 );
 create index distrib_part_test_idx on distrib_part_test(col1);
 ALTER TABLE public.distrib_part_test SET with (reorganize=false) DISTRIBUTED RANDOMLY;
+
+-- MPP-23801
+--
+-- ALTER TABLE set distribution key should check compatible with unique index. 
+
+-- case 1
+
+CREATE TABLE t_dist1(col1 INTEGER, col2 INTEGER, CONSTRAINT pk_t_dist1 PRIMARY KEY(col2)) DISTRIBUTED BY(col2);
+ALTER TABLE t_dist1 SET DISTRIBUTED BY(col1); 
+
+-- case 2
+
+CREATE TABLE t_dist2(col1 INTEGER, col2 INTEGER, col3 INTEGER, col4 INTEGER) DISTRIBUTED BY(col1);
+
+CREATE UNIQUE INDEX idx1_t_dist2 ON t_dist2(col1, col2);
+CREATE UNIQUE INDEX idx2_t_dist2 ON t_dist2(col1, col2, col3);
+CREATE UNIQUE INDEX idx3_t_dist2 ON t_dist2(col1, col2, col4);
+
+ALTER TABLE t_dist2 SET DISTRIBUTED BY(col1); 
+ALTER TABLE t_dist2 SET DISTRIBUTED BY(col2); 
+ALTER TABLE t_dist2 SET DISTRIBUTED BY(col1, col2); 
+
+ALTER TABLE t_dist2 SET DISTRIBUTED BY(col1, col2, col3); 
+ALTER TABLE t_dist2 SET DISTRIBUTED BY(col3); 
+ALTER TABLE t_dist2 SET DISTRIBUTED BY(col4); 
+

@@ -55,19 +55,30 @@ if (COMPILER_HAS_WNO_C99_EXTENSIONS)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-conversion-null")
 endif()
 
-# Turn on the CODEGEN_DEBUG flag if this is a debug build.
+# Suppress warnings about deprecated keyword register
+CHECK_CXX_COMPILER_FLAG("-Wno-deprecated-register" COMPILER_HAS_WNO_C99_EXTENSIONS)
+if (COMPILER_HAS_WNO_C99_EXTENSIONS)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-deprecated-register")
+endif()
+
+macro (ADD_DEBUG_COMPILE_DEFINITION SYMBOL)
 if (CMAKE_MAJOR_VERSION GREATER 2)
   cmake_policy(SET CMP0043 NEW)
   set_property(
     DIRECTORY
-    APPEND PROPERTY COMPILE_DEFINITIONS $<$<CONFIG:Debug>:CODEGEN_DEBUG>
+    APPEND PROPERTY COMPILE_DEFINITIONS $<$<CONFIG:Debug>:${SYMBOL}>
   )
 else()
   set_property(
     DIRECTORY
-    APPEND PROPERTY COMPILE_DEFINITIONS_DEBUG CODEGEN_DEBUG
+    APPEND PROPERTY COMPILE_DEFINITIONS_DEBUG ${SYMBOL}
   )
 endif()
+endmacro()
+
+# Turn on the CODEGEN_DEBUG flag if this is a debug build.
+ADD_DEBUG_COMPILE_DEFINITION(CODEGEN_DEBUG)
+
 
 # Check for POSIX I/O syscalls needed by TemporaryFile.
 include(CheckCXXSymbolExists)
@@ -125,10 +136,28 @@ find_package(Clang REQUIRED)
 include_directories(${CLANG_INCLUDE_DIRS})
 
 # Core codegen library.
+# This builds all the codegen-related C++ sources into one library
 add_library(gpcodegen SHARED
             utils/clang_compiler.cc
             utils/codegen_utils.cc
+            utils/gp_codegen_utils.cc
+            utils/gp_assert.cc
+
+            codegen_interface.cc
+            codegen_manager.cc
+            const_expr_tree_generator.cc
+            exec_variable_list_codegen.cc
+            slot_getattr_codegen.cc
+            exec_eval_expr_codegen.cc
+            expr_tree_generator.cc
+            op_expr_tree_generator.cc
+            pg_date_func_generator.cc
+            pg_numeric_func_generator.cc
+            var_expr_tree_generator.cc
+            advance_aggregates_codegen.cc
+
             ${codegen_tmpfile_sources})
+
 if(APPLE)
   set(WL_START_GROUP "")
   set(WL_END_GROUP "")
@@ -137,7 +166,16 @@ else()
   set(WL_END_GROUP "-Wl,--end-group")
 endif()
 
-target_link_libraries(gpcodegen ${WL_START_GROUP} ${CLANG_LIBRARIES} ${WL_END_GROUP})
+#  By default, the Darwin linker throws an error if there are any undefined
+#  references in a dynamic library. Instead, it should wait till it's loaded
+#  by the postgres binary.
+if(APPLE)
+  set(WL_UNDEFINED_DYNLOOKUP "-Wl,-undefined -Wl,dynamic_lookup")
+else()
+  set(WL_UNDEFINED_DYNLOOKUP "")
+endif()
+
+target_link_libraries(gpcodegen ${WL_START_GROUP} ${CLANG_LIBRARIES} ${WL_END_GROUP} ${WL_UNDEFINED_DYNLOOKUP})
 if (MONOLITHIC_LLVM_LIBRARY)
   target_link_libraries(gpcodegen ${LLVM_MONOLITHIC_LIBRARIES})
 else()
@@ -154,25 +192,63 @@ else()
   target_link_libraries(gpcodegen ${WL_START_GROUP} ${codegen_llvm_libs} ${WL_END_GROUP})
 endif()
 
+# This macro checks to see if the given C symbol is defined in the given LIBRARY. A library with
+# an appropriate name is searched for in the LIBPATH. VARIABLE is set to true if the symbol is
+# found defined as a type in (T in the output of nm) in the library, or set false otherwise.
+macro(CHECK_SYMBOL_DEFINED LIBRARY CSYMBOL LIBPATH VARIABLE)
+	find_library(LIBLOCATION ${LIBRARY} ${LIBPATH})
+	if(LIBLOCATION STREQUAL "LIBLOCATION-NOTFOUND")
+		message(FATAL_ERROR "${LIBRARY} not found in ${LIBPATH}.")
+	endif()
+	find_program(NM_BIN "nm")
+	execute_process(COMMAND ${NM_BIN} ${LIBLOCATION}
+                  COMMAND grep "T"  # Symbol is defined
+                  COMMAND grep ${CSYMBOL}
+                  RESULT_VARIABLE RETURN_CODE
+                  OUTPUT_QUIET)
+  if(${RETURN_CODE} EQUAL 0) # One or more lines were selected
+		set(${VARIABLE} true)
+  elseif(${RETURN_CODE} EQUAL 1) # No lines were selected.
+		set(${VARIABLE} false)
+	else()
+		message(FATAL_ERROR "Attempted to determine it ${CSYMBOL} is defined in ${LIBLOCATION} "
+					  "but the execution failed. Return code = ${RETURN_CODE}")
+  endif()
+endmacro()
+
+if(APPLE)
+  set(ASSERT_FUNCTION_TO_OVERRIDE "__assert_rtn")
+elseif(UNIX)
+  set(ASSERT_FUNCTION_TO_OVERRIDE "__assert_fail")
+endif()
+
+if(CMAKE_BUILD_TYPE STREQUAL Debug)
+  # Since we want to override assert handling in GPDB, we need to make sure
+  # that LLVM and Clang libraries we depend on haven't done that already
+  # If they do, we simply report a WARNING, and skip assert overriding in GPDB.
+  CHECK_SYMBOL_DEFINED(LLVMSupport ${ASSERT_FUNCTION_TO_OVERRIDE} ${LLVM_LIBRARY_DIRS} LLVM_ASSERT_REDEFINED)
+  if (LLVM_ASSERT_REDEFINED)
+    message(WARNING
+            "Found ${ASSERT_FUNCTION_TO_OVERRIDE} redefined in LLVM libraries. "
+            "Disabling GPDB codegen assert handling! "
+            "To enable this, rebuild LLVM libraries with -DLLVM_ENABLE_CRASH_OVERRIDES=off.")
+  else()
+    ADD_DEBUG_COMPILE_DEFINITION(CODEGEN_GPDB_ASSERT_HANDLING)
+  endif()
+endif()
+
 get_filename_component(full_install_name_dir "${CMAKE_INSTALL_PREFIX}/lib" ABSOLUTE)
 set_target_properties(
     gpcodegen PROPERTIES
     INSTALL_NAME_DIR ${full_install_name_dir}
     MACOSX_RPATH ON)
 
-set(GPCODEGEN_SRC
-    codegen_interface.cc
-    codegen_manager.cc
-    codegen_wrapper.cc
-    ExecVariableList_codegen.cc
-)
-
 # Integrate with GPDB build system. 
-# Here we compile all the GPDB code generators, and link them incrementally
-# with the gpcodegen shared library to create a binary SUBSYS.o as expected by
-# GPDB make system. We invoke the linker with -nostdlib since we don't really
-# want to create a full executable.
-add_executable(SUBSYS.o ${GPCODEGEN_SRC})
+# Here we compile the GPDB wrappers and link it with the gpcodegen shared
+# library to create a binary SUBSYS.o as expected by GPDB make system.  We
+# invoke the linker with -nostdlib since we don't really want to create a full
+# executable.
+add_executable(SUBSYS.o codegen_wrapper.cc)
 set_target_properties(SUBSYS.o
     PROPERTIES
     LINK_FLAGS "-Wl,-r -nostdlib")
@@ -191,13 +267,13 @@ add_custom_target(unittest-check
 )
 
 # Googletest framework for tests.
-SET(GTEST_DIR ../../../gpAux/extensions/gtest)
+SET(GTEST_DIR ../../../gpAux/extensions/googletest/googletest)
 add_subdirectory(${GTEST_DIR} ${CMAKE_BINARY_DIR}/gtest EXCLUDE_FROM_ALL)
 enable_testing()
 
-SET (TEST_LIB_INC_DIRECTORIES
-${TOP_SRC_DIR}/src/test/unit/cmockery
-${GTEST_DIR}/include)
+set(TEST_LIB_INC_DIRECTORIES
+    ${TOP_SRC_DIR}/src/test/unit/cmockery
+    ${GTEST_DIR}/include)
 			
 function(prepend_path var prefix)
    SET(listVar "")
@@ -207,17 +283,6 @@ function(prepend_path var prefix)
    SET(${var} "${listVar}" PARENT_SCOPE)
 endfunction(prepend_path)
 
-function(add_simple_gtest TEST_NAME TEST_SRC)
-    add_executable(${TEST_NAME} EXCLUDE_FROM_ALL ${TEST_SRC})
-	target_include_directories(${TEST_NAME} PUBLIC ${TEST_LIB_INC_DIRECTORIES})
-    target_link_libraries(${TEST_NAME} gpcodegen gtest)
-    add_test(${TEST_NAME} ${TEST_NAME})
-    add_dependencies(check ${TEST_NAME})
-endfunction(add_simple_gtest)
-
-add_simple_gtest(clang_compiler_unittest.t tests/clang_compiler_unittest.cc)
-add_simple_gtest(codegen_utils_unittest.t tests/codegen_utils_unittest.cc)
-add_simple_gtest(instance_method_wrappers_unittest.t tests/instance_method_wrappers_unittest.cc)
 
 # Usage add_cmock_gtest ${TEST_NAME} ${TEST_SOURCES} ${MOCK_DIR}/hello_mock.o ${MOCK_DIR}/world_mock.o)
 function(add_cmockery_gtest TEST_NAME TEST_SOURCES)
@@ -242,14 +307,14 @@ function(add_cmockery_gtest TEST_NAME TEST_SOURCES)
 
     add_executable(${TEST_NAME} EXCLUDE_FROM_ALL 
         ${TEST_SOURCES}
-        ${GPCODEGEN_SRC}
+        codegen_wrapper.cc
         ${FILES_TO_LINK} 
         ${MOCK_OBJS} 
         ${CMOCKERY_OBJS}
     )
     target_include_directories(${TEST_NAME} PUBLIC ${TEST_LIB_INC_DIRECTORIES})
     # Bring these from $ENV{LIBS}
-    target_link_libraries(${TEST_NAME} "-ldl -lbz2 -lxml2 -lz -lm -lcurl -L../../port -lpgport_srv" gpcodegen gtest)
+    target_link_libraries(${TEST_NAME} "-ldl -lnetsnmp -lpam -lxml2 -lpgport -lbz2 -lrt -lssl -lcrypto -lkrb5 -lcom_err -lgssapi_krb5 -lz -lldap -lreadline -lcrypt -lm -lcurl -L${CMAKE_INSTALL_PREFIX}/lib -L../../port -lpgport_srv" gpcodegen gtest)
     add_test(${TEST_NAME} ${TEST_NAME})
     add_dependencies(check ${TEST_NAME})
 endfunction(add_cmockery_gtest)
@@ -295,10 +360,28 @@ if(EXISTS ${TXT_OBJFILE})
 endif()
 
 # Add CMockery tests
+# All tests must be linked with postgres, even if they don't need the cmockery
+# framework  since libgpcodegen may now have references to postgres symbols.
+#
+# Usage add_cmock_gtest ${TEST_NAME} ${TEST_SOURCES} ${MOCK_DIR}/hello_mock.o ${MOCK_DIR}/world_mock.o)
 if(EXISTS ${TXT_OBJFILE})
     add_cmockery_gtest(codegen_framework_unittest.t 
         tests/codegen_framework_unittest.cc
-        ${MOCK_DIR}/backend/utils/error/elog_mock.o
+    )
+    add_cmockery_gtest(codegen_pg_func_generator_unittest.t 
+        tests/codegen_pg_func_generator_unittest.cc
+    )
+    add_cmockery_gtest(clang_compiler_unittest.t
+        tests/clang_compiler_unittest.cc
+    )
+    add_cmockery_gtest(instance_method_wrappers_unittest.t
+        tests/instance_method_wrappers_unittest.cc
+    )
+    add_cmockery_gtest(codegen_utils_unittest.t
+        tests/codegen_utils_unittest.cc
+    )
+    add_cmockery_gtest(gp_codegen_utils_unittest.t
+        tests/gp_codegen_utils_unittest.cc
     )
 endif()
 

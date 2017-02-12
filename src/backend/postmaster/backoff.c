@@ -1,7 +1,7 @@
 /*-------------------------------------------------------------------------
  *
  * Backoff.c
- *    Query Prioritization
+ *	  Query Prioritization
  *
  * Copyright (c) 2009-2010, Greenplum inc.
  *
@@ -16,16 +16,13 @@
  * details.
  *
  * BackoffBackendTick() - a CHECK_FOR_INTERRUPTS() call in a backend
- * 						  leads to a backend 'tick'. If enough 'ticks'
- * 						  elapse, then the backend considers a
- * 						  backoff.
- * BackoffSweeper() 	- workhorse for the sweeper process
- *
- *  Created on: Oct 21, 2009
- *      Author: siva
+ *						  leads to a backend 'tick'. If enough 'ticks'
+ *						  elapse, then the backend considers a
+ *						  backoff.
+ * BackoffSweeper()		- workhorse for the sweeper process
  *
  *-------------------------------------------------------------------------
-*/
+ */
 
 #include "postmaster/backoff.h"
 #include "postmaster/fork_process.h"
@@ -44,7 +41,8 @@
 #include "storage/backendid.h"
 #include "pgstat.h"
 #include "miscadmin.h"
-#include "cdb/cdbdisp.h"
+#include "cdb/cdbdisp_query.h"
+#include "cdb/cdbdispatchresult.h"
 #include "gp-libpq-fe.h"
 #include <unistd.h>
 
@@ -52,7 +50,7 @@
 #include "libpq/pqsignal.h"
 #include "utils/ps_status.h"
 #include "tcop/tcopprot.h"
-#include "storage/pmsignal.h"			/* PostmasterIsAlive */
+#include "storage/pmsignal.h"	/* PostmasterIsAlive */
 #include "catalog/pg_database.h"
 #include "catalog/pg_resqueue.h"
 #include "catalog/pg_tablespace.h"
@@ -62,7 +60,7 @@
 #include "funcapi.h"
 #include "catalog/pg_type.h"
 #include "access/tuptoaster.h"
-#include "utils/gp_atomic.h"
+#include "port/atomics.h"
 
 extern bool gp_debug_resqueue_priority;
 
@@ -72,7 +70,7 @@ extern bool gp_debug_resqueue_priority;
 /**
  * Difference of two timevals in microsecs
  */
-#define TIMEVAL_DIFF_USEC(b, a)	((double) (b.tv_sec - a.tv_sec) * 1000000.0 + (b.tv_usec - a.tv_usec))
+#define TIMEVAL_DIFF_USEC(b, a) ((double) (b.tv_sec - a.tv_sec) * 1000000.0 + (b.tv_usec - a.tv_usec))
 
 /* In ms */
 #define MIN_SLEEP_THRESHOLD  5000
@@ -85,54 +83,69 @@ extern bool gp_debug_resqueue_priority;
  */
 typedef struct StatementId
 {
-	int sessionId;
-	int commandCount;
-} StatementId;
+	int			sessionId;
+	int			commandCount;
+}	StatementId;
 
 /* Invalid statement id */
-static const struct StatementId InvalidStatementId = {0,0};
+static const struct StatementId InvalidStatementId = {0, 0};
 
 /**
  * This is information that only the current backend ever needs to see.
  */
 typedef struct BackoffBackendLocalEntry
 {
-	int					processId;		/* Process Id of backend */
-	struct rusage		startUsage;		/* Usage when current statement began. To account for caching of backends. */
-	struct rusage 		lastUsage;		/* Usage statistics when backend process performed local backoff action */
-	double				lastSleepTime;	/* Last sleep time when local backing-off action was performed */
-	int 				counter;		/* Local counter is used as an approx measure of time */
-	bool				inTick;			/* Is backend currently performing tick? - to prevent nested calls */
-	bool				groupingTimeExpired;	/* Should backend try to find better leader? */
-} BackoffBackendLocalEntry;
+	int			processId;		/* Process Id of backend */
+	struct rusage startUsage;	/* Usage when current statement began. To
+								 * account for caching of backends. */
+	struct rusage lastUsage;	/* Usage statistics when backend process
+								 * performed local backoff action */
+	double		lastSleepTime;	/* Last sleep time when local backing-off
+								 * action was performed */
+	int			counter;		/* Local counter is used as an approx measure
+								 * of time */
+	bool		inTick;			/* Is backend currently performing tick? - to
+								 * prevent nested calls */
+	bool		groupingTimeExpired;	/* Should backend try to find better
+										 * leader? */
+}	BackoffBackendLocalEntry;
 
 /**
  * There is a backend entry for every backend with a valid backendid on the master and segments.
  */
 typedef struct BackoffBackendSharedEntry
 {
-	struct	StatementId	statementId;		/* A statement Id. Can be invalid. */
-	int					groupLeaderIndex;	/* Who is my leader? */
-	int					groupSize;			/* How many in my group ? */
-	int					numFollowers;		/* How many followers do I have? */
+	struct StatementId statementId;		/* A statement Id. Can be invalid. */
+	int			groupLeaderIndex;		/* Who is my leader? */
+	int			groupSize;		/* How many in my group ? */
+	int			numFollowers;	/* How many followers do I have? */
 
 	/* These fields are written by backend and read by sweeper process */
-	struct timeval 		lastCheckTime;		/* Last time the backend process performed local back-off action.
-												Used to determine inactive backends. */
+	struct timeval lastCheckTime;		/* Last time the backend process
+										 * performed local back-off action.
+										 * Used to determine inactive
+										 * backends. */
 
 	/* These fields are written to by sweeper and read by backend */
-	bool				noBackoff;			/* If set, then no backoff to be performed by this backend */
-	double				targetUsage;		/* Current target CPU usage as calculated by sweeper */
-	bool				earlyBackoffExit;	/* Sweeper asking backend to stop backing off */
+	bool		backoff;		/* If set to false, then no backoff to be
+								 * performed by this backend */
+	double		targetUsage;	/* Current target CPU usage as calculated by
+								 * sweeper */
+	bool		earlyBackoffExit;		/* Sweeper asking backend to stop
+										 * backing off */
 
 	/* These fields are written to and read by sweeper */
-	bool				isActive;			/* Sweeper marking backend as active based on lastCheckTime */
-	int					numFollowersActive;	/* If backend is a leader, this represents number of followers that are active */
+	bool		isActive;		/* Sweeper marking backend as active based on
+								 * lastCheckTime */
+	int			numFollowersActive;		/* If backend is a leader, this
+										 * represents number of followers that
+										 * are active */
 
 	/* These fields are wrtten by backend during init and by manual adjustment */
-	int					weight;				/* Weight of this statement */
+	int			weight;			/* Weight of the statement that this backend
+								 * belongs to */
 
-} BackoffBackendSharedEntry;
+}	BackoffBackendSharedEntry;
 
 /**
  * Local entry for backoff.
@@ -146,12 +159,13 @@ static BackoffBackendLocalEntry myLocalEntry;
  */
 typedef struct BackoffState
 {
-	BackoffBackendSharedEntry *backendEntries; /* Indexed by backend ids */
-	int					numEntries;
+	BackoffBackendSharedEntry *backendEntries;	/* Indexed by backend ids */
+	int			numEntries;
 
-	bool				sweeperInProgress;				/* Is the sweeper process working? */
-	int					lastTotalStatementWeight;		/* To keep track of total weight */
-} BackoffState;
+	bool		sweeperInProgress;		/* Is the sweeper process working? */
+	int			lastTotalStatementWeight;		/* To keep track of total
+												 * weight */
+}	BackoffState;
 
 /**
  * Pointer to singleton struct used by the backoff mechanism.
@@ -160,18 +174,18 @@ BackoffState *backoffSingleton = NULL;
 
 /* Statement-id related */
 
-static inline void init(StatementId *s, int sessionId, int commandCount);
-static inline void setInvalid(StatementId *s);
-static inline bool isInvalid(const StatementId *s);
-static inline bool equalStatementId(const StatementId *s1, const StatementId *s2);
+static inline void init(StatementId * s, int sessionId, int commandCount);
+static inline void setInvalid(StatementId * s);
+static inline bool isValid(const StatementId * s);
+static inline bool equalStatementId(const StatementId * s1, const StatementId * s2);
 
 /* Main accessor methods for backoff entries */
 static inline const BackoffBackendSharedEntry *getBackoffEntryRO(int index);
 static inline BackoffBackendSharedEntry *getBackoffEntryRW(int index);
 
 /* Backend uses these */
-static inline BackoffBackendLocalEntry* myBackoffLocalEntry(void);
-static inline BackoffBackendSharedEntry* myBackoffSharedEntry(void);
+static inline BackoffBackendLocalEntry *myBackoffLocalEntry(void);
+static inline BackoffBackendSharedEntry *myBackoffSharedEntry(void);
 static inline void SwitchGroupLeader(int newLeaderIndex);
 static inline bool groupingTimeExpired(void);
 static inline void findBetterGroupLeader(void);
@@ -193,16 +207,16 @@ static volatile bool sweeperShutdownRequested = false;
 static volatile bool isSweeperProcess = false;
 
 /* Resource queue related routines */
-static int BackoffPriorityValueToInt(const char *priorityVal);
+static int	BackoffPriorityValueToInt(const char *priorityVal);
 static char *BackoffPriorityIntToValue(int weight);
-extern List *GetResqueueCapabilityEntry(Oid  queueid);
+extern List *GetResqueueCapabilityEntry(Oid queueid);
 
 /*
  * Helper method that verifies setting of default priority guc.
  */
 const char *gpvars_assign_gp_resqueue_priority_default_value(const char *newval,
-		bool doit,
-		GucSource source __attribute__((unused)) );
+												 bool doit,
+								   GucSource source __attribute__((unused)));
 
 
 /* Extern declarations */
@@ -213,7 +227,8 @@ extern Datum textout(PG_FUNCTION_ARGS);
  * Primitives on statement id.
  */
 
-static inline void init(StatementId *s, int sessionId, int commandCount)
+static inline void
+init(StatementId * s, int sessionId, int commandCount)
 {
 	Assert(s);
 	s->sessionId = sessionId;
@@ -224,7 +239,8 @@ static inline void init(StatementId *s, int sessionId, int commandCount)
 /**
  * Sets a statemend id to be invalid.
  */
-static inline void setInvalid(StatementId *s)
+static inline void
+setInvalid(StatementId * s)
 {
 	init(s, InvalidStatementId.sessionId, InvalidStatementId.commandCount);
 }
@@ -232,7 +248,8 @@ static inline void setInvalid(StatementId *s)
 /**
  * Are two statement ids equal?
  */
-static inline bool equalStatementId(const StatementId *s1, const StatementId *s2)
+static inline bool
+equalStatementId(const StatementId * s1, const StatementId * s2)
 {
 	Assert(s1);
 	Assert(s2);
@@ -241,18 +258,20 @@ static inline bool equalStatementId(const StatementId *s1, const StatementId *s2
 }
 
 /**
- * Is a statemend invalid?
+ * Is a StatementId valid?
  */
-static inline bool isInvalid(const StatementId *s)
+static inline bool
+isValid(const StatementId * s)
 {
-	return equalStatementId(s, &InvalidStatementId);
+	return !equalStatementId(s, &InvalidStatementId);
 }
 
 /**
  * Access to the local entry for this backend.
  */
 
-static inline BackoffBackendLocalEntry* myBackoffLocalEntry()
+static inline BackoffBackendLocalEntry *
+myBackoffLocalEntry()
 {
 	return &myLocalEntry;
 }
@@ -260,7 +279,8 @@ static inline BackoffBackendLocalEntry* myBackoffLocalEntry()
 /**
  * Access to the shared entry for this backend.
  */
-static inline BackoffBackendSharedEntry* myBackoffSharedEntry()
+static inline BackoffBackendSharedEntry *
+myBackoffSharedEntry()
 {
 	return getBackoffEntryRW(MyBackendId);
 }
@@ -268,7 +288,8 @@ static inline BackoffBackendSharedEntry* myBackoffSharedEntry()
 /**
  * A backend is a group leader if it is its own leader.
  */
-static inline bool isGroupLeader(int index)
+static inline bool
+isGroupLeader(int index)
 {
 	return (getBackoffEntryRO(index)->groupLeaderIndex == index);
 }
@@ -280,7 +301,8 @@ static inline bool isGroupLeader(int index)
  * across processes). However, this code is not thread safe. We do not call these code in multi-threaded
  * situations.
  */
-static inline void SwitchGroupLeader(int newLeaderIndex)
+static inline void
+SwitchGroupLeader(int newLeaderIndex)
 {
 	BackoffBackendSharedEntry *myEntry = myBackoffSharedEntry();
 	BackoffBackendSharedEntry *oldLeaderEntry = NULL;
@@ -292,8 +314,8 @@ static inline void SwitchGroupLeader(int newLeaderIndex)
 	oldLeaderEntry = &backoffSingleton->backendEntries[myEntry->groupLeaderIndex];
 	newLeaderEntry = &backoffSingleton->backendEntries[newLeaderIndex];
 
-	pg_atomic_sub_fetch_u32((pg_atomic_uint32 *) &oldLeaderEntry->numFollowers, 1 );
-	pg_atomic_add_fetch_u32((pg_atomic_uint32 *) &newLeaderEntry->numFollowers, 1 );
+	pg_atomic_sub_fetch_u32((pg_atomic_uint32 *) &oldLeaderEntry->numFollowers, 1);
+	pg_atomic_add_fetch_u32((pg_atomic_uint32 *) &newLeaderEntry->numFollowers, 1);
 	myEntry->groupLeaderIndex = newLeaderIndex;
 }
 
@@ -301,18 +323,20 @@ static inline void SwitchGroupLeader(int newLeaderIndex)
  * Should this backend stop finding a better leader? If the backend has spent enough time working
  * on the current statement (measured in elapsedTimeForStatement), it marks grouping time expired.
  */
-static inline bool groupingTimeExpired()
+static inline bool
+groupingTimeExpired()
 {
 	BackoffBackendLocalEntry *le = myBackoffLocalEntry();
+
 	if (le->groupingTimeExpired)
 	{
 		return true;
 	}
 	else
 	{
-		double elapsedTimeForStatement =
-				TIMEVAL_DIFF_USEC(le->lastUsage.ru_utime, le->startUsage.ru_utime)
-				+ TIMEVAL_DIFF_USEC(le->lastUsage.ru_stime, le->startUsage.ru_stime);
+		double		elapsedTimeForStatement =
+		TIMEVAL_DIFF_USEC(le->lastUsage.ru_utime, le->startUsage.ru_utime)
+		+ TIMEVAL_DIFF_USEC(le->lastUsage.ru_stime, le->startUsage.ru_stime);
 
 		if (elapsedTimeForStatement > gp_resqueue_priority_grouping_timeout * 1000.0)
 		{
@@ -330,11 +354,13 @@ static inline bool groupingTimeExpired()
  * Executed by a backend to find a better group leader (i.e. one with a lower index), if possible.
  * This is the only method that can write to groupLeaderIndex.
  */
-static inline void findBetterGroupLeader()
+static inline void
+findBetterGroupLeader()
 {
-	int leadersLeaderIndex = -1;
-	BackoffBackendSharedEntry* myEntry = myBackoffSharedEntry();
+	int			leadersLeaderIndex = -1;
+	BackoffBackendSharedEntry *myEntry = myBackoffSharedEntry();
 	const BackoffBackendSharedEntry *leaderEntry = getBackoffEntryRO(myEntry->groupLeaderIndex);
+
 	Assert(myEntry);
 	leadersLeaderIndex = leaderEntry->groupLeaderIndex;
 
@@ -345,17 +371,19 @@ static inline void findBetterGroupLeader()
 	}
 	else
 	{
-		int i = 0;
-		for (i=0;i<myEntry->groupLeaderIndex;i++)
+		int			i = 0;
+
+		for (i = 0; i < myEntry->groupLeaderIndex; i++)
 		{
 			const BackoffBackendSharedEntry *other = getBackoffEntryRO(i);
+
 			if (equalStatementId(&other->statementId, &myEntry->statementId))
 			{
 				/* Found a better leader! */
 				break;
 			}
 		}
-		if (i<myEntry->groupLeaderIndex)
+		if (i < myEntry->groupLeaderIndex)
 		{
 			SwitchGroupLeader(i);
 		}
@@ -367,7 +395,8 @@ static inline void findBetterGroupLeader()
 /**
  * Read only access to a backend entry.
  */
-static inline const BackoffBackendSharedEntry *getBackoffEntryRO(int index)
+static inline const BackoffBackendSharedEntry *
+getBackoffEntryRO(int index)
 {
 	return (const BackoffBackendSharedEntry *) getBackoffEntryRW(index);
 }
@@ -375,10 +404,11 @@ static inline const BackoffBackendSharedEntry *getBackoffEntryRO(int index)
 /**
  * Gives write access to a backend entry.
  */
-static inline BackoffBackendSharedEntry *getBackoffEntryRW(int index)
+static inline BackoffBackendSharedEntry *
+getBackoffEntryRW(int index)
 {
 	Assert(Gp_role == GP_ROLE_DISPATCH || Gp_role == GP_ROLE_EXECUTE || isSweeperProcess);
-	Assert(index >=0 && index < backoffSingleton->numEntries);
+	Assert(index >= 0 && index < backoffSingleton->numEntries);
 	return &backoffSingleton->backendEntries[index];
 }
 
@@ -386,8 +416,11 @@ static inline BackoffBackendSharedEntry *getBackoffEntryRW(int index)
 /**
  * This method is called by the backend when it begins working on a new statement.
  * This initializes the backend entry corresponding to this backend.
+ * After initialization, the backend entry immediately finds its group leader, which
+ * is the first backend entry that has the same statement id with itself.
  */
-void BackoffBackendEntryInit(int sessionid, int commandcount, int weight)
+void
+BackoffBackendEntryInit(int sessionid, int commandcount, int weight)
 {
 	BackoffBackendSharedEntry *mySharedEntry = NULL;
 	BackoffBackendLocalEntry *myLocalEntry = NULL;
@@ -401,9 +434,10 @@ void BackoffBackendEntryInit(int sessionid, int commandcount, int weight)
 	/* Shared information */
 	mySharedEntry = myBackoffSharedEntry();
 
-	mySharedEntry->targetUsage = 1.0 / numProcsPerSegment(); /* Initially, do not perform any backoffs */
+	mySharedEntry->targetUsage = 1.0 / numProcsPerSegment();	/* Initially, do not
+																 * perform any backoffs */
 	mySharedEntry->isActive = false;
-	mySharedEntry->noBackoff = false;
+	mySharedEntry->backoff = true;
 	mySharedEntry->earlyBackoffExit = false;
 
 	if (gettimeofday(&mySharedEntry->lastCheckTime, NULL) < 0)
@@ -418,7 +452,7 @@ void BackoffBackendEntryInit(int sessionid, int commandcount, int weight)
 
 	/* this should happen last or the sweeper may pick up a non-complete entry */
 	init(&mySharedEntry->statementId, sessionid, commandcount);
-	Assert(!isInvalid(&mySharedEntry->statementId));
+	Assert(isValid(&mySharedEntry->statementId));
 
 	/* Local information */
 	myLocalEntry = myBackoffLocalEntry();
@@ -443,7 +477,8 @@ void BackoffBackendEntryInit(int sessionid, int commandcount, int weight)
 /**
  * Accessing the number of procs per segment.
  */
-static inline double numProcsPerSegment()
+static inline double
+numProcsPerSegment()
 {
 	Assert(gp_enable_resqueue_priority);
 	Assert(backoffSingleton);
@@ -456,7 +491,8 @@ static inline double numProcsPerSegment()
  * This method is called once in a while by a backend to determine if it needs
  * to backoff per its current usage and target usage.
  */
-static inline void BackoffBackend()
+static inline void
+BackoffBackend()
 {
 	BackoffBackendLocalEntry *le = NULL;
 	BackoffBackendSharedEntry *se = NULL;
@@ -464,10 +500,10 @@ static inline void BackoffBackend()
 	/* Try to achieve target usage! */
 	struct timeval currentTime;
 	struct rusage currentUsage;
-	double thisProcessTime = 0.0;
-	double totalTime = 0.0;
-	double cpuRatio = 0.0;
-	double changeFactor = 1.0;
+	double		thisProcessTime = 0.0;
+	double		totalTime = 0.0;
+	double		cpuRatio = 0.0;
+	double		changeFactor = 1.0;
 
 	le = myBackoffLocalEntry();
 	Assert(le);
@@ -488,14 +524,20 @@ static inline void BackoffBackend()
 		elog(ERROR, "Unable to execute getrusage(). Please disable query prioritization.");
 	}
 
-	if (!se->noBackoff)
+	/* If backoff can be performed by this process */
+	if (se->backoff)
 	{
-
-		/* How much did the cpu work on behalf of this process - incl user and sys time */
+		/*
+		 * How much did the cpu work on behalf of this process - incl user and
+		 * sys time
+		 */
 		thisProcessTime = TIMEVAL_DIFF_USEC(currentUsage.ru_utime, le->lastUsage.ru_utime)
-										+ TIMEVAL_DIFF_USEC(currentUsage.ru_stime, le->lastUsage.ru_stime);
+			+ TIMEVAL_DIFF_USEC(currentUsage.ru_stime, le->lastUsage.ru_stime);
 
-		/* Absolute cpu time since the last check. This accounts for multiple procs per segment */
+		/*
+		 * Absolute cpu time since the last check. This accounts for multiple
+		 * procs per segment
+		 */
 		totalTime = TIMEVAL_DIFF_USEC(currentTime, se->lastCheckTime);
 
 		cpuRatio = thisProcessTime / totalTime;
@@ -509,44 +551,53 @@ static inline void BackoffBackend()
 		if (le->lastSleepTime < DEFAULT_SLEEP_TIME)
 			le->lastSleepTime = DEFAULT_SLEEP_TIME;
 
-		if ( gp_debug_resqueue_priority)
+		if (gp_debug_resqueue_priority)
 		{
 			elog(LOG, "thissession = %d, thisProcTime = %f, totalTime = %f, targetusage = %f, cpuRatio = %f, change factor = %f, sleeptime = %f",
-					se->statementId.sessionId, thisProcessTime, totalTime, se->targetUsage, cpuRatio, changeFactor, (double) le->lastSleepTime);
+				 se->statementId.sessionId, thisProcessTime, totalTime, se->targetUsage, cpuRatio, changeFactor, (double) le->lastSleepTime);
 		}
 
-		memcpy( &le->lastUsage, &currentUsage, sizeof(currentUsage));
-		memcpy( &se->lastCheckTime, &currentTime, sizeof(currentTime));
+		memcpy(&le->lastUsage, &currentUsage, sizeof(currentUsage));
+		memcpy(&se->lastCheckTime, &currentTime, sizeof(currentTime));
 
 		if (le->lastSleepTime > MIN_SLEEP_THRESHOLD)
 		{
 			/*
-			 * Sleeping happens in chunks so that the backend may exit early from its sleep if the sweeper requests it to.
+			 * Sleeping happens in chunks so that the backend may exit early
+			 * from its sleep if the sweeper requests it to.
 			 */
-			int j =0;
-			long sleepInterval = ((long) gp_resqueue_priority_sweeper_interval) * 1000L;
-			int numIterations = (int) (le->lastSleepTime / sleepInterval);
-			double leftOver = (double) ((long) le->lastSleepTime % sleepInterval);
-			for (j=0;j<numIterations;j++)
+			int			j = 0;
+			long		sleepInterval = ((long) gp_resqueue_priority_sweeper_interval) * 1000L;
+			int			numIterations = (int) (le->lastSleepTime / sleepInterval);
+			double		leftOver = (double) ((long) le->lastSleepTime % sleepInterval);
+
+			for (j = 0; j < numIterations; j++)
 			{
 				/* Sleep a chunk */
 				pg_usleep(sleepInterval);
 				/* Check for early backoff exit */
 				if (se->earlyBackoffExit)
 				{
-					le->lastSleepTime = DEFAULT_SLEEP_TIME; /* Minimize sleep time since we may need to recompute from scratch */
+					le->lastSleepTime = DEFAULT_SLEEP_TIME;		/* Minimize sleep time
+																 * since we may need to
+																 * recompute from
+																 * scratch */
 					break;
 				}
 			}
-			if (j==numIterations)
+			if (j == numIterations)
 				pg_usleep(leftOver);
 		}
 	}
 	else
 	{
-		/* Even if this backend did not backoff, it should record current usage and current time so that subsequent calculations are accurate. */
-		memcpy( &le->lastUsage, &currentUsage, sizeof(currentUsage));
-		memcpy( &se->lastCheckTime, &currentTime, sizeof(currentTime));
+		/*
+		 * Even if this backend did not backoff, it should record current
+		 * usage and current time so that subsequent calculations are
+		 * accurate.
+		 */
+		memcpy(&le->lastUsage, &currentUsage, sizeof(currentUsage));
+		memcpy(&se->lastCheckTime, &currentTime, sizeof(currentTime));
 	}
 
 	/* Consider finding a better leader for better grouping */
@@ -561,7 +612,8 @@ static inline void BackoffBackend()
  * it called CHECK_FOR_INTERRUPTS, which we use as a loose measure of progress.
  * If the counter is sufficiently large, it performs a backoff action (see BackoffBackend()).
  */
-void BackoffBackendTick()
+void
+BackoffBackendTick()
 {
 	BackoffBackendLocalEntry *le = NULL;
 	BackoffBackendSharedEntry *se = NULL;
@@ -570,16 +622,17 @@ void BackoffBackendTick()
 	Assert(gp_enable_resqueue_priority);
 
 	if (!(Gp_role == GP_ROLE_DISPATCH
-			|| Gp_role == GP_ROLE_EXECUTE)
-			|| !IsUnderPostmaster
-			|| (MyBackendId == InvalidBackendId)
-			|| proc_exit_inprogress
-			|| ProcDiePending		/* Proc is dying */
-			|| QueryCancelPending	/* Statement cancellation */
-			|| QueryFinishPending	/* Statement finish requested */
-			|| InterruptHoldoffCount != 0 /* We're holding off on handling interrupts */
-			|| CritSectionCount != 0	/* In critical section */
-	)
+		  || Gp_role == GP_ROLE_EXECUTE)
+		|| !IsUnderPostmaster
+		|| (MyBackendId == InvalidBackendId)
+		|| proc_exit_inprogress
+		|| ProcDiePending		/* Proc is dying */
+		|| QueryCancelPending	/* Statement cancellation */
+		|| QueryFinishPending	/* Statement finish requested */
+		|| InterruptHoldoffCount != 0	/* We're holding off on handling
+										 * interrupts */
+		|| CritSectionCount != 0	/* In critical section */
+		)
 	{
 		/* Do nothing under these circumstances */
 		return;
@@ -613,7 +666,7 @@ void BackoffBackendTick()
 
 	le->inTick = true;
 
-	le->counter ++;
+	le->counter++;
 	if (le->counter == gp_resqueue_priority_local_interval)
 	{
 		le->counter = 0;
@@ -629,21 +682,52 @@ void BackoffBackendTick()
 }
 
 /**
- * This looks at all the backend structures to determine if any backends are not
- * making progress. This is done by inspecting the lastchecked time. It calculates
- * the total weight of all 'active' backends to re-calculate the target CPU usage
- * per backend process.
+ * BackoffSweeper() looks at all the backend structures to determine if any
+ * backends are not making progress. This is done by inspecting the lastchecked
+ * time.  It also calculates the total weight of all 'active' backends to
+ * re-calculate the target CPU usage per backend process. If it finds that a
+ * backend is trying to request more CPU resources than the maximum CPU that it
+ * can get (such a backend is called a 'pegger'), it assigns maxCPU to it.
+ *
+ * For example:
+ * Let Qi be the ith query statement, Ri be the target CPU usage for Qi,
+ * Wi be the statement weight for Qi, W be the total statements weight.
+ * For simplicity, let's assume every statement only has 1 backend per segment.
+ *
+ * Let there be 4 active queries with weights {1,100,10,1000} with K=3 CPUs
+ * available per segment to share. The maximum CPU that a backend can get is
+ * maxCPU = 1.0. The total active statements weight is
+ * W (activeWeight) = 1 + 100 + 10 + 1000 = 1111.
+ * The following algorithm determines that Q4 is pegger, because
+ * K * W4 / W > maxCPU, which is 3000/1111 > 1.0, so we assign R4 = 1.0.
+ * Now K becomes 2.0, W becomes 111.
+ * It restarts from the beginning and determines that Q2 is now a pegger as
+ * well, because K * W2 / W > maxCPU, which is 200/111 > 1.0, we assign
+ * R2 = 1.0. Now there is only 1 CPU left and no peggers left. We continue
+ * to distribute the left 1 CPU to other backends according to their weight,
+ * so we assign the target CPU ratio of R1=1/11 and R3=10/11. The final
+ * target CPU assignments are {0.09,1.0,0.91,1.0}.
+ *
+ * If there are multiple backends within a segment running for the query Qi,
+ * the target CPU ratio Ri for query Qi is divided equally among all the
+ * active backends belonging to the query.
  */
-void BackoffSweeper()
+void
+BackoffSweeper()
 {
+	int			i = 0;
+
+	/* The overall weight of active statements */
 	volatile double activeWeight = 0.0;
-	int i = 0;
-	int numValidBackends = 0;
-	int numActiveBackends = 0;
-	int numActiveStatements = 0;
-	int totalStatementWeight = 0;
+	int			numActiveBackends = 0;
+	int			numActiveStatements = 0;
+
+	/* The overall weight of active and inactive statements */
+	int			totalStatementWeight = 0;
+	int			numValidBackends = 0;
+	int			numStatements = 0;
+
 	struct timeval currentTime;
-	int	numStatements = 0;
 
 	if (gettimeofday(&currentTime, NULL) < 0)
 	{
@@ -656,26 +740,34 @@ void BackoffSweeper()
 
 	PG_TRACE(backoff__globalcheck);
 
-	for (i=0;i<backoffSingleton->numEntries;i++)
+	/* Reset status for all the backend entries */
+	for (i = 0; i < backoffSingleton->numEntries; i++)
 	{
-		BackoffBackendSharedEntry * se = getBackoffEntryRW(i);
+		BackoffBackendSharedEntry *se = getBackoffEntryRW(i);
+
 		se->isActive = false;
 		se->numFollowersActive = 0;
-		se->noBackoff = false;
+		se->backoff = true;
 	}
 
-	/* Mark backends that are active. Count of active group members is maintained at their group leader. */
-	for (i=0;i<backoffSingleton->numEntries;i++)
+	/*
+	 * Mark backends that are active. Count of active group members is
+	 * maintained at their group leader.
+	 */
+	for (i = 0; i < backoffSingleton->numEntries; i++)
 	{
-		BackoffBackendSharedEntry * se = getBackoffEntryRW(i);
+		BackoffBackendSharedEntry *se = getBackoffEntryRW(i);
 
-		if (!isInvalid(&se->statementId))
+		if (isValid(&se->statementId))
 		{
 			Assert(se->weight > 0);
 			if (TIMEVAL_DIFF_USEC(currentTime, se->lastCheckTime)
-					<  gp_resqueue_priority_inactivity_timeout * 1000.0)
+				< gp_resqueue_priority_inactivity_timeout * 1000.0)
 			{
-				/* This is an active backend. Need to maintain count at group leader */
+				/*
+				 * This is an active backend. Need to maintain count at group
+				 * leader
+				 */
 				BackoffBackendSharedEntry *gl = getBackoffEntryRW(se->groupLeaderIndex);
 
 				if (gl->numFollowersActive == 0)
@@ -710,15 +802,16 @@ void BackoffSweeper()
 	 * Case 1 and 2 are approximated by checking if total statement weight changed since last sweeper loop.
 	 */
 	if (backoffSingleton->lastTotalStatementWeight != totalStatementWeight
-			|| numActiveBackends == 0
-			|| numStatements == 1
-			|| numValidBackends <= numProcsPerSegment())
+		|| numActiveBackends == 0
+		|| numStatements == 1
+		|| numValidBackends <= numProcsPerSegment())
 	{
 		/* Write to targets */
-		for (i=0;i<backoffSingleton->numEntries;i++)
+		for (i = 0; i < backoffSingleton->numEntries; i++)
 		{
 			BackoffBackendSharedEntry *se = getBackoffEntryRW(i);
-			se->noBackoff = true;
+
+			se->backoff = false;
 			se->earlyBackoffExit = true;
 			se->targetUsage = 1.0;
 		}
@@ -727,34 +820,40 @@ void BackoffSweeper()
 	{
 		/**
 		 * There are multiple statements with active backends.
+		 *
+		 * Let 'found' be true if we find a backend is trying to
+		 * request more CPU resources than the maximum CPU that it can
+		 * get. No matter how high the priority of a query process, it
+		 * can utilize at most a single CPU at a time.
 		 */
-		bool found = true;
-		int numIterations = 0;
-		double CPUAvailable = numProcsPerSegment();
-		double maxCPU = Min(1.0, numProcsPerSegment());	/* Maximum CPU that a backend can get */
+		bool		found = true;
+		int			numIterations = 0;
+		double		CPUAvailable = numProcsPerSegment();
+		double		maxCPU = Min(1.0, numProcsPerSegment());	/* Maximum CPU that a
+																 * backend can get */
 
 		Assert(maxCPU > 0.0);
 
-		if ( gp_debug_resqueue_priority)
+		if (gp_debug_resqueue_priority)
 		{
 			elog(LOG, "before allocation: active backends = %d, active weight = %f, cpu available = %f", numActiveBackends, activeWeight, CPUAvailable);
 		}
 
-		while(found)
+		while (found)
 		{
 			found = false;
 
 			/**
 			 * We try to find one or more backends that deserve maxCPU.
 			 */
-			for (i=0;i<backoffSingleton->numEntries;i++)
+			for (i = 0; i < backoffSingleton->numEntries; i++)
 			{
 				BackoffBackendSharedEntry *se = getBackoffEntryRW(i);
 
 				if (se->isActive
-						&& !se->noBackoff)
+					&& se->backoff)
 				{
-					double targetCPU = 0.0;
+					double		targetCPU = 0.0;
 					const BackoffBackendSharedEntry *gl = getBackoffEntryRO(se->groupLeaderIndex);
 
 					Assert(gl->numFollowersActive > 0);
@@ -768,10 +867,25 @@ void BackoffSweeper()
 					 */
 					if (targetCPU >= maxCPU)
 					{
-						Assert(numProcsPerSegment() >= 1.0);	/* This can only happen when there is more than one proc */
+						Assert(numProcsPerSegment() >= 1.0);	/* This can only happen
+																 * when there is more
+																 * than one proc */
 						se->targetUsage = maxCPU;
-						se->noBackoff = true;
+						se->backoff = false;
 						activeWeight -= (se->weight / gl->numFollowersActive);
+
+						/*
+						 * GPDB_83_MERGE_FIXME: I saw the Assert(activeWeight
+						 * > 0.0) above to fail every now and then, when
+						 * running "make installcheck-good". Something's
+						 * wrong, not sure what, but let's just silence that
+						 * failure for now
+						 */
+						if (activeWeight <= 0)
+						{
+							elog(LOG, "activeWeight underflow!");
+							activeWeight = 0.001;
+						}
 						CPUAvailable -= maxCPU;
 						found = true;
 					}
@@ -782,7 +896,7 @@ void BackoffSweeper()
 			Assert(numIterations <= ceil(numProcsPerSegment()));
 		}
 
-		if ( gp_debug_resqueue_priority)
+		if (gp_debug_resqueue_priority)
 		{
 			elog(LOG, "after heavy backends: active backends = %d, active weight = %f, cpu available = %f", numActiveBackends, activeWeight, CPUAvailable);
 		}
@@ -790,14 +904,15 @@ void BackoffSweeper()
 		/**
 		 * Distribute whatever is the CPU available among the rest.
 		 */
-		for (i=0;i<backoffSingleton->numEntries;i++)
+		for (i = 0; i < backoffSingleton->numEntries; i++)
 		{
 			BackoffBackendSharedEntry *se = getBackoffEntryRW(i);
 
 			if (se->isActive
-					&& !se->noBackoff)
+				&& se->backoff)
 			{
 				const BackoffBackendSharedEntry *gl = getBackoffEntryRO(se->groupLeaderIndex);
+
 				Assert(activeWeight > 0.0);
 				Assert(gl->numFollowersActive > 0);
 				Assert(se->weight > 0.0);
@@ -810,16 +925,18 @@ void BackoffSweeper()
 	backoffSingleton->lastTotalStatementWeight = totalStatementWeight;
 	backoffSingleton->sweeperInProgress = false;
 
-	if ( gp_debug_resqueue_priority)
+	if (gp_debug_resqueue_priority)
 	{
 		StringInfoData str;
+
 		initStringInfo(&str);
 		appendStringInfo(&str, "num active statements: %d ", numActiveStatements);
 		appendStringInfo(&str, "num active backends: %d ", numActiveBackends);
 		appendStringInfo(&str, "targetusages: ");
-		for (i=0;i<MaxBackends;i++)
+		for (i = 0; i < MaxBackends; i++)
 		{
 			const BackoffBackendSharedEntry *se = getBackoffEntryRO(i);
+
 			if (se->isActive)
 				appendStringInfo(&str, "(%d,%f)", i, se->targetUsage);
 		}
@@ -833,7 +950,8 @@ void BackoffSweeper()
  * Initialize global sate of backoff scheduler. This is called during creation
  * of shared memory and semaphores.
  */
-void BackoffStateInit()
+void
+BackoffStateInit()
 {
 	bool		found = false;
 
@@ -842,7 +960,8 @@ void BackoffStateInit()
 
 	if (!found)
 	{
-		bool ret = false;
+		bool		ret = false;
+
 		/*
 		 * We're the first - initialize.
 		 */
@@ -859,12 +978,14 @@ void BackoffStateInit()
 /**
  * This backend is done working on a statement.
  */
-void BackoffBackendEntryExit()
+void
+BackoffBackendEntryExit()
 {
 	if (MyBackendId >= 0
-			&& (Gp_role == GP_ROLE_DISPATCH || Gp_role == GP_ROLE_EXECUTE))
+		&& (Gp_role == GP_ROLE_DISPATCH || Gp_role == GP_ROLE_EXECUTE))
 	{
 		BackoffBackendSharedEntry *se = myBackoffSharedEntry();
+
 		Assert(se);
 		setInvalid(&se->statementId);
 	}
@@ -875,7 +996,8 @@ void BackoffBackendEntryExit()
  * Invalidate the statement id corresponding to this backend so that it may
  * be eliminated from consideration by the sweeper early.
  */
-static void BackoffStateAtExit(int code, Datum arg)
+static void
+BackoffStateAtExit(int code, Datum arg)
 {
 	BackoffBackendEntryExit();
 }
@@ -884,20 +1006,20 @@ static void BackoffStateAtExit(int code, Datum arg)
 /**
  * An interface to re-weigh an existing session on the master and all backends.
  * Input:
- * 	session id - what session is statement on?
- * 	command count - what is the command count of statement.
- * 	priority value - text, what should be the new priority of this statement.
+ *	session id - what session is statement on?
+ *	command count - what is the command count of statement.
+ *	priority value - text, what should be the new priority of this statement.
  * Output:
- * 	number of backends whose weights were changed by this call.
+ *	number of backends whose weights were changed by this call.
  */
 Datum
 gp_adjust_priority_value(PG_FUNCTION_ARGS)
 {
-	int32 session_id = PG_GETARG_INT32(0);
-	int32 command_count = PG_GETARG_INT32(1);
+	int32		session_id = PG_GETARG_INT32(0);
+	int32		command_count = PG_GETARG_INT32(1);
 	Datum		dVal = PG_GETARG_DATUM(2);
-	char *priorityVal = NULL;
-	int wt = 0;
+	char	   *priorityVal = NULL;
+	int			wt = 0;
 
 	priorityVal = DatumGetCString(DirectFunctionCall1(textout, dVal));
 
@@ -913,25 +1035,26 @@ gp_adjust_priority_value(PG_FUNCTION_ARGS)
 	pfree(priorityVal);
 
 	return DirectFunctionCall3(gp_adjust_priority_int, Int32GetDatum(session_id),
-								Int32GetDatum(command_count), Int32GetDatum(wt));
+							Int32GetDatum(command_count), Int32GetDatum(wt));
 
 }
+
 /**
  * An interface to re-weigh an existing session on the master and all backends.
  * Input:
- * 	session id - what session is statement on?
- * 	command count - what is the command count of statement.
- * 	weight - int, what should be the new priority of this statement.
+ *	session id - what session is statement on?
+ *	command count - what is the command count of statement.
+ *	weight - int, what should be the new priority of this statement.
  * Output:
- * 	number of backends whose weights were changed by this call.
+ *	number of backends whose weights were changed by this call.
  */
 Datum
 gp_adjust_priority_int(PG_FUNCTION_ARGS)
 {
-	int32 session_id = PG_GETARG_INT32(0);
-	int32 command_count = PG_GETARG_INT32(1);
-	int32 wt = PG_GETARG_INT32(2);
-	int numfound = 0;
+	int32		session_id = PG_GETARG_INT32(0);
+	int32		command_count = PG_GETARG_INT32(1);
+	int32		wt = PG_GETARG_INT32(2);
+	int			numfound = 0;
 	StatementId sid;
 
 	if (!gp_enable_resqueue_priority)
@@ -940,7 +1063,7 @@ gp_adjust_priority_int(PG_FUNCTION_ARGS)
 	if (!superuser())
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-						(errmsg("Only superuser can re-prioritize a query after it has begun execution."))));
+				 (errmsg("Only superuser can re-prioritize a query after it has begun execution."))));
 
 	if (Gp_role == GP_ROLE_UTILITY)
 		elog(ERROR, "Query prioritization does not work in utility mode.");
@@ -952,14 +1075,9 @@ gp_adjust_priority_int(PG_FUNCTION_ARGS)
 
 	if (Gp_role == GP_ROLE_DISPATCH)
 	{
-		int i = 0;
-		int resultCount = 0;
-		struct pg_result **results = NULL;
-		char cmd[255];
-
-		StringInfoData errbuf;
-
-		initStringInfo(&errbuf);
+		int			i = 0;
+		CdbPgResults cdb_pgresults = {NULL, 0};
+		char		cmd[255];
 
 		/*
 		 * Make sure the session exists before dispatching
@@ -967,6 +1085,7 @@ gp_adjust_priority_int(PG_FUNCTION_ARGS)
 		for (i = 0; i < backoffSingleton->numEntries; i++)
 		{
 			BackoffBackendSharedEntry *se = getBackoffEntryRW(i);
+
 			if (equalStatementId(&se->statementId, &sid))
 			{
 				if (gp_debug_resqueue_priority)
@@ -987,47 +1106,43 @@ gp_adjust_priority_int(PG_FUNCTION_ARGS)
 		 */
 		sprintf(cmd, "select gp_adjust_priority(%d,%d,%d)", session_id, command_count, wt);
 
-		results = cdbdisp_dispatchRMCommand(cmd, true, &errbuf, &resultCount);
+		CdbDispatchCommand(cmd, DF_WITH_SNAPSHOT, &cdb_pgresults);
 
-		if (errbuf.len > 0)
-			ereport(ERROR,(
-					errmsg("gp_adjust_priority error (gathered %d results from cmd '%s')",
-							resultCount, cmd), errdetail("%s",	errbuf.data)));
-
-		for (i = 0; i < resultCount; i++)
+		for (i = 0; i < cdb_pgresults.numResults; i++)
 		{
-			if (PQresultStatus(results[i]) != PGRES_TUPLES_OK)
+			struct pg_result *pgresult = cdb_pgresults.pg_results[i];
+
+			if (PQresultStatus(pgresult) != PGRES_TUPLES_OK)
 			{
+				cdbdisp_clearCdbPgResults(&cdb_pgresults);
 				elog(ERROR, "gp_adjust_priority: resultStatus not tuples_Ok");
 			}
 			else
 			{
 
-				int j;
-				for (j = 0; j < PQntuples(results[i]); j++)
+				int			j;
+
+				for (j = 0; j < PQntuples(pgresult); j++)
 				{
-					int retvalue = 0;
-					retvalue = atoi(PQgetvalue(results[i], j, 0));
+					int			retvalue = 0;
+
+					retvalue = atoi(PQgetvalue(pgresult, j, 0));
 					numfound += retvalue;
 				}
 			}
 		}
 
-		pfree(errbuf.data);
-
-		for (i = 0; i < resultCount; i++)
-			PQclear(results[i]);
-
-		free(results);
+		cdbdisp_clearCdbPgResults(&cdb_pgresults);
 
 	}
-	else /* Gp_role == EXECUTE */
+	else	/* Gp_role == EXECUTE */
 	{
 		/*
 		 * Find number of backends working on behalf of this session and
 		 * distribute the weight evenly.
 		 */
-		int i = 0;
+		int			i = 0;
+
 		Assert(Gp_role == GP_ROLE_EXECUTE);
 		for (i = 0; i < backoffSingleton->numEntries; i++)
 		{
@@ -1068,8 +1183,8 @@ backoff_start(void)
 	{
 		case -1:
 			ereport(LOG,
-				(errmsg("could not fork sweeper process: %m")));
-		return 0;
+					(errmsg("could not fork sweeper process: %m")));
+			return 0;
 
 		case 0:
 			/* in postmaster child ... */
@@ -1079,7 +1194,7 @@ backoff_start(void)
 			BackoffSweeperMain(0, NULL);
 			break;
 		default:
-			return (int)backoffId;
+			return (int) backoffId;
 	}
 
 	/* shouldn't get here */
@@ -1092,7 +1207,8 @@ backoff_start(void)
  * This method is called after fork of the sweeper process. It sets up signal
  * handlers and does initialization that is required by a postgres backend.
  */
-NON_EXEC_STATIC void BackoffSweeperMain(int argc, char *argv[])
+NON_EXEC_STATIC void
+BackoffSweeperMain(int argc, char *argv[])
 {
 	sigjmp_buf	local_sigjmp_buf;
 
@@ -1114,7 +1230,7 @@ NON_EXEC_STATIC void BackoffSweeperMain(int argc, char *argv[])
 	SetProcessingMode(InitProcessing);
 
 	/*
-	 * Set up signal handlers.	We operate on databases much like a regular
+	 * Set up signal handlers.  We operate on databases much like a regular
 	 * backend, so we use the same signal handling.  See equivalent code in
 	 * tcop/postgres.c.
 	 */
@@ -1158,7 +1274,7 @@ NON_EXEC_STATIC void BackoffSweeperMain(int argc, char *argv[])
 		EmitErrorReport();
 
 		/*
-		 * We can now go away.	Note that because we'll call InitProcess, a
+		 * We can now go away.  Note that because we'll call InitProcess, a
 		 * callback will be registered to do ProcKill, which will clean up
 		 * necessary state.
 		 */
@@ -1183,9 +1299,9 @@ NON_EXEC_STATIC void BackoffSweeperMain(int argc, char *argv[])
  * Main loop of the sweeper process. It wakes up once in a while, marks backends as active
  * or not and re-calculates CPU usage among active backends.
  */
-void BackoffSweeperLoop(void)
+void
+BackoffSweeperLoop(void)
 {
-
 	for (;;)
 	{
 		CHECK_FOR_INTERRUPTS();
@@ -1203,7 +1319,7 @@ void BackoffSweeperLoop(void)
 		Assert(gp_resqueue_priority_sweeper_interval > 0.0);
 		/* Sleep a while. */
 		pg_usleep(gp_resqueue_priority_sweeper_interval * 1000.0);
-	} /* end server loop */
+	}							/* end server loop */
 
 	return;
 }
@@ -1220,21 +1336,21 @@ BackoffRequestShutdown(SIGNAL_ARGS)
 /**
  * Set returning function to inspect current state of query prioritization.
  * Input:
- * 	none
+ *	none
  * Output:
- * 	Set of (session_id, command_count, priority, weight) for all backends (on the current segment).
- * 	This function is used by jetpack views gp_statement_priorities.
+ *	Set of (session_id, command_count, priority, weight) for all backends (on the current segment).
+ *	This function is used by jetpack views gp_statement_priorities.
  */
 Datum
 gp_list_backend_priorities(PG_FUNCTION_ARGS)
 {
 	typedef struct Context
 	{
-		int currentIndex;
+		int			currentIndex;
 	} Context;
 
 	FuncCallContext *funcctx = NULL;
-	Context *context = NULL;
+	Context    *context = NULL;
 
 	if (SRF_IS_FIRSTCALL())
 	{
@@ -1245,8 +1361,7 @@ gp_list_backend_priorities(PG_FUNCTION_ARGS)
 		funcctx = SRF_FIRSTCALL_INIT();
 
 		/*
-		 * switch to memory context appropriate for multiple function
-		 * calls
+		 * switch to memory context appropriate for multiple function calls
 		 */
 		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
 
@@ -1254,13 +1369,13 @@ gp_list_backend_priorities(PG_FUNCTION_ARGS)
 		/* this had better match gp_distributed_xacts view in system_views.sql */
 		tupdesc = CreateTemplateTupleDesc(4, false);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "session_id",
-				INT4OID, -1, 0);
+						   INT4OID, -1, 0);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "command_count",
-				INT4OID, -1, 0);
+						   INT4OID, -1, 0);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "priority",
-								   TEXTOID, -1, 0);
+						   TEXTOID, -1, 0);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "weight",
-				INT4OID, -1, 0);
+						   INT4OID, -1, 0);
 
 
 		funcctx->tuple_desc = BlessTupleDesc(tupdesc);
@@ -1286,7 +1401,7 @@ gp_list_backend_priorities(PG_FUNCTION_ARGS)
 		bool		nulls[4];
 		HeapTuple	tuple = NULL;
 		Datum		result;
-		char *priorityVal = NULL;
+		char	   *priorityVal = NULL;
 
 		const BackoffBackendSharedEntry *se = NULL;
 
@@ -1294,11 +1409,12 @@ gp_list_backend_priorities(PG_FUNCTION_ARGS)
 
 		Assert(se);
 
-		if (isInvalid(&se->statementId))
+		if (!isValid(&se->statementId))
 		{
 			context->currentIndex++;
 			continue;
 		}
+
 		/*
 		 * Form tuple with appropriate data.
 		 */
@@ -1313,7 +1429,7 @@ gp_list_backend_priorities(PG_FUNCTION_ARGS)
 		Assert(priorityVal);
 
 		values[2] = DirectFunctionCall1(textin,
-						                CStringGetDatum(priorityVal));
+										CStringGetDatum(priorityVal));
 		Assert(se->weight > 0);
 		values[3] = Int32GetDatum((int32) se->weight);
 		tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
@@ -1331,9 +1447,11 @@ gp_list_backend_priorities(PG_FUNCTION_ARGS)
 /**
  * What is the weight assigned to superuser issued queries?
  */
-int BackoffSuperuserStatementWeight()
+int
+BackoffSuperuserStatementWeight()
 {
-	int wt = -1;
+	int			wt = -1;
+
 	Assert(superuser());
 	wt = BackoffPriorityValueToInt("MAX");
 	Assert(wt > 0);
@@ -1343,9 +1461,11 @@ int BackoffSuperuserStatementWeight()
 /**
  * Integer value for default weight.
  */
-int BackoffDefaultWeight()
+int
+BackoffDefaultWeight()
 {
-	int wt = BackoffPriorityValueToInt(gp_resqueue_priority_default_value);
+	int			wt = BackoffPriorityValueToInt(gp_resqueue_priority_default_value);
+
 	Assert(wt > 0);
 	return wt;
 }
@@ -1354,31 +1474,35 @@ int BackoffDefaultWeight()
  * Get weight associated with queue. See queue.c.
  * TODO: tidy up interface.
  */
-int ResourceQueueGetPriorityWeight(Oid queueId)
+int
+ResourceQueueGetPriorityWeight(Oid queueId)
 {
-	List *capabilitiesList = NULL;
-	List *entry = NULL;
-	ListCell *le = NULL;
-	int weight = BackoffDefaultWeight();
+	List	   *capabilitiesList = NULL;
+	List	   *entry = NULL;
+	ListCell   *le = NULL;
+	int			weight = BackoffDefaultWeight();
 
 	if (queueId == InvalidOid)
 		return weight;
 
-	capabilitiesList = GetResqueueCapabilityEntry(queueId); /* This is a list of lists */
+	capabilitiesList = GetResqueueCapabilityEntry(queueId);		/* This is a list of
+																 * lists */
 
 	if (!capabilitiesList)
 		return weight;
 
 	foreach(le, capabilitiesList)
 	{
-		Value *key = NULL;
+		Value	   *key = NULL;
+
 		entry = (List *) lfirst(le);
 		Assert(entry);
 		key = (Value *) linitial(entry);
 		Assert(key->type == T_Integer); /* This is resource type id */
 		if (intVal(key) == PG_RESRCTYPE_PRIORITY)
 		{
-			Value *val = lsecond(entry);
+			Value	   *val = lsecond(entry);
+
 			Assert(val->type == T_String);
 			weight = BackoffPriorityValueToInt(strVal(val));
 		}
@@ -1390,17 +1514,17 @@ int ResourceQueueGetPriorityWeight(Oid queueId)
 typedef struct PriorityMapping
 {
 	const char *priorityVal;
-	int weight;
+	int			weight;
 } PriorityMapping;
 
 const struct PriorityMapping priority_map[] = {
-		{"MAX", 1000000},
-		{"HIGH", 1000},
-		{"MEDIUM", 500},
-		{"LOW", 200},
-		{"MIN", 100},
-		/* End of list marker */
-		{NULL, 0}
+	{"MAX", 1000000},
+	{"HIGH", 1000},
+	{"MEDIUM", 500},
+	{"LOW", 200},
+	{"MIN", 100},
+	/* End of list marker */
+	{NULL, 0}
 };
 
 
@@ -1410,12 +1534,13 @@ const struct PriorityMapping priority_map[] = {
  * cpu target usage computations by the sweeper. Keep this method in sync
  * with its dual BackoffPriorityIntToValue().
  */
-static int BackoffPriorityValueToInt(const char *priorityVal)
+static int
+BackoffPriorityValueToInt(const char *priorityVal)
 {
 	const PriorityMapping *p = priority_map;
 
 	Assert(p);
-	while (p->priorityVal != NULL && (pg_strcasecmp(priorityVal, p->priorityVal)!=0))
+	while (p->priorityVal != NULL && (pg_strcasecmp(priorityVal, p->priorityVal) != 0))
 	{
 		p++;
 		Assert((char *) p < (const char *) priority_map + sizeof(priority_map));
@@ -1437,7 +1562,8 @@ static int BackoffPriorityValueToInt(const char *priorityVal)
  * method maps it to a text value corresponding to this weight. Caller is
  * responsible for deallocating the return pointer.
  */
-static char *BackoffPriorityIntToValue(int weight)
+static char *
+BackoffPriorityIntToValue(int weight)
 {
 	const PriorityMapping *p = priority_map;
 
@@ -1461,14 +1587,17 @@ static char *BackoffPriorityIntToValue(int weight)
 /*
  * Helper method that verifies setting of default priority guc.
  */
-const char *gpvars_assign_gp_resqueue_priority_default_value(const char *newval,
-		bool doit,
-		GucSource source __attribute__((unused)) )
+const char *
+gpvars_assign_gp_resqueue_priority_default_value(const char *newval,
+												 bool doit,
+									GucSource source __attribute__((unused)))
 {
 	if (doit)
 	{
-		int wt = -1;
-		wt = BackoffPriorityValueToInt(newval); /* This will throw an error if bad value is specified */
+		int			wt;
+
+		wt = BackoffPriorityValueToInt(newval); /* This will throw an error if
+												 * bad value is specified */
 		Assert(wt > 0);
 	}
 

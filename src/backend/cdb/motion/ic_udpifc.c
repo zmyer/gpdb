@@ -1,5 +1,5 @@
 /*-------------------------------------------------------------------------
- * ic_udp.c
+ * ic_udpifc.c
  *	   Interconnect code specific to UDP transport.
  *
  * Copyright (c) 2005-2011, Greenplum Inc.
@@ -30,10 +30,10 @@
 #include "miscadmin.h"
 #include "libpq/libpq-be.h"
 #include "libpq/ip.h"
-#include "utils/gp_atomic.h"
 #include "utils/builtins.h"
 #include "utils/debugbreak.h"
-#include "utils/pg_crc.h"
+#include "utils/faultinjector.h"
+#include "port/atomics.h"
 #include "port/pg_crc32c.h"
 
 #include "cdb/cdbselect.h"
@@ -41,6 +41,7 @@
 #include "cdb/ml_ipc.h"
 #include "cdb/cdbvars.h"
 #include "cdb/cdbdisp.h"
+#include "cdb/cdbdispatchresult.h"
 #include "cdb/cdbicudpfaultinjection.h"
 
 #include <fcntl.h>
@@ -237,9 +238,6 @@ struct CursorICHistoryTable
  */
 #define MAIN_THREAD_COND_TIMEOUT (250000)
 
-/* Turn on/off UDP signal (on by default for Mac OS) */
-/* #define IC_USE_PTHREAD_SYNCHRONIZATION */
-
 /*
  *  Used for synchronization between main thread (receiver) and background thread.
  *
@@ -381,34 +379,6 @@ struct SendControlInfo
  */
 static SendControlInfo snd_control_info;
 
-#if defined(__darwin__) && !defined(IC_USE_PTHREAD_SYNCHRONIZATION)
-/*
- * UDPSignal
- * 		The udp interconnect specific implementation of timeout wait/signal mechanism.
- * 		(Only used for MacOS X to avoid the bug in MacOS X 10.6.x: MPP-9910).
- * 		More details are available in the functions to implement UDPSignal.
- */
-typedef struct UDPSignal UDPSignal;
-struct UDPSignal
-{
-	/* We often use the address of a pthread condition variable as signal/condition id. */
-	void	*sigId;
-
-	/* The udp socket fd to implement the mechanism. */
-	int		fd;
-
-	/* The port. */
-	int32	port;
-
-	/* The UDP socket address family */
-	int 	txFamily;
-
-	/* Address info. */
-	struct sockaddr_storage peer;
-	socklen_t peer_len;
-};
-#endif
-
 /*
  * ICGlobalControlInfo
  *
@@ -463,11 +433,6 @@ struct ICGlobalControlInfo
 
 	/* Used by main thread to ask the background thread to exit. */
 	uint32 shutdown;
-
-#if defined(__darwin__) && !defined(IC_USE_PTHREAD_SYNCHRONIZATION)
-	UDPSignal usig;
-#endif
-
 };
 
 /*
@@ -705,7 +670,6 @@ static void putRxBufferAndSendAck(MotionConn *conn, AckSendParam *param);
 static inline void putRxBufferToFreeList(RxBufferPool *p, icpkthdr *buf);
 static inline icpkthdr *getRxBufferFromFreeList(RxBufferPool *p);
 static icpkthdr *getRxBuffer(RxBufferPool *p);
-static void initRxBufferPool(RxBufferPool *p);
 
 /* ICBufferList functions. */
 static inline void icBufferListInitHeadLink(ICBufferLink *link);
@@ -763,7 +727,7 @@ static void checkQDConnectionAlive(void);
 static void *rxThreadFunc(void *arg);
 
 static bool handleMismatch(icpkthdr *pkt, struct sockaddr_storage *peer, int peer_len);
-static void inline handleAckedPacket(MotionConn *ackConn, ICBuffer *buf, uint64 now);
+static void handleAckedPacket(MotionConn *ackConn, ICBuffer *buf, uint64 now);
 static bool handleAcks(ChunkTransportState *transportStates, ChunkTransportStateEntry *pEntry);
 static void handleStopMsgs(ChunkTransportState *transportStates, ChunkTransportStateEntry *pEntry, int16 motionId);
 static void handleDisorderPacket(MotionConn *conn, int pos, uint32 tailSeq, icpkthdr *pkt);
@@ -799,16 +763,6 @@ static inline void logPkt(char *prefix, icpkthdr *pkt);
 static void aggregateStatistics(ChunkTransportStateEntry *pEntry);
 
 static inline bool pollAcks(ChunkTransportState *transportStates, int fd, int timeout);
-
-
-#if defined(__darwin__) && !defined(IC_USE_PTHREAD_SYNCHRONIZATION)
-static int udpSignalTimeoutWait(UDPSignal *sig, pthread_cond_t *cond, pthread_mutex_t *mutex, const struct timespec *ts);
-static bool udpSignalPoll(UDPSignal *sig, int timeout);
-static bool udpSignalGet(UDPSignal *sig);
-static void setupUDPSignal(UDPSignal *sig);
-static void destroyUDPSignal(UDPSignal *sig);
-static void udpSignal(UDPSignal *sig);
-#endif
 
 /* #define TRANSFER_PROTOCOL_STATS */
 
@@ -1291,7 +1245,10 @@ setupUDPListeningSocket(int *listenerSocketFd, uint16 *listenerPort, int *txFami
 		if (!pg_set_noblock(fd))
 		{
 			if (fd >= 0)
+			{
 				closesocket(fd);
+				fd = -1;
+			}
 			continue;
 		}
 
@@ -1304,7 +1261,10 @@ setupUDPListeningSocket(int *listenerSocketFd, uint16 *listenerPort, int *txFami
 		}
 
 		if (fd >= 0)
+		{
 			closesocket(fd);
+			fd = -1;
+		}
 	}
 
 	if (rp == NULL)
@@ -1408,10 +1368,6 @@ InitMotionUDPIFC(int *listenerSocketFd, uint16 *listenerPort)
 	 */
 	setupUDPListeningSocket(listenerSocketFd, listenerPort, &txFamily);
 
-#if defined(__darwin__) && !defined(IC_USE_PTHREAD_SYNCHRONIZATION)
-	setupUDPSignal(&ic_control_info.usig);
-#endif
-
 	/* Initialize receive control data. */
 	resetMainThreadWaiting(&rx_control_info.mainWaitingState);
 
@@ -1421,7 +1377,10 @@ InitMotionUDPIFC(int *listenerSocketFd, uint16 *listenerPort)
 	rx_control_info.lastTornIcId = 0;
 	initCursorICHistoryTable(&rx_control_info.cursorHistoryTable);
 
-	initRxBufferPool(&rx_buffer_pool);
+	/* Initialize receive buffer pool */
+	rx_buffer_pool.count = 0;
+	rx_buffer_pool.maxCount = 1;
+	rx_buffer_pool.freeList = NULL;
 
 	/* Initialize send control data */
 	snd_control_info.cwnd = 0;
@@ -1505,10 +1464,6 @@ CleanupMotionUDPIFC(void)
 
 	MemoryContextDelete(ic_control_info.memContext);
 
-#if defined(__darwin__) && !defined(IC_USE_PTHREAD_SYNCHRONIZATION)
-	destroyUDPSignal(&ic_control_info.usig);
-#endif
-
 #ifdef USE_ASSERT_CHECKING
 	/*
 	 * Check malloc times, in Interconnect part, memory are carefully released in tear down
@@ -1532,33 +1487,21 @@ static bool
 waitOnCondition(int timeout_us, pthread_cond_t *cond, pthread_mutex_t *mutex)
 {
 	struct timespec ts;
+	struct timeval tv;
 	int wait;
 
 	Assert(timeout_us >= 0);
-	/*
-	 * MPP-9910: pthread_cond_timedwait appears to be broken in OS X 10.6.x "Snow Leopard"
-	 * Let's use a different timewait function that works better on OS X (and is simpler
-	 * because it uses relative time)
-	 */
-#ifdef __darwin__
-	ts.tv_sec = 0;
-	ts.tv_nsec = 1000 * timeout_us;
-#else
-	{
-		struct timeval tv;
 
-		gettimeofday(&tv, NULL);
-		ts.tv_sec = tv.tv_sec;
-		/*	leave in ms for this */
-		ts.tv_nsec = (tv.tv_usec + timeout_us);
-		if (ts.tv_nsec >= 1000000)
-		{
-			ts.tv_sec++;
-			ts.tv_nsec -= 1000000;
-		}
-		ts.tv_nsec *= 1000; /* convert usec to nsec */
+	gettimeofday(&tv, NULL);
+	ts.tv_sec = tv.tv_sec;
+	/*	leave in ms for this */
+	ts.tv_nsec = (tv.tv_usec + timeout_us);
+	if (ts.tv_nsec >= 1000000)
+	{
+		ts.tv_sec++;
+		ts.tv_nsec -= 1000000;
 	}
-#endif
+	ts.tv_nsec *= 1000; /* convert usec to nsec */
 
 	if (gp_log_interconnect >= GPVARS_VERBOSITY_DEBUG)
 	{
@@ -1568,24 +1511,15 @@ waitOnCondition(int timeout_us, pthread_cond_t *cond, pthread_mutex_t *mutex)
 
 
 	/*
-	 * interrupts may occurs when we are waiting. the interrupt handler
+	 * Interrupts may occur when we are waiting. The interrupt handler
 	 * only set some flags. Only when interrupt checking function is called,
 	 * the interrupts are handled.
 	 *
 	 * We should pay attention to the fact that in elog/erreport/write_log,
 	 * interrupts are checked.
-	 *
 	 */
 
-#if defined(__darwin__)
-#if (defined(IC_USE_PTHREAD_SYNCHRONIZATION))
-	wait = pthread_cond_timedwait_relative_np(cond, mutex, &ts);
-#else
-	wait = udpSignalTimeoutWait(&ic_control_info.usig, cond, mutex, &ts);
-#endif
-#else
 	wait = pthread_cond_timedwait(cond, mutex, &ts);
-#endif
 
 	if (wait == ETIMEDOUT)
 	{
@@ -1792,7 +1726,7 @@ destroyConnHashTable(ConnHashTable *ht)
 			if (ht->cxt)
 				pfree(trash);
 			else
-				free(ht->table);
+				free(trash);
 		}
 	}
 
@@ -1800,6 +1734,9 @@ destroyConnHashTable(ConnHashTable *ht)
 		pfree(ht->table);
 	else
 		free(ht->table);
+
+	ht->table = NULL;
+	ht->size = 0;
 }
 
 /*
@@ -1951,7 +1888,7 @@ sendStatusQueryMessage(MotionConn *conn, int fd, uint32 seq)
  * putRxBufferAndSendAck
  * 		Return a buffer and send an acknowledgment.
  *
- *  SHOULD BE CALLED WITH rx_control_info.lock *LOCKED*
+ *  SHOULD BE CALLED WITH ic_control_info.lock *LOCKED*
  */
 static void
 putRxBufferAndSendAck(MotionConn *conn, AckSendParam *param)
@@ -2037,23 +1974,10 @@ MlPutRxBufferIFC(ChunkTransportState *transportStates, int motNodeID, int route)
 }
 
 /*
- * initRxBufferPool
- * 		Initialize receive buffer pool.
- */
-static void
-initRxBufferPool(RxBufferPool *p)
-{
-	p->count = 0;
-	p->maxCount = 1;
-	p->freeList = NULL;
-}
-
-
-/*
  * getRxBuffer
  * 		Get a receive buffer.
  *
- * SHOULD BE CALLED WITH rx_control_info.lock *LOCKED*
+ * SHOULD BE CALLED WITH ic_control_info.lock *LOCKED*
  *
  * NOTE: This function MUST NOT contain elog or ereport statements.
  * elog is NOT thread-safe.  Developers should instead use something like:
@@ -2112,7 +2036,7 @@ getRxBuffer(RxBufferPool *p)
  * putRxBufferToFreeList
  * 		Return a receive buffer to free list
  *
- *  SHOULD BE CALLED WITH rx_control_info.lock *LOCKED*
+ *  SHOULD BE CALLED WITH ic_control_info.lock *LOCKED*
  */
 static inline void
 putRxBufferToFreeList(RxBufferPool *p, icpkthdr *buf)
@@ -2126,7 +2050,7 @@ putRxBufferToFreeList(RxBufferPool *p, icpkthdr *buf)
  * getRxBufferFromFreeList
  * 		Get a receive buffer from free list
  *
- * SHOULD BE CALLED WITH rx_control_info.lock *LOCKED*
+ * SHOULD BE CALLED WITH ic_control_info.lock *LOCKED*
  *
  * NOTE: This function MUST NOT contain elog or ereport statements.
  * elog is NOT thread-safe.  Developers should instead use something like:
@@ -2648,249 +2572,6 @@ getSndBuffer(MotionConn *conn)
 	return ret;
 }
 
-/*
- *  The udp interconnect specific implementation of timeout wait/signal mechanism.
- *  (Only for MacOS X)
- *
- * The introduction of this is due to the bug in pthread_cond_wait/pthread_cond_timedwait_relative_np
- * on MacOS X. (MPP-9910).
- *
- * The implementation of the signal mechanism is based on UDP protocol. Waiting thread is polling on
- * a UDP socket, and wakes up thread will send a signal id to the socket when the condition is met.
- *
- * Due to the reliability of UDP protocol (packet loss, duplicate, interrupted system calls, error
- * return of system calls...), the waiting thread should:
- *
- * 1) check the condition again when it is waken up
- * 2) when the time wait return with timeout, it should check the condition again.
- *
- * It is not necessary to implement a retransmit/ack mechanism because the local socket is relatively
- * reliable and the communication load is light.
- *
- * ##NOTE: This implementation is specific for UDP interconnect use, and it is not portable. Developers
- * should pay attention to add another condition variable.
- */
-
-#if defined(__darwin__) && !defined(IC_USE_PTHREAD_SYNCHRONIZATION)
-/*
- * udpSignalTimeoutWait
- * 		Timeout wait implementation on Mac.
- *
- * Return 0 on success (condition met) and return ETIMEOUT on timeout/other errors.
- *
- * Note that this implementation is UDP interconnect specific and not for general usage.
- * It depends on the udp socket built in InitMotionUDP.
- *
- * Can only be used in Main thread.
- *
- */
-static int
-udpSignalTimeoutWait(UDPSignal *sig, pthread_cond_t *cond, pthread_mutex_t *mutex, const struct timespec *ts)
-{
-	Assert(sig != NULL && mutex != NULL && ts != NULL);
-
-	int timeout = ts->tv_nsec/1000/1000;
-
-	Assert(timeout >= 0);
-
-	pthread_mutex_unlock(mutex);
-
-	sig->sigId = (void *)cond;
-	bool ret = ETIMEDOUT;
-	if (udpSignalPoll(sig, timeout))
-	{
-		if (udpSignalGet(sig))
-			ret = 0;
-	}
-	sig->sigId = NULL;
-	pthread_mutex_lock(mutex);
-	return ret;
-}
-
-/*
- * udpSignal
- *
- * The udp interconnect specific implementation of pthread_cond_signal.
- *
- */
-static void
-udpSignal(UDPSignal *sig)
-{
-	int n;
-	char buf[16];
-
-#ifdef USE_ASSERT_CHECKING
-	int percent = gp_udpic_dropacks_percent > 0 ? 1 : 0;
-	if (testmode_inject_fault(percent))
-	{
-	#ifdef AMS_VERBOSE_LOGGING
-		write_log("THROW SIGNAL with value %p", sig->sigId);
-	#endif
-		return;
-	}
-#endif
-
-xmit_retry:
-
-	*((void **)buf) = sig->sigId;
-	n = sendto(sig->fd, buf, sizeof(sig->sigId), 0,
-			   (struct sockaddr *)&sig->peer, sig->peer_len);
-
-	if (n < 0)
-	{
-		if (errno == EINTR)
-			goto xmit_retry;
-
-		if (errno == EAGAIN) /* no space ? not an error. */
-			return;
-
-		/* Error case, this may happen in both main thread and background thread,
-		 * treat it like in background thread. Finally, main thread will find this error.
-		 */
-		write_log("udpsignal failed fd %d: got error %d errno %d signal %p", sig->fd, n, errno, sig->sigId);
-		setRxThreadError(errno);
-		return;
-		/* not reached */
-	}
-
-	if (n != sizeof(int))
-		write_log("udpsignal failed fd %d: got error %d errno %d signal %p", sig->fd, n, errno, sig->sigId);
-
-}
-
-/*
- * setupUDPSignal
- * 		Setup the socket needed by the signal.
- *
- * Can only be used in Main thread.
- */
-static void
-setupUDPSignal(UDPSignal *sig)
-{
-	Assert(sig != NULL);
-
-	uint16 port;
-	setupUDPListeningSocket(&sig->fd, &port, &sig->txFamily);
-	sig->port = port;
-	getSockAddr(&sig->peer, &sig->peer_len, "127.0.0.1", port);
-	sig->sigId = NULL;
-	Assert(sig->peer.ss_family == AF_INET || sig->peer.ss_family == AF_INET6);
-}
-
-/*
- * destroyUDPSignal
- * 		Destroy the signal.
- *
- * Can only be used in Main thread.
- */
-static void
-destroyUDPSignal(UDPSignal *sig)
-{
-	Assert(sig != NULL);
-
-	if (sig->fd >= 0)
-		closesocket(sig->fd);
-	sig->sigId = NULL;
-	sig->fd = -1;
-	sig->port = 0;
-}
-
-/*
- * udpSignalGet
- * 		Try to get the signal from the socket.
- *
- * Note: Can only be called from main thread.
- */
-static bool
-udpSignalGet(UDPSignal *sig)
-{
-	int n;
-
-#define SIGNAL_BUFFER_SIZE 16
-	struct sockaddr_storage peer;
-	socklen_t peerlen;
-	char buf[SIGNAL_BUFFER_SIZE];
-
-	for (;;)
-	{
-		/* ready to read on our socket ? */
-		peerlen = sizeof(peer);
-		n = recvfrom(sig->fd, buf, SIGNAL_BUFFER_SIZE, 0, (struct sockaddr *)&peer, &peerlen);
-
-		if (n < 0)
-		{
-			/* had nothing to read. */
-			if (errno == EWOULDBLOCK)
-				return false;
-
-			if (errno == EINTR)
-				continue;
-
-			elog(ERROR, "Interconnect error: getting signal from socket buffer failed.");
-
-			/* not reached. */
-			return false;
-		}
-
-		if (n != sizeof(sig->sigId))
-		{
-			continue;
-		}
-
-		if (*((void **)buf) == sig->sigId)
-		{
-		#ifdef AMS_VERBOSE_LOGGING
-			write_log("Get signal %p", *((void **)buf));
-		#endif
-			return true;
-		}
-	}
-	return false;
-}
-
-/*
- * udpSignalPoll
- * 		Timeout (in ms) polling of signal packets.
- *
- *
- * Note: Can only be called from main thread.
- */
-static bool
-udpSignalPoll(UDPSignal *sig, int timeout)
-{
-	struct pollfd nfd;
-	int n;
-
-	nfd.fd = sig->fd;
-	nfd.events = POLLIN;
-
-	n = poll(&nfd, 1, timeout);
-
-	if (n < 0)
-	{
-		if (errno == EINTR)
-			return false;
-
-		elog(ERROR, "Interconnect error: signal polling failed.");
-		/* not reached */
-	}
-
-	/* timeout */
-	if (n == 0)
-	{
-		return false;
-	}
-
-	/* got some signal in the buffer. */
-	if (n == 1 && (nfd.events & POLLIN))
-	{
-		return true;
-	}
-
-	return false;
-}
-#endif
-
 
 /*
  * startOutgoingUDPConnections
@@ -3060,7 +2741,6 @@ setupOutgoingUDPConnection(ChunkTransportState *transportStates, ChunkTransportS
 	Assert(conn->state == mcsSetupOutgoingConnection);
 	Assert(conn->cdbProc);
 
-	conn->wakeup_ms = 0;
 	conn->remoteContentId = cdbProc->contentid;
 	conn->stat_min_ack_time = ~((uint64)0);
 
@@ -3209,7 +2889,7 @@ checkForCancelFromQD(ChunkTransportState *pTransportStates)
 	Assert(pTransportStates);
 	Assert(pTransportStates->estate);
 
-	if (cdbdisp_check_estate_for_cancel(pTransportStates->estate))
+	if (cdbdisp_checkForCancel(pTransportStates->estate->dispatcherState))
 	{
 		ereport(ERROR, (errcode(ERRCODE_GP_INTERCONNECTION_ERROR),
 						errmsg(CDB_MOTION_LOST_CONTACT_STRING)));
@@ -3323,7 +3003,6 @@ SetupUDPIFCInterconnect_Internal(EState *estate)
 
 	estate->interconnect_context->teardownActive = false;
 	estate->interconnect_context->activated = false;
-	estate->interconnect_context->incompleteConns = NIL;
 	estate->interconnect_context->sliceTable = NULL;
 	estate->interconnect_context->sliceId = -1;
 
@@ -3931,7 +3610,7 @@ TeardownUDPIFCInterconnect(ChunkTransportState *transportStates,
  * prepareRxConnForRead
  * 		Prepare the receive connection for reading.
  *
- * MUST BE CALLED WITH rx_control_info.lock LOCKED.
+ * MUST BE CALLED WITH ic_control_info.lock LOCKED.
  */
 static void
 prepareRxConnForRead(MotionConn *conn)
@@ -3950,7 +3629,7 @@ prepareRxConnForRead(MotionConn *conn)
  * receiveChunksUDPIFC
  * 		Receive chunks from the senders
  *
- * MUST BE CALLED WITH rx_control_info.lock LOCKED.
+ * MUST BE CALLED WITH ic_control_info.lock LOCKED.
  */
 static TupleChunkListItem
 receiveChunksUDPIFC(ChunkTransportState *pTransportStates, ChunkTransportStateEntry *pEntry,
@@ -4122,7 +3801,7 @@ RecvTupleChunkFromAnyUDPIFC_Internal(MotionLayerState *mlStates,
 		return NULL;
 	}
 
-	/* receiveChunksUDPIFC() releases rx_control_info.lock as a side-effect */
+	/* receiveChunksUDPIFC() releases ic_control_info.lock as a side-effect */
 	tcItem = receiveChunksUDPIFC(transportStates, pEntry, motNodeID, srcRoute, NULL, transportStates->teardownActive);
 
 	pEntry->scanStart = *srcRoute + 1;
@@ -4365,7 +4044,7 @@ logPkt(char *prefix, icpkthdr *pkt)
  *	Here y is a constant (In implementation, we use 4) and retry is the times the
  *	packet is retransmitted.
  */
-static void inline
+static void
 handleAckedPacket(MotionConn *ackConn, ICBuffer *buf, uint64 now)
 {
 	uint64 ackTime = 0;
@@ -4754,6 +4433,21 @@ xmit_retry:
 
 		if (errno == EAGAIN) /* no space ? not an error. */
 			return;
+
+		/*
+		 * If Linux iptables (nf_conntrack?) drops an outgoing packet, it may
+		 * return an EPERM to the application. This might be simply because
+		 * of traffic shaping or congestion, so ignore it.
+		 */
+		if (errno == EPERM)
+		{
+			ereport(LOG,
+					(errcode(ERRCODE_GP_INTERCONNECTION_ERROR),
+					 errmsg("Interconnect error writing an outgoing packet: %m"),
+					 errdetail("error during sendto() for Remote Connection: contentId=%d at %s",
+							   conn->remoteContentId, conn->remoteHostAndPort)));
+			return;
+		}
 
 		ereport(ERROR, (errcode(ERRCODE_GP_INTERCONNECTION_ERROR),
 						errmsg("Interconnect error writing an outgoing packet: %m"),
@@ -5783,6 +5477,18 @@ doSendStopMessageUDPIFC(ChunkTransportState *transportStates, int16 motNodeID)
 				 * We will skip sending ACKs to those connections.
 				 */
 
+#ifdef FAULT_INJECTOR
+				if (FaultInjector_InjectFaultIfSet(
+												   InterconnectStopAckIsLost,
+												   DDLNotSpecified,
+												   "" /* databaseName */,
+												   "" /* tableName */) == FaultInjectorTypeSkip)
+				{
+					pthread_mutex_unlock(&ic_control_info.lock);
+					continue;
+				}
+#endif
+
 				if (conn->peer.ss_family == AF_INET || conn->peer.ss_family == AF_INET6)
 				{
 					uint32 seq = conn->conn_info.seq > 0 ? conn->conn_info.seq - 1 : 0;
@@ -6024,7 +5730,9 @@ handleDataPacket(MotionConn *conn, icpkthdr *pkt, struct sockaddr_storage *peer,
 	#ifdef AMS_VERBOSE_LOGGING
 		logPkt("STATUS QUERY MESSAGE", pkt);
 	#endif
-		setAckSendParam(param, conn, UDPIC_FLAGS_CAPACITY | UDPIC_FLAGS_ACK | conn->conn_info.flags, conn->conn_info.seq - 1, conn->conn_info.extraSeq);
+		uint32 seq = conn->conn_info.seq > 0 ? conn->conn_info.seq - 1 : 0;
+		uint32 extraSeq = conn->stopRequested ? seq : conn->conn_info.extraSeq;
+		setAckSendParam(param, conn, UDPIC_FLAGS_CAPACITY | UDPIC_FLAGS_ACK | conn->conn_info.flags, seq, extraSeq);
 
 		return false;
 	}
@@ -6231,11 +5939,7 @@ handleDataPacket(MotionConn *conn, icpkthdr *pkt, struct sockaddr_storage *peer,
 			rx_control_info.mainWaitingState.reachRoute = conn->route;
 		}
 		/* WAKE MAIN THREAD HERE */
-#if defined(__darwin__) && !defined(IC_USE_PTHREAD_SYNCHRONIZATION)
-		udpSignal(&ic_control_info.usig);
-#else
 		pthread_cond_signal(&ic_control_info.cond);
-#endif
 	}
 
 	return true;
@@ -6475,7 +6179,7 @@ rxThreadFunc(void *arg)
 		/* pthread_yield(); */
 	}
 
-	/* Before retrun, we release the packet. */
+	/* Before return, we release the packet. */
 	if (pkt)
 	{
 		pthread_mutex_lock(&ic_control_info.lock);

@@ -9,7 +9,6 @@
 #include "postgres.h"
 #include "miscadmin.h"
 #include "pgstat.h"
-#include "utils/palloc.h"
 
 #include "cdb/cdbglobalsequence.h"
 
@@ -119,30 +118,6 @@ static void GlobalSequence_ReadTuple(
 	ReleaseBuffer(buffer);
 	
 	DirectOpen_GpGlobalSequenceClose(gpGlobalSequenceRel);
-}
-
-int64 GlobalSequence_Next(
-	GpGlobalSequence		gpGlobalSequence)
-{
-	int64 sequenceNum;
-
-	GlobalSequence_ReadTuple(gpGlobalSequence, &sequenceNum);
-	GlobalSequence_UpdateTuple(gpGlobalSequence, ++sequenceNum);
-
-	return sequenceNum;
-}
-
-int64 GlobalSequence_NextInterval(
-	GpGlobalSequence		gpGlobalSequence,
-
-	int64					interval)
-{
-	int64 sequenceNum;
-
-	GlobalSequence_ReadTuple(gpGlobalSequence, &sequenceNum);
-	GlobalSequence_UpdateTuple(gpGlobalSequence, ++sequenceNum + interval - 1);
-
-	return sequenceNum;
 }
 
 int64 GlobalSequence_Current(

@@ -444,7 +444,8 @@ static void z_free(voidpf a, voidpf b)
 	gfile_free(b);
 }
 
-int gz_file_open(gfile_t *fd)
+static int
+gz_file_open(gfile_t *fd)
 {
 	if (!(fd->u.z = gfile_malloc(sizeof *fd->u.z)))
 	{
@@ -948,7 +949,7 @@ int gfile_open(gfile_t* fd, const char* fpath, int flags, int* response_code, co
 int
 gfile_close(gfile_t*fd)
 {
-	int e = 1;
+	int ret = 1;
 
 	if (fd->close)
 	{
@@ -976,17 +977,15 @@ gfile_close(gfile_t*fd)
 		}
 		else
 		{
-			int i;
-
 			do
 			{
 				//fsync(fd->fd.filefd);
-				i = close(fd->fd.filefd);
+				ret = close(fd->fd.filefd);
 			}
-			while (i < 0 && errno == EINTR);
+			while (ret < 0 && errno == EINTR);
 
-			if (e == 0)
-				e = i;
+			if (ret == -1)
+				ret = 1;
 		}
 
 #ifdef GPFXDIST
@@ -996,7 +995,7 @@ gfile_close(gfile_t*fd)
 		fd->read = 0;
 		fd->close = 0;
 	}
-	return e;
+	return ret;
 }
 
 ssize_t 

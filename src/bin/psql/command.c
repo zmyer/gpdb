@@ -431,7 +431,7 @@ exec_command(const char *cmd,
 			case 'v':
 			case 'i':
 			case 's':
-			case 'x':
+			case 'E':	/* PostgreSQL use dx for extension, change to dE for foreign table */
             /* case 'S':  // GPDB:  We used to show just system tables for this */
 			case 'P':   /* GPDB: Parent-only tables, no children */
 				success = listTables(&cmd[1], pattern, show_verbose, show_system);
@@ -474,6 +474,12 @@ exec_command(const char *cmd,
 						status = PSQL_CMD_UNKNOWN;
 						break;
 				}
+				break;
+			case 'x':			/* Extensions */
+				if (show_verbose)
+					success = listExtensionContents(pattern);
+				else
+					success = listExtensions(pattern);
 				break;
 			default:
 				status = PSQL_CMD_UNKNOWN;
@@ -942,6 +948,17 @@ exec_command(const char *cmd,
 	{
 		char	   *fname = psql_scan_slash_option(scan_state,
 												   OT_NORMAL, NULL, true);
+
+#if defined(WIN32) && !defined(__CYGWIN__)
+
+		/*
+		 * XXX This does not work for all terminal environments or for output
+		 * containing non-ASCII characters; see comments in simple_prompt().
+		 */
+#define DEVTTY	"con"
+#else
+#define DEVTTY	"/dev/tty"
+#endif
 
 		expand_tilde(&fname);
 		/* This scrolls off the screen when using /dev/tty */
@@ -1604,7 +1621,7 @@ do_edit(const char *filename_arg, PQExpBuffer query_buf, bool *edited)
 		ret = GetTempPath(MAXPGPATH, tmpdir);
 		if (ret == 0 || ret > MAXPGPATH)
 		{
-			psql_error("cannot locate temporary directory: %s",
+			psql_error("cannot locate temporary directory: %s\n",
 					   !ret ? strerror(errno) : "");
 			return false;
 		}

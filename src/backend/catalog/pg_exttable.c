@@ -13,11 +13,12 @@
 #include "postgres.h"
 
 #include "catalog/pg_exttable.h"
+#include "catalog/pg_extprotocol.h"
 #include "catalog/pg_type.h"
 #include "catalog/pg_proc.h"
 #include "access/genam.h"
-#include "catalog/catquery.h"
 #include "access/heapam.h"
+#include "access/reloptions.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
 #include "mb/pg_wchar.h"
@@ -26,8 +27,12 @@
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
 #include "utils/fmgroids.h"
+#include "utils/memutils.h"
 #include "utils/uri.h"
+#include "miscadmin.h"
 
+/* backport from FDW to support options */
+extern Datum pg_options_to_table(PG_FUNCTION_ARGS);
 
 /*
  * InsertExtTableEntry
@@ -49,6 +54,7 @@ InsertExtTableEntry(Oid 	tbloid,
 					Oid		fmtErrTblOid,
 					int		encoding,
 					Datum	formatOptStr,
+					Datum   optionsStr,
 					Datum	locationExec,
 					Datum	locationUris)
 {
@@ -56,25 +62,19 @@ InsertExtTableEntry(Oid 	tbloid,
 	HeapTuple	pg_exttable_tuple = NULL;
 	bool		nulls[Natts_pg_exttable];
 	Datum		values[Natts_pg_exttable];
-	cqContext	cqc;
-	cqContext  *pcqCtx;
 
- 	MemSet(values, 0, sizeof(values));
+	MemSet(values, 0, sizeof(values));
 	MemSet(nulls, false, sizeof(nulls));
 
-    /*
-     * Open and lock the pg_exttable catalog.
-     */
+	/*
+	 * Open and lock the pg_exttable catalog.
+	 */
 	pg_exttable_rel = heap_open(ExtTableRelationId, RowExclusiveLock);
-
-	pcqCtx = caql_beginscan(
-			caql_addrel(cqclr(&cqc), pg_exttable_rel),
-			cql("INSERT INTO pg_exttable",
-				NULL));
 
 	values[Anum_pg_exttable_reloid - 1] = ObjectIdGetDatum(tbloid);
 	values[Anum_pg_exttable_fmttype - 1] = CharGetDatum(formattype);
 	values[Anum_pg_exttable_fmtopts - 1] = formatOptStr;
+	values[Anum_pg_exttable_options - 1] = optionsStr;
 
 	if(commandString)
 	{
@@ -115,13 +115,12 @@ InsertExtTableEntry(Oid 	tbloid,
 	values[Anum_pg_exttable_encoding - 1] = Int32GetDatum(encoding);
 	values[Anum_pg_exttable_writable - 1] = BoolGetDatum(iswritable);
 
-	pg_exttable_tuple = caql_form_tuple(pcqCtx, values, nulls);
+	pg_exttable_tuple = heap_form_tuple(RelationGetDescr(pg_exttable_rel), values, nulls);
 
 	/* insert a new tuple */
-	caql_insert(pcqCtx, pg_exttable_tuple); 
-	/* and Update indexes (implicit) */
+	simple_heap_insert(pg_exttable_rel, pg_exttable_tuple);
 
-	caql_endscan(pcqCtx);
+	CatalogUpdateIndexes(pg_exttable_rel, pg_exttable_tuple);
 
 	/*
      * Close the pg_exttable relcache entry without unlocking.
@@ -130,6 +129,126 @@ InsertExtTableEntry(Oid 	tbloid,
      */
     heap_close(pg_exttable_rel, NoLock);
 
+	/*
+	 * Add the dependency of custom external table
+	 */
+
+	if (locationUris != (Datum) 0)
+	{
+		Datum	   *elems;
+		int			nelems;
+
+		deconstruct_array(DatumGetArrayTypeP(locationUris),
+						  TEXTOID, -1, false, 'i',
+						  &elems, NULL, &nelems);
+
+
+		for (int i = 0; i < nelems; i++)
+		{
+			ObjectAddress	myself, referenced;
+			char	   *location;
+			char	   *protocol;
+			Size		position;
+
+			location = DatumGetCString(DirectFunctionCall1(textout, elems[i]));
+			position = strchr(location, ':') - location;
+			protocol = pnstrdup(location, position);
+
+			myself.classId = RelationRelationId;
+			myself.objectId = tbloid;
+			myself.objectSubId = 0;
+
+			referenced.classId = ExtprotocolRelationId;
+			referenced.objectId = LookupExtProtocolOid(protocol, true);
+			referenced.objectSubId = 0;
+
+			/*
+			 * Only tables with custom protocol should create dependency, for
+			 * internal protocols will get referenced.objectId as 0.
+			 */
+			if (referenced.objectId)
+				recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
+		}
+
+	}
+}
+
+/*
+ * deflist_to_tuplestore - Helper function to convert DefElem list to
+ * tuplestore usable in SRF.
+ */
+static void
+deflist_to_tuplestore(ReturnSetInfo *rsinfo, List *options)
+{
+	ListCell   *cell;
+	TupleDesc	tupdesc;
+	Tuplestorestate *tupstore;
+	Datum		values[2];
+	bool		nulls[2];
+	MemoryContext per_query_ctx;
+	MemoryContext oldcontext;
+
+	/* check to see if caller supports us returning a tuplestore */
+	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				errmsg("set-valued function called in context that cannot accept a set")));
+	if (!(rsinfo->allowedModes & SFRM_Materialize) ||
+		rsinfo->expectedDesc == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				errmsg("materialize mode required, but it is not allowed in this context")));
+
+	per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
+	oldcontext = MemoryContextSwitchTo(per_query_ctx);
+
+	/*
+	 * Now prepare the result set.
+	 */
+	tupdesc = CreateTupleDescCopy(rsinfo->expectedDesc);
+	tupstore = tuplestore_begin_heap(true, false, work_mem);
+	rsinfo->returnMode = SFRM_Materialize;
+	rsinfo->setResult = tupstore;
+	rsinfo->setDesc = tupdesc;
+
+	foreach(cell, options)
+	{
+		DefElem    *def = lfirst(cell);
+
+		values[0] = CStringGetTextDatum(def->defname);
+		nulls[0] = false;
+		if (def->arg)
+		{
+			values[1] = CStringGetTextDatum(((Value *) (def->arg))->val.str);
+			nulls[1] = false;
+		}
+		else
+		{
+			values[1] = (Datum) 0;
+			nulls[1] = true;
+		}
+	tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+	}
+
+	/* clean up and return the tuplestore */
+	tuplestore_donestoring(tupstore);
+
+	MemoryContextSwitchTo(oldcontext);
+}
+
+/*
+ * Convert options array to name/value table.  Useful for information
+ * schema and pg_dump.
+ */
+Datum
+pg_options_to_table(PG_FUNCTION_ARGS)
+{
+	Datum		array = PG_GETARG_DATUM(0);
+
+	deflist_to_tuplestore((ReturnSetInfo *) fcinfo->resultinfo,
+						  untransformRelOptions(array));
+
+	return (Datum) 0;
 }
 
 /*
@@ -157,12 +276,14 @@ ExtTableEntry*
 GetExtTableEntryIfExists(Oid relid)
 {
 	Relation	pg_exttable_rel;
+	ScanKeyData skey;
+	SysScanDesc scan;
 	HeapTuple	tuple;
-	cqContext	cqc;
 	ExtTableEntry *extentry;
 	Datum		locations,
 				fmtcode, 
 				fmtopts, 
+				options,
 				command, 
 				rejectlimit, 
 				rejectlimittype, 
@@ -174,15 +295,18 @@ GetExtTableEntryIfExists(Oid relid)
 
 	pg_exttable_rel = heap_open(ExtTableRelationId, RowExclusiveLock);
 
-	tuple = caql_getfirst(
-			caql_addrel(cqclr(&cqc), pg_exttable_rel),			
-			cql("SELECT * FROM pg_exttable "
-				" WHERE reloid = :1 "
-				" FOR UPDATE ",
-				ObjectIdGetDatum(relid)));
+	ScanKeyInit(&skey,
+				Anum_pg_exttable_reloid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(relid));
+
+	scan = systable_beginscan(pg_exttable_rel, ExtTableReloidIndexId, true,
+							  SnapshotNow, 1, &skey);
+	tuple = systable_getnext(scan);
 
 	if (!HeapTupleIsValid(tuple))
 	{
+		systable_endscan(scan);
 		heap_close(pg_exttable_rel, RowExclusiveLock);
 		return NULL;
 	}
@@ -267,7 +391,36 @@ GetExtTableEntryIfExists(Oid relid)
 	Insist(!isNull);
 	extentry->fmtopts = DatumGetCString(DirectFunctionCall1(textout, fmtopts));
 	
+    /* get the external table options string */
+    options = heap_getattr(tuple,
+                           Anum_pg_exttable_options,
+                           RelationGetDescr(pg_exttable_rel),
+                           &isNull);
 
+	if (isNull)
+	{
+		/* options list is always populated (url or ON X) */
+		elog(ERROR, "could not find options for external protocol");
+	}
+	else
+	{
+		Datum	   *elems;
+		int			nelems;
+		int			i;
+		char*		option_str = NULL;
+
+		deconstruct_array(DatumGetArrayTypeP(options),
+						  TEXTOID, -1, false, 'i',
+						  &elems, NULL, &nelems);
+
+		for (i = 0; i < nelems; i++)
+		{
+			option_str = DatumGetCString(DirectFunctionCall1(textout, elems[i]));
+
+			/* append to a list of Value nodes, size nelems */
+			extentry->options = lappend(extentry->options, makeString(pstrdup(option_str)));
+		}
+	}
 
 	/* get the reject limit */
 	rejectlimit = heap_getattr(tuple, 
@@ -323,9 +476,9 @@ GetExtTableEntryIfExists(Oid relid)
 
 	
 	/* Finish up scan and close pg_exttable catalog. */
-	
+	systable_endscan(scan);
 	heap_close(pg_exttable_rel, RowExclusiveLock);
-	
+
 	return extentry;
 }
 
@@ -339,30 +492,39 @@ void
 RemoveExtTableEntry(Oid relid)
 {
 	Relation	pg_exttable_rel;
-	cqContext	cqc;
+	ScanKeyData skey;
+	SysScanDesc scan;
+	HeapTuple	tuple;
 
 	/*
 	 * now remove the pg_exttable entry
 	 */
 	pg_exttable_rel = heap_open(ExtTableRelationId, RowExclusiveLock);
 
-	if (0 == caql_getcount(
-				caql_addrel(cqclr(&cqc), pg_exttable_rel),
-				cql("DELETE FROM pg_exttable "
-					" WHERE reloid = :1 ",
-					ObjectIdGetDatum(relid))))
-	{
+	ScanKeyInit(&skey,
+				Anum_pg_exttable_reloid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(relid));
+
+	scan = systable_beginscan(pg_exttable_rel, ExtTableReloidIndexId, true,
+							  SnapshotNow, 1, &skey);
+	tuple = systable_getnext(scan);
+	if (!HeapTupleIsValid(tuple))
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("external table object id \"%d\" does not exist",
 						relid)));
-	}
 
 	/*
 	 * Delete the external table entry from the catalog (pg_exttable).
 	 */
+	do
+	{
+		simple_heap_delete(pg_exttable_rel, &tuple->t_self);
+	}
+	while (HeapTupleIsValid(tuple = systable_getnext(scan)));
 
 	/* Finish up scan and close exttable catalog. */
-
+	systable_endscan(scan);
 	heap_close(pg_exttable_rel, NoLock);
 }

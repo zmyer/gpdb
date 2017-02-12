@@ -241,7 +241,6 @@ static bool PersistentTablespace_ScanTupleCallback(
 	int32					reserved;
 	TransactionId			parentXid;
 	int64					serialNum;
-	ItemPointerData			previousFreeTid;
 	
 	TablespaceDirEntry tablespaceDirEntry;
 
@@ -254,19 +253,8 @@ static bool PersistentTablespace_ScanTupleCallback(
 									&mirrorExistenceState,
 									&reserved,
 									&parentXid,
-									&serialNum,
-									&previousFreeTid);
+									&serialNum);
 
-	if (state == PersistentFileSysState_Free)
-	{
-		if (Debug_persistent_print)
-			elog(Persistent_DebugPrintLevel(), 
-				 "PersistentTablespace_ScanTupleCallback: TID %s, serial number " INT64_FORMAT " is free",
-				 ItemPointerToString2(persistentTid),
-				 persistentSerialNum);
-		return true;	// Continue.
-	}
-	
 	tablespaceDirEntry = 
 		PersistentTablespace_CreateEntryUnderLock(filespaceOid, tablespaceOid);
 	
@@ -287,47 +275,6 @@ static bool PersistentTablespace_ScanTupleCallback(
 }
 
 //------------------------------------------------------------------------------
-
-static Oid persistentTablespaceCheck;
-static bool persistentTablespaceCheckFound;
-
-static bool PersistentTablespace_CheckScanTupleCallback(
-	ItemPointer 			persistentTid,
-	int64					persistentSerialNum,
-	Datum					*values)
-{
-	Oid		filespaceOid;
-	Oid		tablespaceOid;
-	
-	PersistentFileSysState	state;
-	int64					createMirrorDataLossTrackingSessionNum;
-	MirroredObjectExistenceState		mirrorExistenceState;
-	int32					reserved;
-	TransactionId			parentXid;
-	int64					serialNum;
-	ItemPointerData			previousFreeTid;
-	
-	GpPersistentTablespaceNode_GetValues(
-									values,
-									&filespaceOid,
-									&tablespaceOid,
-									&state,
-									&createMirrorDataLossTrackingSessionNum,
-									&mirrorExistenceState,
-									&reserved,
-									&parentXid,
-									&serialNum,
-									&previousFreeTid);
-
-	if (state == PersistentFileSysState_Created &&
-		tablespaceOid == persistentTablespaceCheck)
-	{
-		persistentTablespaceCheckFound = true;
-		return false;
-	}
-
-	return true;	// Continue.
-}
 
 void PersistentTablespace_Reset(void)
 {
@@ -368,21 +315,6 @@ void PersistentTablespace_Reset(void)
 		if (removeTablespaceDirEntry == NULL)
 			elog(ERROR, "Trying to delete entry that does not exist");
 	}
-}
-
-bool PersistentTablespace_Check(
-	Oid				tablespace)
-{
-	PersistentTablespace_VerifyInitScan();
-
-	persistentTablespaceCheck = tablespace;
-	persistentTablespaceCheckFound = false;
-
-	PersistentFileSysObj_Scan(
-		PersistentFsObjType_DatabaseDir,
-		PersistentTablespace_CheckScanTupleCallback);
-
-	return persistentTablespaceCheckFound;
 }
 
 extern void PersistentTablespace_LookupTidAndSerialNum(
@@ -436,11 +368,7 @@ static void PersistentTablespace_AddTuple(
 	Oid filespaceOid = tablespaceDirEntry->filespaceOid;
 	Oid tablespaceOid = tablespaceDirEntry->key.tablespaceOid;
 
-	ItemPointerData previousFreeTid;
-
 	Datum values[Natts_gp_persistent_tablespace_node];
-
-	MemSet(&previousFreeTid, 0, sizeof(ItemPointerData));
 
 	GpPersistentTablespaceNode_SetDatumValues(
 								values,
@@ -451,8 +379,7 @@ static void PersistentTablespace_AddTuple(
 								mirrorExistenceState,
 								reserved,
 								parentXid,
-								/* persistentSerialNum */ 0,	// This will be set by PersistentFileSysObj_AddTuple.
-								&previousFreeTid);
+								/* persistentSerialNum */ 0);	// This will be set by PersistentFileSysObj_AddTuple.
 
 	PersistentFileSysObj_AddTuple(
 							PersistentFsObjType_TablespaceDir,
@@ -750,13 +677,7 @@ void PersistentTablespace_MarkCreatePending(
 						tablespaceOid);
 #endif
 
-	#ifdef FAULT_INJECTOR
-			FaultInjector_InjectFaultIfSet(
-										   FaultBeforePendingDeleteTablespaceEntry,
-										   DDLNotSpecified,
-										   "",  // databaseName
-										   ""); // tableName
-	#endif
+	SIMPLE_FAULT_INJECTOR(FaultBeforePendingDeleteTablespaceEntry);
 
 	/*
 	 * MPP-18228
@@ -777,25 +698,6 @@ void PersistentTablespace_MarkCreatePending(
 			 MirroredObjectExistenceState_Name(mirrorExistenceState),
 			 *persistentSerialNum,
 			 ItemPointerToString(persistentTid));
-}
-
-void
-xlog_persistent_tablespace_create(Oid filespaceoid, Oid tablespaceoid)
-{
-	TablespaceDirEntry tde;
-	WRITE_PERSISTENT_STATE_ORDERED_LOCK_DECLARE;
-
-	PersistentTablespace_VerifyInitScan();
-
-	WRITE_PERSISTENT_STATE_ORDERED_LOCK;
-
-	tde = PersistentTablespace_CreateEntryUnderLock(filespaceoid,
-												    tablespaceoid);
-	Insist(tde != NULL);
-
-	tde->state = PersistentFileSysState_Created;
-
-	WRITE_PERSISTENT_STATE_ORDERED_UNLOCK;
 }
 
 // -----------------------------------------------------------------------------

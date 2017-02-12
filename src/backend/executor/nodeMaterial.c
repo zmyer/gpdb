@@ -9,7 +9,7 @@
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/executor/nodeMaterial.c,v 1.58 2007/01/05 22:19:28 momjian Exp $
+ *	  $PostgreSQL: pgsql/src/backend/executor/nodeMaterial.c,v 1.61 2008/01/01 19:45:49 momjian Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -34,7 +34,6 @@
 static void ExecMaterialExplainEnd(PlanState *planstate, struct StringInfoData *buf);
 static void ExecChildRescan(MaterialState *node, ExprContext *exprCtxt);
 static void DestroyTupleStore(MaterialState *node);
-static void ExecMaterialResetWorkfileState(MaterialState *node);
 
 
 /* ----------------------------------------------------------------
@@ -77,7 +76,7 @@ ExecMaterial(MaterialState *node)
 	/*
 	 * If first time through, and we need a tuplestore, initialize it.
 	 */
-	if (ts == NULL && (ma->share_type != SHARE_NOTSHARED || node->randomAccess))
+	if (ts == NULL && (ma->share_type != SHARE_NOTSHARED || node->eflags != 0))
 	{
 		/*
 		 * For cross slice material, we only run ExecMaterial on DriverSlice
@@ -101,7 +100,7 @@ ExecMaterial(MaterialState *node)
 		else
 		{
 			/* Non-shared Materialize node */
-			workfile_set *work_set =  workfile_mgr_create_set(BUFFILE, false /* can_reuse */, &node->ss.ps, NULL_SNAPSHOT);
+			workfile_set *work_set =  workfile_mgr_create_set(BUFFILE, false /* can_reuse */, &node->ss.ps);
 
 			ts = ntuplestore_create_workset(work_set, PlanStateOperatorMemKB((PlanState *) node) * 1024);
 			tsa = ntuplestore_create_accessor(ts, true /* isWriter */);
@@ -127,6 +126,8 @@ ExecMaterial(MaterialState *node)
 		 * and sending Motion operators to neutralize a deadlock hazard.
 		 * MPP TODO: Remove when a better solution is implemented.
 		 *
+		 * See motion_sanity_walker() for details on how a deadlock may occur.
+		 *
 		 * ShareInput: if the material node
 		 * is used to share input, we will need to fetch all rows and put
 		 * them in tuple store
@@ -134,14 +135,6 @@ ExecMaterial(MaterialState *node)
 		while (((Material *) node->ss.ps.plan)->cdb_strict
 				|| ma->share_type != SHARE_NOTSHARED)
 		{
-			/*
-			 * When reusing cached workfiles, we already have all the tuples,
-			 * and we don't need to read anything from subplan.
-			 */
-			if (node->cached_workfiles_found)
-			{
-				break;
-			}
 			TupleTableSlot *outerslot = ExecProcNode(outerPlanState(node));
 
 			if (TupIsNull(outerslot))
@@ -223,8 +216,6 @@ ExecMaterial(MaterialState *node)
 		PlanState  *outerNode;
 		TupleTableSlot *outerslot;
 
-		Assert(!node->cached_workfiles_found && "we shouldn't get here when using cached workfiles");
-
 		/*
 		 * We can only get here with forward==true, so no need to worry about
 		 * which direction the subplan will go.
@@ -285,16 +276,18 @@ ExecInitMaterial(Material *node, EState *estate, int eflags)
 	matstate->ss.ps.plan = (Plan *) node;
 	matstate->ss.ps.state = estate;
 
+	if (node->cdb_strict)
+		eflags |= EXEC_FLAG_REWIND;
+
 	/*
-	 * We must have random access to the subplan output to do backward scan or
-	 * mark/restore.  We also prefer to materialize the subplan output if we
-	 * might be called on to rewind and replay it many times. However, if none
-	 * of these cases apply, we can skip storing the data.
+	 * We must have a tuplestore buffering the subplan output to do backward
+	 * scan or mark/restore.  We also prefer to materialize the subplan output
+	 * if we might be called on to rewind and replay it many times. However,
+	 * if none of these cases apply, we can skip storing the data.
 	 */
-	matstate->randomAccess = node->cdb_strict ||
-							(eflags & (EXEC_FLAG_REWIND |
-										EXEC_FLAG_BACKWARD |
-										EXEC_FLAG_MARK)) != 0;
+	matstate->eflags = (eflags & (EXEC_FLAG_REWIND |
+								  EXEC_FLAG_BACKWARD |
+								  EXEC_FLAG_MARK));
 
 	matstate->eof_underlying = false;
 	matstate->ts_state = palloc0(sizeof(GenericTupStore));
@@ -302,7 +295,6 @@ ExecInitMaterial(Material *node, EState *estate, int eflags)
 	matstate->ts_markpos = NULL;
 	matstate->share_lk_ctxt = NULL;
 	matstate->ts_destroyed = false;
-	ExecMaterialResetWorkfileState(matstate);
 
 	/*
 	 * Miscellaneous initialization
@@ -458,7 +450,7 @@ ExecEndMaterial(MaterialState *node)
 void
 ExecMaterialMarkPos(MaterialState *node)
 {
-	Assert(node->randomAccess);
+	Assert(node->eflags & EXEC_FLAG_MARK);
 
 #ifdef DEBUG
 	{
@@ -495,7 +487,7 @@ ExecMaterialMarkPos(MaterialState *node)
 void
 ExecMaterialRestrPos(MaterialState *node)
 {
-	Assert(node->randomAccess);
+	Assert(node->eflags & EXEC_FLAG_MARK);
 
 #ifdef DEBUG
 	{
@@ -540,16 +532,6 @@ DestroyTupleStore(MaterialState *node)
 	node->ts_markpos = NULL;
 	node->eof_underlying = false;
 	node->ts_destroyed = true;
-	ExecMaterialResetWorkfileState(node);
-}
-
-/*
- * Reset workfile caching state
- */
-static void
-ExecMaterialResetWorkfileState(MaterialState *node)
-{
-	node->cached_workfiles_found = false;
 }
 
 /*
@@ -584,7 +566,7 @@ ExecMaterialReScan(MaterialState *node, ExprContext *exprCtxt)
 {
 	ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
 
-	if (node->randomAccess)
+	if (node->eflags != 0)
 	{
 		/*
 		 * If tuple store is empty, then either we have not materialized yet
@@ -605,14 +587,20 @@ ExecMaterialReScan(MaterialState *node, ExprContext *exprCtxt)
 
 		/*
 		 * If subnode is to be rescanned then we forget previous stored
-		 * results; we have to re-read the subplan and re-store.
+		 * results; we have to re-read the subplan and re-store.  Also, if we
+		 * told tuplestore it needn't support rescan, we lose and must
+		 * re-read.  (This last should not happen in common cases; else our
+		 * caller lied by not passing EXEC_FLAG_REWIND to us.)
 		 *
 		 * Otherwise we can just rewind and rescan the stored output. The
 		 * state of the subnode does not change.
 		 */
-		if (((PlanState *) node)->lefttree->chgParam != NULL)
+		if (((PlanState *) node)->lefttree->chgParam != NULL ||
+			(node->eflags & EXEC_FLAG_REWIND) == 0)
 		{
 			DestroyTupleStore(node);
+			if (((PlanState *) node)->lefttree->chgParam == NULL)
+				ExecReScan(((PlanState *) node)->lefttree, exprCtxt);
 		}
 		else
 		{

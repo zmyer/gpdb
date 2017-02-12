@@ -9,7 +9,7 @@
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/executor/nodeSort.c,v 1.60 2007/01/09 02:14:11 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/executor/nodeSort.c,v 1.62 2008/01/01 19:45:49 momjian Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -167,61 +167,30 @@ ExecSort(SortState *node)
 
 		if(gp_enable_mk_sort)
 		{
+			if (node->bounded)
+				tuplesort_set_bound_mk(tuplesortstate_mk, node->bound);
 			node->tuplesortstate->sortstore_mk = tuplesortstate_mk;
 		}
 		else
 		{
+			if (node->bounded)
+				tuplesort_set_bound(tuplesortstate, node->bound);
 			node->tuplesortstate->sortstore = tuplesortstate;
 		}
 
 		/* CDB */
 		{
-			ExprContext *econtext = node->ss.ps.ps_ExprContext;
-			bool 		isNull;
-			int64 		limit = 0;
-			int64 		offset = 0;
 			int 		unique = 0;
 			int 		sort_flags = gp_sort_flags; /* get the guc */
 			int         maxdistinct = gp_sort_max_distinct; /* get the guc */
-
-			if (node->limitCount)
-			{
-				limit =
-						DatumGetInt64(
-								ExecEvalExprSwitchContext(node->limitCount,
-														  econtext,
-														  &isNull,
-														  NULL));
-				/* Interpret NULL limit as no limit */
-				if (isNull)
-					limit = 0;
-				else if (limit < 0)
-					limit = 0;
-
-			}
-			if (node->limitOffset)
-			{
-				offset =
-						DatumGetInt64(
-								ExecEvalExprSwitchContext(node->limitOffset,
-														  econtext,
-														  &isNull,
-														  NULL));
-				/* Interpret NULL offset as no offset */
-				if (isNull)
-					offset = 0;
-				else if (offset < 0)
-					offset = 0;
-
-			}
 
 			if (node->noduplicates)
 				unique = 1;
 			
 			if(gp_enable_mk_sort)
-				cdb_tuplesort_init_mk(tuplesortstate_mk, offset, limit, unique, sort_flags, maxdistinct);
+				cdb_tuplesort_init_mk(tuplesortstate_mk, unique, sort_flags, maxdistinct);
 			else
-				cdb_tuplesort_init(tuplesortstate, offset, limit, unique, sort_flags, maxdistinct);
+				cdb_tuplesort_init(tuplesortstate, unique, sort_flags, maxdistinct);
 		}
 
 		/* If EXPLAIN ANALYZE, share our Instrumentation object with sort. */
@@ -279,14 +248,7 @@ ExecSort(SortState *node)
 				tuplesort_puttupleslot(tuplesortstate, slot);
 		}
 
-#ifdef FAULT_INJECTOR
-		FaultInjector_InjectFaultIfSet(
-				ExecSortBeforeSorting,
-				DDLNotSpecified,
-				"" /* databaseName */,
-				"" /* tableName */
-				);
-#endif
+		SIMPLE_FAULT_INJECTOR(ExecSortBeforeSorting);
 
 		/*
 		 * Complete the sort.
@@ -310,6 +272,8 @@ ExecSort(SortState *node)
 		 * finally set the sorted flag to true
 		 */
 		node->sort_Done = true;
+		node->bounded_Done = node->bounded;
+		node->bound_Done = node->bound;
 		SO1_printf("ExecSort: %s\n", "sorting done");
 
 		/* for share input, do not need to return any tuple */
@@ -399,6 +363,7 @@ ExecInitSort(Sort *node, EState *estate, int eflags)
 	if(node->share_type != SHARE_NOTSHARED) 
 		sortstate->randomAccess = true;
 
+	sortstate->bounded = false;
 	sortstate->sort_Done = false;
 	sortstate->tuplesortstate = palloc0(sizeof(GenericTupStore));
 	sortstate->share_lk_ctxt = NULL;
@@ -413,11 +378,6 @@ ExecInitSort(Sort *node, EState *estate, int eflags)
 
 	/* CDB */ /* evaluate a limit as part of the sort */
 	{
-		/* pass node state to sort state */
-		sortstate->limitOffset = ExecInitExpr((Expr *) node->limitOffset,
-											  (PlanState *) sortstate);
-		sortstate->limitCount = ExecInitExpr((Expr *) node->limitCount,
-											 (PlanState *) sortstate);
 		sortstate->noduplicates = node->noduplicates;
 	}
 
@@ -612,11 +572,14 @@ ExecReScanSort(SortState *node, ExprContext *exprCtxt)
 
 	/*
 	 * If subnode is to be rescanned then we forget previous sort results; we
-	 * have to re-read the subplan and re-sort.
+	 * have to re-read the subplan and re-sort.  Also must re-sort if the
+	 * bounded-sort parameters changed or we didn't select randomAccess.
 	 *
 	 * Otherwise we can just rewind and rescan the sorted output.
 	 */
 	if (((PlanState *) node)->lefttree->chgParam != NULL ||
+		node->bounded != node->bounded_Done ||
+		node->bound != node->bound_Done ||
 		!node->randomAccess ||
 		(NULL == node->tuplesortstate->sortstore_mk && NULL == node->tuplesortstate->sortstore))
 	{

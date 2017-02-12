@@ -22,7 +22,7 @@
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- * $PostgreSQL: pgsql/src/include/utils/palloc.h,v 1.36 2007/01/05 22:19:59 momjian Exp $
+ * $PostgreSQL: pgsql/src/include/utils/palloc.h,v 1.38 2008/01/01 19:45:59 momjian Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -54,9 +54,8 @@
 #define CDB_PALLOC_CALLER_ID
 */
 
-#ifdef USE_ASSERT_CHECKING
 #define CDB_PALLOC_TAGS
-#endif
+#define ALLOC_SITE_KEY_SIZE 255
 
 /* CDB_PALLOC_TAGS implies CDB_PALLOC_CALLER_ID */
 #if defined(CDB_PALLOC_TAGS) && !defined(CDB_PALLOC_CALLER_ID)
@@ -85,6 +84,16 @@ typedef uint32 OOMTimeType;
  * do not provide the struct contents here.
  */
 typedef struct MemoryContextData *MemoryContext;
+
+typedef struct
+{
+	char hash_key[ALLOC_SITE_KEY_SIZE];
+	char* file_name;
+	int line_no;
+	int64 alloc_count;
+	int64 alloc_size;
+	uint64 gen_allocated; // which generations did we allocate from this site
+} AllocSiteInfo;
 
 /*
  * CurrentMemoryContext is the default allocation context for palloc().
@@ -190,18 +199,5 @@ extern void UpdateTimeAtomically(volatile OOMTimeType* time_var);
 		MemoryContextStats(TopMemoryContext);\
 	}\
 }
-
-#ifdef USE_SYSV_SEMAPHORES
-extern void *gp_malloc(int64 sz); 
-extern void *gp_calloc(int64 nmemb, int64 sz); 
-extern void *gp_realloc(void *ptr, int64 sz, int64 newsz); 
-extern void gp_free2(void *ptr, int64 sz); 
-
-#else
-#define gp_malloc(sz) malloc(sz)
-#define gp_calloc(sz1, sz2) calloc((sz1), (sz2))
-#define gp_realloc(ptr, sz1, sz2) realloc((ptr), (sz2))
-#define gp_free2(ptr, sz) free(ptr)
-#endif
 
 #endif   /* PALLOC_H */

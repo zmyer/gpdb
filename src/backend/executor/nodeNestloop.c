@@ -9,7 +9,7 @@
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/executor/nodeNestloop.c,v 1.45 2007/02/02 00:07:03 tgl Exp $
+ *	  $PostgreSQL: pgsql/src/backend/executor/nodeNestloop.c,v 1.46 2008/01/01 19:45:49 momjian Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -112,6 +112,8 @@ ExecNestLoop(NestLoopState *node)
 	 *
 	 * So now prefetch_inner is set (see createplan.c) if we have *any* motion
 	 * below us. If we don't have any motion, it doesn't matter.
+	 *
+	 * See motion_sanity_walker() for details on how a deadlock may occur.
 	 */
 	if (node->prefetch_inner)
 	{
@@ -487,7 +489,7 @@ ExecInitNestLoop(NestLoop *node, EState *estate, int eflags)
 								 ExecGetResultType(innerPlanState(nlstate)));
 			break;
 		default:
-			insist_log(false, "unrecognized join type: %d",
+			elog(ERROR, "unrecognized join type: %d",
 				 (int) node->join.jointype);
 	}
 

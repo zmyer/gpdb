@@ -674,27 +674,6 @@ SetupInterconnect(EState *estate)
 }
 
 
-/*
- * Move this out to separate stack frame, so that we don't have to mark
- * tons of stuff volatile in TeardownInterconnect().
- */
-void
-forceEosToPeers(MotionLayerState       *mlStates,
-			    ChunkTransportState    *transportStates,
-			    int                     motNodeID)
-{
-	if (!transportStates)
-	{
-		elog(FATAL, "no transport-states.");
-	}
-
-	transportStates->teardownActive = true;
-
-	transportStates->SendEos(mlStates, transportStates, motNodeID, get_eos_tuplechunklist());
-
-	transportStates->teardownActive = false;
-}
-
 /* TeardownInterconnect() function is used to cleanup interconnect resources that
  * were allocated during SetupInterconnect().  This function should ALWAYS be
  * called after SetupInterconnect to avoid leaking resources (like sockets)
@@ -766,7 +745,7 @@ createChunkTransportState(ChunkTransportState *transportStates,
 	{
 		ereport(ERROR, (errcode(ERRCODE_GP_INTERCONNECTION_ERROR),
 						errmsg("Interconnect Error: A HTAB entry for motion node %d already exists.", motNodeID),
-						errdetail("conns %p numConns %d first sock %d highreadsock %d", pEntry->conns, pEntry->numConns, pEntry->conns[0].sockfd, pEntry->highReadSock)));
+						errdetail("conns %p numConns %d first sock %d", pEntry->conns, pEntry->numConns, pEntry->conns[0].sockfd)));
 	}
 
 	pEntry->valid = true;
@@ -774,11 +753,9 @@ createChunkTransportState(ChunkTransportState *transportStates,
 	pEntry->motNodeId = motNodeID;
     pEntry->numConns = numPrimaryConns;
 	pEntry->numPrimaryConns = numPrimaryConns;
-	pEntry->highReadSock = 0;
     pEntry->scanStart = 0;
     pEntry->sendSlice = sendSlice;
     pEntry->recvSlice = recvSlice;
-    pEntry->outgoingPortRetryCount = 0;
 
 	pEntry->conns = palloc0(pEntry->numConns * sizeof(pEntry->conns[0]));
 
@@ -793,11 +770,8 @@ createChunkTransportState(ChunkTransportState *transportStates,
         conn->tupleCount = 0;
         conn->stillActive = false;
         conn->stopRequested = false;
-        conn->wakeup_ms = 0;
         conn->cdbProc = NULL;
     }
-
-	MPP_FD_ZERO(&pEntry->readSet);
 
 	return pEntry;
 }
@@ -901,14 +875,15 @@ SendDummyPacket(void)
 	struct addrinfo* addrs = NULL;
 	struct addrinfo* rp = NULL;
 	struct addrinfo hint;
-	uint16 udp_listenner;
+	uint16 udp_listener;
 	char	port_str[32] = {0};
 	char* dummy_pkt = "stop it";
+
 	/*
-	* Get address info from interconnect udp listenner port
-	*/
-	udp_listenner = Gp_listener_port;
-	snprintf(port_str, sizeof(port_str), "%d", udp_listenner);
+	 * Get address info from interconnect udp listener port
+	 */
+	udp_listener = Gp_listener_port;
+	snprintf(port_str, sizeof(port_str), "%d", udp_listener);
 
 	MemSet(&hint, 0, sizeof(hint));
 	hint.ai_socktype = SOCK_DGRAM;
@@ -939,7 +914,10 @@ SendDummyPacket(void)
 		if (!pg_set_noblock(sockfd))
 		{
 			if (sockfd >= 0)
+			{
 				closesocket(sockfd);
+				sockfd = -1;
+			}
 			continue;
 		}
 		break;
@@ -952,14 +930,14 @@ SendDummyPacket(void)
 	}
 
 	/*
-	* Send a dummy package to the interconnect listener, try 10 times
-	*/
+	 * Send a dummy package to the interconnect listener, try 10 times
+	 */
 	int counter = 0;
 	while (counter < 10)
 	{
 		counter++;
 		ret = sendto(sockfd, dummy_pkt, strlen(dummy_pkt), 0, rp->ai_addr, rp->ai_addrlen);
-		if(ret < 0)
+		if (ret < 0)
 		{
 			if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
 			{
@@ -981,7 +959,7 @@ SendDummyPacket(void)
 	}
 
 	pg_freeaddrinfo_all(hint.ai_family, addrs);
-	close(sockfd);
+	closesocket(sockfd);
 	return;
 
 send_error:
@@ -992,7 +970,7 @@ send_error:
 	}
 	if (sockfd != -1)
 	{
-		close(sockfd);
+		closesocket(sockfd);
 	}
 	return;
 }

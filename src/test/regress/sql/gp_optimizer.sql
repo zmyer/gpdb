@@ -5,6 +5,12 @@
 -- show version
 SELECT count(*) from gp_opt_version();
 
+-- Mask out Log & timestamp for orca message that has feature not supported.
+-- start_matchsubs
+-- m/^LOG.*\"Feature/
+-- s/^LOG.*\"Feature/\"Feature/
+-- end_matchsubs
+
 -- fix the number of segments for Orca
 set optimizer_segments = 3;
 
@@ -474,6 +480,9 @@ insert into orca.t values('201208',2,'tag1','tag2');
 
 -- test projections
 select * from orca.t order by 1,2;
+
+-- test EXPLAIN support of partition selection nodes, while we're at it.
+explain select * from orca.t order by 1,2;
 
 select tag2, tag1 from orca.t order by 1, 2;;
 
@@ -1276,6 +1285,161 @@ explain select * from orca.index_test where c = 5;
 
 -- force_explain
 explain select * from orca.index_test where a = 5 and c = 5;
+
+-- renaming columns
+select * from (values (2),(null)) v(k);
+
+-- Checking if ORCA correctly populates canSetTag in PlannedStmt for multiple statements because of rules
+drop table if exists can_set_tag_target;
+create table can_set_tag_target
+(
+	x int,
+	y int,
+	z char
+);
+
+drop table if exists can_set_tag_audit;
+create table can_set_tag_audit
+(
+	t timestamp without time zone,
+	x int,
+	y int,
+	z char
+);
+
+create rule can_set_tag_audit_update AS
+    ON UPDATE TO can_set_tag_target DO  INSERT INTO can_set_tag_audit (t, x, y, z)
+  VALUES (now(), old.x, old.y, old.z);
+
+insert into can_set_tag_target select i, i + 1, i + 2 from generate_series(1,2) as i;
+
+create role unpriv;
+grant all on can_set_tag_target to unpriv;
+grant all on can_set_tag_audit to unpriv;
+set role unpriv;
+show optimizer;
+update can_set_tag_target set y = y + 1;
+select count(1) from can_set_tag_audit;
+reset role;
+
+revoke all on can_set_tag_target from unpriv;
+revoke all on can_set_tag_audit from unpriv;
+drop role unpriv;
+drop table can_set_tag_target;
+drop table can_set_tag_audit;
+
+-- start_ignore
+create language plpythonu;
+-- end_ignore
+
+-- Checking if ORCA uses parser's canSetTag for CREATE TABLE AS SELECT
+create or replace function canSetTag_Func(x int) returns int as $$
+    if (x is None):
+        return 0
+    else:
+        return x * 3
+$$ language plpythonu;
+
+create table canSetTag_input_data (domain integer, class integer, attr text, value integer)
+   distributed by (domain);
+insert into canSetTag_input_data values(1, 1, 'A', 1);
+insert into canSetTag_input_data values(2, 1, 'A', 0);
+insert into canSetTag_input_data values(3, 0, 'B', 1);
+
+create table canSetTag_bug_table as 
+SELECT attr, class, (select canSetTag_Func(count(distinct class)::int) from canSetTag_input_data)
+   as dclass FROM canSetTag_input_data GROUP BY attr, class distributed by (attr);
+
+drop function canSetTag_Func(x int);
+drop table canSetTag_bug_table;
+drop table canSetTag_input_data;
+
+-- Test B-Tree index scan with in list
+CREATE TABLE btree_test as SELECT * FROM generate_series(1,100) as a distributed randomly;
+CREATE INDEX btree_test_index ON btree_test(a);
+EXPLAIN SELECT * FROM btree_test WHERE a in (1, 47);
+EXPLAIN SELECT * FROM btree_test WHERE a in ('2', 47);
+EXPLAIN SELECT * FROM btree_test WHERE a in ('1', '2');
+EXPLAIN SELECT * FROM btree_test WHERE a in ('1', '2', 47);
+
+-- Test Bitmap index scan with in list
+CREATE TABLE bitmap_test as SELECT * FROM generate_series(1,100) as a distributed randomly;
+CREATE INDEX bitmap_index ON bitmap_test USING BITMAP(a);
+EXPLAIN SELECT * FROM bitmap_test WHERE a in (select 1);
+EXPLAIN SELECT * FROM bitmap_test WHERE a in (1, 47);
+EXPLAIN SELECT * FROM bitmap_test WHERE a in ('2', 47);
+EXPLAIN SELECT * FROM bitmap_test WHERE a in ('1', '2');
+EXPLAIN SELECT * FROM bitmap_test WHERE a in ('1', '2', 47);
+
+-- Test Logging for unsupported features in ORCA
+-- start_ignore
+drop table if exists foo;
+-- end_ignore
+
+create table foo(a int, b int);
+set client_min_messages='log';
+select count(*) from foo group by cube(a,b);
+reset client_min_messages;
+
+-- TVF accepts ANYENUM, ANYELEMENT returns ANYENUM, ANYARRAY
+CREATE TYPE rainbow AS ENUM('red','yellow','blue');
+CREATE FUNCTION func_enum_element(ANYENUM, ANYELEMENT) RETURNS TABLE(a ANYENUM, b ANYARRAY)
+AS $$ SELECT $1, ARRAY[$2] $$ LANGUAGE SQL STABLE;
+SELECT * FROM func_enum_element('red'::rainbow, 'blue'::rainbow::anyelement);
+DROP FUNCTION IF EXISTS func_enum_element(ANYENUM, ANYELEMENT);
+
+-- TVF accepts ANYELEMENT, ANYARRAY returns ANYELEMENT, ANYENUM
+CREATE FUNCTION func_element_array(ANYELEMENT, ANYARRAY) RETURNS TABLE(a ANYELEMENT, b ANYENUM)
+AS $$ SELECT $1, $2[1]$$ LANGUAGE SQL STABLE;
+SELECT * FROM func_element_array('red'::rainbow, ARRAY['blue'::rainbow]);
+DROP FUNCTION IF EXISTS func_element_array(ANYELEMENT, ANYARRAY);
+
+-- TVF accepts ANYARRAY, ANYENUM returns ANYELEMENT
+CREATE FUNCTION func_element_array(ANYARRAY, ANYENUM) RETURNS TABLE(a ANYELEMENT, b ANYELEMENT)
+AS $$ SELECT $1[1], $2 $$ LANGUAGE SQL STABLE;
+SELECT * FROM func_element_array(ARRAY['blue'::rainbow], 'blue'::rainbow);
+DROP FUNCTION IF EXISTS func_element_array(ANYARRAY, ANYENUM);
+
+-- TVF accepts ANYARRAY argument returns ANYELEMENT, ANYENUM
+CREATE FUNCTION func_array(ANYARRAY) RETURNS TABLE(a ANYELEMENT, b ANYENUM)
+AS $$ SELECT $1[1], $1[2] $$ LANGUAGE SQL STABLE;
+SELECT * FROM func_array(ARRAY['blue'::rainbow, 'yellow'::rainbow]);
+DROP FUNCTION IF EXISTS func_array(ANYARRAY);
+
+-- TVF accepts ANYELEMENT, VARIADIC ARRAY returns ANYARRAY
+CREATE FUNCTION func_element_variadic(ANYELEMENT, VARIADIC ANYARRAY) RETURNS TABLE(a ANYARRAY)
+AS $$ SELECT array_prepend($1, $2); $$ LANGUAGE SQL STABLE;
+SELECT * FROM func_element_variadic(1.1, 1.1, 2.2, 3.3);
+DROP FUNCTION IF EXISTS func_element_variadic(ANYELEMENT, VARIADIC ANYARRAY);
+
+-- TVF accepts ANYNONARRAY returns ANYNONARRAY
+CREATE FUNCTION func_nonarray(ANYNONARRAY) RETURNS TABLE(a ANYNONARRAY)
+AS $$ SELECT $1; $$ LANGUAGE SQL STABLE;
+SELECT * FROM func_nonarray(5);
+DROP FUNCTION IF EXISTS func_nonarray(ANYNONARRAY);
+
+-- TVF accepts ANYNONARRAY, ANYENUM returns ANYARRAY
+CREATE FUNCTION func_nonarray_enum(ANYNONARRAY, ANYENUM) RETURNS TABLE(a ANYARRAY)
+AS $$ SELECT ARRAY[$1, $2]; $$ LANGUAGE SQL STABLE;
+SELECT * FROM func_nonarray_enum('blue'::rainbow, 'red'::rainbow);
+DROP FUNCTION IF EXISTS func_nonarray_enum(ANYNONARRAY, ANYENUM);
+
+-- TVF accepts ANYARRAY, ANYNONARRAY, ANYENUM returns ANYNONARRAY
+CREATE FUNCTION func_array_nonarray_enum(ANYARRAY, ANYNONARRAY, ANYENUM) RETURNS TABLE(a ANYNONARRAY)
+AS $$ SELECT $1[1]; $$ LANGUAGE SQL STABLE;
+SELECT * FROM func_array_nonarray_enum(ARRAY['blue'::rainbow, 'red'::rainbow], 'red'::rainbow, 'yellow'::rainbow);
+DROP FUNCTION IF EXISTS func_array_nonarray_enum(ANYARRAY, ANYNONARRAY, ANYENUM);
+
+-- start_ignore
+drop table foo;
+-- end_ignore
+
+-- Test GPDB Expr (T_ArrayCoerceExpr) conversion to Scalar Array Coerce Expr
+-- start_ignore
+create table foo (a int, b character varying(10));
+-- end_ignore
+-- Query should not fallback to planner
+explain select * from foo where b in ('1', '2');
 
 -- clean up
 drop schema orca cascade;

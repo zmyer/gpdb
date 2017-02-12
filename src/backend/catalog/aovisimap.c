@@ -7,10 +7,6 @@
  *
  * Copyright (c) 2013, Pivotal Inc.
  *
- * $Id: $
- * $Change: $
- * $DateTime: $
- * $Author: $
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
@@ -23,8 +19,7 @@
 #include "utils/guc.h"
 
 void
-AlterTableCreateAoVisimapTableWithOid(Oid relOid, Oid newOid, Oid newIndexOid,
-									  Oid * comptypeOid, bool is_part_child)
+AlterTableCreateAoVisimapTable(Oid relOid, bool is_part_child)
 {
 	Relation	rel;
 	IndexInfo  *indexInfo;
@@ -33,8 +28,8 @@ AlterTableCreateAoVisimapTableWithOid(Oid relOid, Oid newOid, Oid newIndexOid,
 	int16		coloptions[2];
 
 	elogif(Debug_appendonly_print_visimap, LOG,
-		   "Create visimap for relation %d, visimap relid %d, visimap idxid %d",
-		   relOid, newOid, newIndexOid);
+		   "Create visimap for relation %d",
+		   relOid);
 
 	/*
 	 * Grab an exclusive lock on the target table, which we will NOT release
@@ -64,7 +59,7 @@ AlterTableCreateAoVisimapTableWithOid(Oid relOid, Oid newOid, Oid newIndexOid,
 					   -1, 0);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 3,
 					   "visimap",
-					   VARBITOID,
+					   BYTEAOID,
 					   -1, 0);
 
 	/*
@@ -97,7 +92,6 @@ AlterTableCreateAoVisimapTableWithOid(Oid relOid, Oid newOid, Oid newIndexOid,
 	(void) CreateAOAuxiliaryTable(rel,
 								  "pg_aovisimap",
 								  RELKIND_AOVISIMAP,
-								  newOid, newIndexOid, comptypeOid,
 								  tupdesc, indexInfo, classObjectId, coloptions);
 
 	heap_close(rel, NoLock);

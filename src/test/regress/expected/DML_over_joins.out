@@ -394,7 +394,7 @@ delete from s where b = (select min(a) from r where b = s.b);
 -- end_ignore
 update p set c = c + 1;
 ERROR:  moving tuple from partition "p_1_prt_extra" to partition "p_1_prt_2" not supported  (seg1 rhel62-vm1:25433 pid=19028)
-update p set c = c + 1 where b in (select b from s);
+update p set c = c + 1 where b in (select b from s) and c = 0;
 ERROR:  moving tuple from partition "p_1_prt_extra" to partition "p_1_prt_2" not supported  (seg2 rhel62-vm1:25434 pid=19030)
 -- ----------------------------------------------------------------------
 -- Test: unsupported_cases1.sql
@@ -486,7 +486,7 @@ delete from s where b = (select min(a) from r where b = s.b);
 -- end_ignore
 update p set c = c + 1;
 ERROR:  moving tuple from partition "p_1_prt_extra" to partition "p_1_prt_2" not supported  (seg2 rhel62-vm1:25434 pid=19030)
-update p set c = c + 1 where b in (select b from s);
+update p set c = c + 1 where b in (select b from s where b = 36);
 ERROR:  moving tuple from partition "p_1_prt_extra" to partition "p_1_prt_2" not supported  (seg2 rhel62-vm1:25434 pid=19030)
 -- ----------------------------------------------------------------------
 -- Test: unsupported_cases3.sql
@@ -1151,7 +1151,7 @@ ERROR:  function insertmanyintosales(integer, character varying) does not exist
 create table r (a int, b int) distributed by (a);
 create table s (a int, b int) distributed by (a);
 create table m ();
-NOTICE:  Table doesn't have 'distributed by' clause, and no column type is suitable for a distribution key. Creating a NULL policy entry.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause, and no column type is suitable for a distribution key. Creating a NULL policy entry.
 	alter table m add column a int;
 	alter table m add column b int;
 create table t (region text, id int) distributed by (region);

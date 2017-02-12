@@ -109,14 +109,22 @@ throughout the codebase, but a few larger additions worth noting:
   FTS is a process that runs in the master node, and periodically
   polls the segments to maintain the status of each segment.
 
-## Build GPDB with Planner
+## Building GPDB
+
+Some configure options are nominally optional, but required to pass
+all regression tests. The minimum set of options for running the
+regression tests successfully is:
+
+`./configure --with-perl --with-python --with-libxml --enable-mapreduce`
+
+### Build GPDB with Planner
 
 ```
 # Clean environment
 make distclean
 
 # Configure build environment to install at /usr/local/gpdb
-./configure --prefix=/usr/local/gpdb
+./configure --with-perl --with-python --with-libxml --enable-mapreduce --prefix=/usr/local/gpdb
 
 # Compile and install
 make
@@ -145,16 +153,20 @@ PGPORT=15432 make installcheck-good
 ```
 
 
-## Build GPDB with GPORCA
+### Build GPDB with GPORCA
+You must first install the below libraries in the below order (see the READMEs on each repository):
 
-Only need to change the `configure` with additional option `--enable-orca`.
+1. https://github.com/greenplum-db/gp-xerces
+2. https://github.com/greenplum-db/gporca
+
+Next, change your `configure` command to have the additional option `--enable-orca`.
 ```
 # Configure build environment to install at /usr/local/gpdb
 # Enable GPORCA
 # Build with perl module (PL/Perl)
 # Build with python module (PL/Python)
 # Build with XML support
-./configure --enable-orca --with-perl --with-python --with-libxml --prefix=/usr/local/gpdb
+./configure --with-perl --with-python --with-libxml --enable-mapreduce --enable-orca --prefix=/usr/local/gpdb
 ```
 
 Once build and started, run `psql` and check the GPOPT (e.g. GPORCA) version:
@@ -163,7 +175,7 @@ Once build and started, run `psql` and check the GPOPT (e.g. GPORCA) version:
 select gp_opt_version();
 ```
 
-## Build GPDB with code generation enabled
+### Build GPDB with code generation enabled
 
 To build GPDB with code generation (codegen) enabled, you will need cmake 2.8 or higher
 and a recent version of llvm and clang (include headers and developer libraries). Codegen utils
@@ -176,7 +188,7 @@ your system.
 ```
 # Configure build environment to install at /usr/local/gpdb
 # Enable CODEGEN
-./configure --enable-codegen --prefix=/usr/local/gpdb --with-codegen-prefix="/path/to/llvm;/path/to/clang
+./configure --with-perl --with-python --with-libxml ---enable-mapreduce --enable-codegen --prefix=/usr/local/gpdb --with-codegen-prefix="/path/to/llvm;/path/to/clang"
 ```
 
 ## Regression tests
@@ -204,6 +216,75 @@ make installcheck-bugbuster
   some tests are known to fail with Greenplum. The
   __installcheck-good__ schedule excludes those tests.
 
+* When adding a new test, please add it to one of the GPDB-specific tests,
+  in greenplum_schedule, rather than the PostgreSQL tests inherited from the
+  upstream. We try to keep the upstream tests identical to the upstream
+  versions, to make merging with newer PostgreSQL releases easier.
+
+## Development with Docker
+
+We provide a docker image with all dependencies required to compile and test
+GPDB. You can view the dependency dockerfile at `./src/tools/docker/base/Dockerfile`.
+The image is hosted on docker hub at `pivotaldata/gpdb-devel`. This docker
+image is currently under heavy development.
+
+A quickstart guide to Docker can be found on the [Pivotal Engineering Journal](http://engineering.pivotal.io/post/docker-gpdb/).
+
+Known issues:
+* The `installcheck-good` make target has at least 4 failures, some of which
+  are non-deterministic
+
+### Running regression tests with Docker
+
+1. Create a docker host with 8gb RAM and 4 cores
+    ```bash
+    docker-machine create -d virtualbox --virtualbox-cpu-count 4 --virtualbox-disk-size 50000 --virtualbox-memory 8192 gpdb
+    eval $(docker-machine env gpdb)
+    ```
+
+1. Build your code on gpdb-devel rootfs
+    ```bash
+    cd [path/to/gpdb]
+    docker build .
+    # image beefc4f3 built
+    ```
+    The top level Dockerfile will automatically sync your current working
+    directory into the docker image. This means that any code you are working
+    on will automatically be built and ready for testing in the docker context
+
+1. Log into docker image
+    ```bash
+    docker run -it beefc4f3
+    ```
+
+1. As `gpadmin` user run `installcheck-good`
+    ```bash
+    su gpadmin
+    cd /workspace/gpdb
+    make installcheck-good
+    ```
+
+### Caveats
+
+* No Space Left On Device
+    On macOS the docker-machine vm can periodically become full with unused images.
+    You can clear these images with a combination of docker commands.
+    ```bash
+    # assuming no currently running containers
+    # remove all stopped containers from cache
+    docker ps -aq | xargs -n 1 docker rm
+    # remove all untagged images
+    docker images -aq --filter dangling=true | xargs -n 1 docker rmi
+    ```
+
+    Alternatively you can use the (beta) Native macOS docker client now available
+    in docker 1.12.
+
+## Contributing
+
+If you have not previously done so, please fill out and
+submit the [Contributor License Agreement](https://cla.pivotal.io/sign/greenplum).
+
 ## Glossary
 
 * __QD__
@@ -219,4 +300,4 @@ make installcheck-bugbuster
 For Greenplum Database documentation, please check online docs:
 http://gpdb.docs.pivotal.io
 
-There is also a Vagrant-based quickstart guide for developers in `vagrant/README.md`.
+There is also a Vagrant-based quickstart guide for developers in `src/tools/vagrant/README.md`.

@@ -16,7 +16,7 @@
 #include "miscadmin.h"
 #include "cdb/cdbconn.h"
 #include "cdb/cdbcopy.h"
-#include "cdb/cdbdisp.h"
+#include "cdb/cdbdisp_query.h"
 #include "cdb/cdbdispatchresult.h"
 #include "cdb/cdbfts.h"
 #include "cdb/cdbgang.h"
@@ -70,7 +70,7 @@ makeCdbCopy(bool is_copy_in)
 	}
 
 	/* init gangs */
-	c->primary_writer = allocateWriterGang();
+	c->primary_writer = AllocateWriterGang();
 	
 	/* init seg list for copy out */
 	if (!c->copy_in)
@@ -94,12 +94,9 @@ cdbCopyStart(CdbCopy *c, char *copyCmd)
 {
 	int			seg;
 	MemoryContext oldcontext;
-	CdbDispatcherState ds = {NULL, NULL};
 	List	   *parsetree_list;
 	Node	   *parsetree = NULL;
 	List	   *querytree_list;
-	char	   *serializedQuerytree;
-	int			serializedQuerytree_len;
 	Query	   *q = makeNode(Query);
 	
 	/* clean err message */
@@ -114,8 +111,6 @@ cdbCopyStart(CdbCopy *c, char *copyCmd)
 	 */
 	oldcontext = MemoryContextSwitchTo(MessageContext);
 
-	QueryContext = CurrentMemoryContext;
-	
 	/* dispatch copy command to both primary and mirror writer gangs */
 	
 	/*
@@ -164,10 +159,6 @@ cdbCopyStart(CdbCopy *c, char *copyCmd)
 	Assert(q->commandType == CMD_UTILITY);
 	Assert(q->utilityStmt != NULL);
 	Assert(IsA(q->utilityStmt,CopyStmt));
-	
-	q->querySource = QSRC_ORIGINAL;
-
-	q->canSetTag = true;
 
 	/* add in partitions for dispatch */
 	((CopyStmt *)q->utilityStmt)->partitions = c->partitions;
@@ -179,31 +170,12 @@ cdbCopyStart(CdbCopy *c, char *copyCmd)
 	
 	MemoryContextSwitchTo(oldcontext);
 
-	/*
-	 * serialized the stmt tree, and dispatch it ....
-	 */
-	serializedQuerytree = serializeNode((Node *) q, &serializedQuerytree_len, NULL /*uncompressed_size*/);
-
-	Assert(serializedQuerytree != NULL);
-	
-	dtmPreCommand("CdbCopy", copyCmd, NULL,
-			c->copy_in, /* needs 2-phase */
-			true, /* want snapshot */
-			false /* in cursor */);
-	
-	cdbdisp_dispatchCommand(copyCmd, serializedQuerytree, serializedQuerytree_len, 
-								false 		/* cancelonError */, 
-								c->copy_in 	/* need2phase */, 
-								true 		/* withSnapshot */,
-								&ds);
+	CdbDispatchUtilityStatement((Node *) q->utilityStmt,
+								(c->copy_in ? DF_NEED_TWO_PHASE | DF_WITH_SNAPSHOT : DF_WITH_SNAPSHOT),
+								NIL, /* FIXME */
+								NULL);
 
 	SIMPLE_FAULT_INJECTOR(CdbCopyStartAfterDispatch);
-
-	/*
-	 * Wait for all QEs to finish. If not all of our QEs were successful,
-	 * report the error and throw up.
-	 */
-	cdbdisp_finishCommand(&ds, NULL, NULL);
 
 	/* fill in CdbCopy structure */
 	for (seg = 0; seg < c->total_segs; seg++)
@@ -212,6 +184,19 @@ cdbCopyStart(CdbCopy *c, char *copyCmd)
 	}
 
 	return;
+}
+
+/*
+ * sends data to a copy command on all segments.
+ */
+void
+cdbCopySendDataToAll(CdbCopy *c, const char *buffer, int nbytes)
+{
+	Gang *gp = c->primary_writer;
+	for (int i = 0; i < gp->size; ++i) {
+		int seg = gp->db_descriptors[i].segindex;
+		cdbCopySendData(c, seg, buffer, nbytes);
+	}
 }
 
 /*
@@ -256,50 +241,6 @@ cdbCopySendData(CdbCopy *c, int target_seg, const char *buffer,
 
 		c->io_errors = true;
 	}
-}
-
-/*
- * sends data to a copy command on a specific segment (usually
- * the hash result of the data value).
- */
-void
-cdbCopySendDataSingle(CdbCopy *c, int target_seg, const char *buffer,
-				int nbytes)
-{
-	SegmentDatabaseDescriptor *q;
-	Gang	   *gp;
-	int			result;
-
-	/* clean err message */
-	c->err_msg.len = 0;
-	c->err_msg.data[0] = '\0';
-	c->err_msg.cursor = 0;
- 
-	gp = c->primary_writer;
-	
-	Assert(gp);
-
-	q = getSegmentDescriptorFromGang(gp, target_seg);
-
-	/* transmit the COPY data */
-	elog(DEBUG4,"PQputCopyData to segment %d\n", target_seg);
-	result = PQputCopyData(q->conn, buffer, nbytes);
-
-	if (result != 1)
-	{
-		if (result == 0)
-			appendStringInfo(&(c->err_msg),
-							 "Failed to send data to segment %d, attempt blocked\n",
-							 target_seg);
-
-		if (result == -1)
-			appendStringInfo(&(c->err_msg),
-							 "Failed to send data to segment %d: %s\n",
-							 target_seg, PQerrorMessage(q->conn));
-
-		c->io_errors = true;
-	}
- 
 }
 
 /*
@@ -568,6 +509,7 @@ processCopyEndResults(CdbCopy *c,
 			else if (PQresultStatus(res) == PGRES_COPY_OUT)
 			{
 				char	   *buffer = NULL;
+				int			ret;
 
 				elog(LOG, "Segment still in copy out, canceling QE");
 				/*
@@ -581,10 +523,31 @@ processCopyEndResults(CdbCopy *c,
 				 */
 				PQrequestCancel(q->conn);
 
-				/* Need to consume data from QE until he recognizes cancel. */
-				PQgetCopyData(q->conn, &buffer, false);
-				if (buffer)
-					free(buffer);
+				/*
+				 * Need to consume data from the QE until cancellation is
+				 * recognized. PQgetCopyData() returns -1 when the COPY is
+				 * done, a non-zero result indicates data was returned and
+				 * in that case we'll drop it immediately since we aren't
+				 * interested in the contents.
+				 */
+				while ((ret = PQgetCopyData(q->conn, &buffer, false)) != -1)
+				{
+					if (ret > 0)
+					{
+						if (buffer)
+							PQfreemem(buffer);
+						continue;
+					}
+
+					/* An error occurred, log the error and break out */
+					if (ret == -2)
+					{
+						ereport(WARNING,
+								(errmsg("Error during cancellation: \"%s\"",
+								PQerrorMessage(q->conn))));
+						break;
+					}
+				}
 			}
 
 			/* in SREH mode, check if this seg rejected (how many) rows */
@@ -592,7 +555,7 @@ processCopyEndResults(CdbCopy *c,
 				segment_rows_rejected = res->numRejected;
 
 			/* Get AO tuple counts */
-			c->aotupcounts = process_aotupcounts(c->partitions, c->aotupcounts, res->aotupcounts, res->naotupcounts);
+			c->aotupcounts = PQprocessAoTupCounts(c->partitions, c->aotupcounts, res->aotupcounts, res->naotupcounts);
 			/* free the PGresult object */
 			PQclear(res);
 		}
@@ -698,20 +661,4 @@ cdbCopyEnd(CdbCopy *c)
 	pfree(failedSegDBs);
 
 	return total_rows_rejected;
-}
-
-
-/*
- * start a global transaction for COPY.
- */
-void
-cdbCopyStartTransaction(void)
-{
-	/* since we don't use cdbdisp's dispatch services, we need to explicitly
-	 * kick off a BEGIN if its the real start of a transaction
-	 */
-	sendDtxExplicitBegin();
-	
-	/* this txn is gonna be dirty */
-	dtmPreCommand("cdbCopyStartTransaction", "(none)", NULL, /* needs two-phase */ true, /* withSnapshot */ true, /* inCursor */ false );
 }

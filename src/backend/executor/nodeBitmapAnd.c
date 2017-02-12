@@ -8,7 +8,7 @@
  *
  *
  * IDENTIFICATION
- *	  $PostgreSQL: pgsql/src/backend/executor/nodeBitmapAnd.c,v 1.9 2007/01/05 22:19:28 momjian Exp $
+ *	  $PostgreSQL: pgsql/src/backend/executor/nodeBitmapAnd.c,v 1.10 2008/01/01 19:45:49 momjian Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -109,6 +109,14 @@ ExecCountSlotsBitmapAnd(BitmapAnd *node)
 
 /* ----------------------------------------------------------------
  *	   MultiExecBitmapAnd
+ *
+ *	   BitmapAnd node gets the bitmaps generated from BitmapIndexScan
+ *	   nodes and outputs a bitmap that ANDs all input bitmaps.
+ *
+ *	   The first input bitmap is utilized to store the result of the
+ *	   AND and returned to the caller. In addition, the output points
+ *	   to a newly created OpStream node of type BMS_AND, where all
+ *	   StreamNodes of input bitmaps are added as input streams.
  * ----------------------------------------------------------------
  */
 Node *
@@ -203,6 +211,8 @@ MultiExecBitmapAnd(BitmapAndState *node)
 	   				StreamBitmap *s = (StreamBitmap *)subresult;
 		   			stream_add_node((StreamBitmap *)node->bitmap,
 									s->streamNode, BMS_AND);
+		   			/* node->bitmap should be the only owner of the newly created AND StreamNode */
+		   			s->streamNode = NULL;
 
 					/*
 					 * Don't free subresult here, as we are still using the StreamNode inside it.
@@ -248,7 +258,7 @@ MultiExecBitmapAnd(BitmapAndState *node)
 	{
 		if(node->bitmap && IsA(node->bitmap, StreamBitmap))
 			stream_add_node((StreamBitmap *)node->bitmap,
-						tbm_create_stream_node(hbm), BMS_AND);
+						tbm_create_stream_node_ref(hbm), BMS_AND);
 		else
 			node->bitmap = (Node *)hbm;
 	}

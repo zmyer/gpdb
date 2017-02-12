@@ -244,6 +244,9 @@ typedef struct
 #endif
 } PQaoRelTupCount;
 
+struct PartitionNode;
+struct HTAB;
+
 /* ----------------
  * Exported functions of libpq
  * ----------------
@@ -402,7 +405,8 @@ extern PGresult *PQexecPrepared(PGconn *conn,
  */
 extern int PQsendGpQuery_shared(PGconn       *conn,
 								 char         *query,
-								 int          query_len);
+								 int          query_len,
+								 bool         nonblock);
 
 /* Interface for multiple-result or asynchronous queries */
 extern int	PQsendQuery(PGconn *conn, const char *query);
@@ -594,6 +598,10 @@ extern int	PQdsplen(const char *s, int encoding);
 /* Get encoding id from environment variable PGCLIENTENCODING */
 extern int	PQenv2encoding(void);
 
+extern struct HTAB *
+PQprocessAoTupCounts(struct PartitionNode *parts, struct HTAB *ht,
+					 void *aotupcounts, int naotupcounts);
+
 /* === in fe-auth.c === */
 
 extern char *PQencryptPassword(const char *passwd, const char *user);
@@ -603,12 +611,6 @@ extern char *PQencryptPassword(const char *passwd, const char *user);
 extern int	pg_char_to_encoding(const char *name);
 extern const char *pg_encoding_to_char(int encoding);
 extern int	pg_valid_server_encoding_id(int encoding);
-/*
- * special routine for sending gang management commands to dispatch agent
- */
-extern int PQsendCreateGang(PGconn * conn, int size, void * binaryGangInfo);
-
-extern int PQsendControlGang(PGconn * conn, int gang_id, const char * query);
 
 #ifdef __cplusplus
 }

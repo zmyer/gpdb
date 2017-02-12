@@ -20,6 +20,7 @@
 #include "nodes/parsenodes.h"
 #include "access/sysattr.h"
 #include "catalog/pg_type.h"
+#include "catalog/pg_proc.h"
 #include "catalog/pg_trigger.h"
 #include "optimizer/walkers.h"
 #include "utils/rel.h"
@@ -79,189 +80,6 @@ extern bool optimizer_multilevel_partitioning;
 
 //---------------------------------------------------------------------------
 //	@function:
-//		CTranslatorUtils::PreloadMD
-//
-//	@doc:
-//		Preload the cache with MD information
-//
-//---------------------------------------------------------------------------
-void
-CTranslatorUtils::PreloadMD
-	(
-	IMemoryPool *pmp,
-	CMDAccessor *pmda,
-	CSystemId sysid,
-	Query *pquery
-	)
-{
-	CAutoTimer at("\n[OPT]: Metadata Preload Time", GPOS_FTRACE(EopttracePrintOptStats));
-
-	// TODO: Jan 11th 2012; this is a temporary fix that preloads the
-	// cache with MD information of base types
-
-	CContextPreloadMD ctxpreloadmd(pmp, pmda);
-
-	// find all relations accessed by query and preload their
-	// relstats and colstats
-	(void) FPreloadMDStatsWalker
-				(
-				(Node *) pquery,
-				&ctxpreloadmd
-				);
-
-	// preload types bool, oid, int2, int4 and int8
-	const IMDType *pmdtypeBool = pmda->PtMDType<IMDTypeBool>(sysid);
-	PreloadMDType(pmda, pmdtypeBool);
-	const IMDType *pmdtypeInt2 = pmda->PtMDType<IMDTypeInt2>(sysid);
-	PreloadMDType(pmda, pmdtypeInt2);
-	const IMDType *pmdtypeInt4 = pmda->PtMDType<IMDTypeInt4>(sysid);
-	PreloadMDType(pmda, pmdtypeInt4);
-	const IMDType *pmdtypeInt8 = pmda->PtMDType<IMDTypeInt8>(sysid);
-	PreloadMDType(pmda, pmdtypeInt8);
-	const IMDType *pmdtypeOid = pmda->PtMDType<IMDTypeOid>(sysid);
-	PreloadMDType(pmda, pmdtypeOid);
-
-	CMDIdGPDB *pmdidDate = GPOS_NEW(pmp) CMDIdGPDB(CMDIdGPDB::m_mdidDate.OidObjectId());
-	(void) pmda->Pmdtype(pmdidDate);
-
-	CMDIdGPDB *pmdidNumeric = GPOS_NEW(pmp) CMDIdGPDB(CMDIdGPDB::m_mdidNumeric.OidObjectId());
-	(void) pmda->Pmdtype(pmdidNumeric);
-
-	CMDIdGPDB *pmdidTimestamp = GPOS_NEW(pmp) CMDIdGPDB(CMDIdGPDB::m_mdidTimestamp.OidObjectId());
-	(void) pmda->Pmdtype(pmdidTimestamp);
-
-	pmdidDate->Release();
-	pmdidNumeric->Release();
-	pmdidTimestamp->Release();
-}
-
-//---------------------------------------------------------------------------
-//	@function:
-//		CTranslatorUtils::PreloadMDType
-//
-//	@doc:
-//		Preload the cache with MD information of a particular type
-//
-//---------------------------------------------------------------------------
-void
-CTranslatorUtils::PreloadMDType
-	(
-	CMDAccessor *pmda,
-	const IMDType *pmdtype
-	)
-{
-	(void) pmda->Pmdscop(pmdtype->PmdidCmp(IMDType::EcmptEq));
-	(void) pmda->Pmdscop(pmdtype->PmdidCmp(IMDType::EcmptNEq));
-	(void) pmda->Pmdscop(pmdtype->PmdidCmp(IMDType::EcmptL));
-	(void) pmda->Pmdscop(pmdtype->PmdidCmp(IMDType::EcmptLEq));
-	(void) pmda->Pmdscop(pmdtype->PmdidCmp(IMDType::EcmptG));
-	(void) pmda->Pmdscop(pmdtype->PmdidCmp(IMDType::EcmptGEq));
-}
-
-//---------------------------------------------------------------------------
-//	@function:
-//		CTranslatorUtils::FPreloadMDStatsWalker
-//
-//	@doc:
-//		Walks the expression, descends into queries, finds relations
-//		mentioned in the query and preloads column stats for them.
-//
-//---------------------------------------------------------------------------
-BOOL
-CTranslatorUtils::FPreloadMDStatsWalker
-	(
-	Node *pnode,
-	CContextPreloadMD *pctxpreloadmd
-	)
-{
-	if (NULL == pnode)
-	{
-		return false;
-	}
-
-	if (IsA(pnode, RangeTblEntry))
-	{
-		RangeTblEntry *prte = (RangeTblEntry *) pnode;
-
-		// need to exclude views
-		if (prte->rtekind == RTE_RELATION)
-		{
-			PreloadMDStats(pctxpreloadmd->m_pmp, pctxpreloadmd->m_pmda, prte->relid);
-		}
-		else if (prte->rtekind == RTE_SUBQUERY)
-		{
-			gpdb::FWalkQueryOrExpressionTree
-								(
-								(Node *) prte->subquery,
-								(BOOL (*)()) CTranslatorUtils::FPreloadMDStatsWalker,
-								pctxpreloadmd,
-								QTW_EXAMINE_RTES // query tree walker flags
-								);
-		}
-		return false;
-	}
-
-	if (IsA(pnode, Query))
-	{
-		return gpdb::FWalkQueryOrExpressionTree
-					(
-					pnode,
-					(BOOL (*)()) CTranslatorUtils::FPreloadMDStatsWalker,
-					pctxpreloadmd,
-					QTW_EXAMINE_RTES // query tree walker flags
-					);
-	}
-
-	return gpdb::FWalkExpressionTree
-			(
-			pnode,
-			(BOOL (*)()) CTranslatorUtils::FPreloadMDStatsWalker,
-			pctxpreloadmd
-			);
-}
-
-//---------------------------------------------------------------------------
-//	@function:
-//		CTranslatorUtils::PreloadMDStats
-//
-//	@doc:
-//		Preloads the relstats and column stats for relation
-//
-//---------------------------------------------------------------------------
-void
-CTranslatorUtils::PreloadMDStats
-	(
-	IMemoryPool *pmp,
-	CMDAccessor *pmda,
-	OID oidRelation
-	)
-{
-	CMDIdGPDB *pmdidgpdbRel = CDXLUtils::Pmdid(pmp, oidRelation);
-
-	// preload column stats
-	const IMDRelation *pmdrelation = pmda->Pmdrel(pmdidgpdbRel);
-
-	for (ULONG ulAttNo = 0; ulAttNo < pmdrelation->UlColumns(); ulAttNo++)
-	{
-		pmdidgpdbRel->AddRef();
-		CMDIdColStats *pmdidColStats = GPOS_NEW(pmp) CMDIdColStats(pmdidgpdbRel, ulAttNo);
-		(void *) pmda->Pmdcolstats(pmdidColStats);
-		pmdidColStats->Release();
-	}
-
-	// preload relation stats
-	{
-		pmdidgpdbRel->AddRef();
-		CMDIdRelStats *pmdidRelStats = GPOS_NEW(pmp) CMDIdRelStats(pmdidgpdbRel);
-		(void *) pmda->Pmdrelstats(pmdidRelStats);
-		pmdidRelStats->Release();
-	}
-
-	pmdidgpdbRel->Release();
-}
-
-//---------------------------------------------------------------------------
-//	@function:
 //		CTranslatorUtils::Pdxlid
 //
 //	@doc:
@@ -303,7 +121,14 @@ CTranslatorUtils::Pdxltabdesc
 {
 	// generate an MDId for the table desc.
 	OID oidRel = prte->relid;
-	
+
+	if (gpdb::FHasExternalPartition(oidRel))
+	{
+		// fall back to the planner for queries with partition tables that has an external table in one of its leaf
+		// partitions.
+		GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature, GPOS_WSZ_LIT("Query over external partitions"));
+	}
+
 	CMDIdGPDB *pmdid = CDXLUtils::Pmdid(pmp, oidRel);
 
 	const IMDRelation *pmdrel = pmda->Pmdrel(pmdid);
@@ -315,8 +140,9 @@ CTranslatorUtils::Pdxltabdesc
 	CDXLTableDescr *pdxltabdesc = GPOS_NEW(pmp) CDXLTableDescr(pmp, pmdid, pmdnameTbl, prte->checkAsUser);
 
 	const ULONG ulLen = pmdrel->UlColumns();
-	
+
 	IMDRelation::Ereldistrpolicy ereldist = pmdrel->Ereldistribution();
+
 	if (NULL != pfDistributedTable &&
 		(IMDRelation::EreldistrHash == ereldist || IMDRelation::EreldistrRandom == ereldist))
 	{
@@ -330,6 +156,7 @@ CTranslatorUtils::Pdxltabdesc
 
 			GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiQuery2DXLUnsupportedFeature, GPOS_WSZ_LIT("Queries on master-only tables"));
 		}
+
 	// add columns from md cache relation object to table descriptor
 	for (ULONG ul = 0; ul < ulLen; ul++)
 	{
@@ -481,7 +308,7 @@ CTranslatorUtils::Pdxltvf
 												pmp,
 												pdrgpmdidOutArgTypes,
 												plArgTypes,
-												pfuncexpr->args
+												pfuncexpr
 												);
 			pdrgpmdidOutArgTypes->Release();
 			pdrgpmdidOutArgTypes = pdrgpmdidResolved;
@@ -519,64 +346,55 @@ CTranslatorUtils::PdrgpmdidResolvePolymorphicTypes
 	IMemoryPool *pmp,
 	DrgPmdid *pdrgpmdidTypes,
 	List *plArgTypes,
-	List *plArgsFromQuery
+	FuncExpr *pfuncexpr
 	)
 {
-	OID oidAnyElement = InvalidOid;
-	OID oidAnyArray = InvalidOid;
+	ULONG ulArgIndex = 0;
+
 	const ULONG ulArgTypes = gpdb::UlListLength(plArgTypes);
-	const ULONG ulArgsFromQuery = gpdb::UlListLength(plArgsFromQuery);
-	for (ULONG ul = 0; ul < ulArgTypes && ul < ulArgsFromQuery; ul++)
+	const ULONG ulArgsFromQuery = gpdb::UlListLength(pfuncexpr->args);
+	const ULONG ulNumReturnArgs = pdrgpmdidTypes->UlLength();
+	const ULONG ulNumArgs = ulArgTypes < ulArgsFromQuery ? ulArgTypes : ulArgsFromQuery;
+	const ULONG ulTotalArgs = ulNumArgs + ulNumReturnArgs;
+
+	OID argTypes[ulNumArgs];
+	char argModes[ulTotalArgs];
+
+	// copy function argument types
+	ListCell *plcArgType = NULL;
+	ForEach (plcArgType, plArgTypes)
 	{
-		OID oidArgType = gpdb::OidListNth(plArgTypes, ul);
-		OID oidArgTypeFromQuery = gpdb::OidExprType((Node *) gpdb::PvListNth(plArgsFromQuery, ul));
-
-		if (ANYELEMENTOID == oidArgType && InvalidOid == oidAnyElement)
-		{
-			oidAnyElement = oidArgTypeFromQuery;
-		}
-
-		if (ANYARRAYOID == oidArgType && InvalidOid == oidAnyArray)
-		{
-			oidAnyArray = oidArgTypeFromQuery;
-		}
+		argTypes[ulArgIndex] = lfirst_oid(plcArgType);
+		argModes[ulArgIndex++] = PROARGMODE_IN;
 	}
 
-	GPOS_ASSERT(InvalidOid != oidAnyElement || InvalidOid != oidAnyArray);
-
-	// use the resolved type to deduce the other if necessary
-	if (InvalidOid == oidAnyElement)
+	// copy function return types
+	for (ULONG ul = 0; ul < ulNumReturnArgs; ul++)
 	{
-		oidAnyElement = gpdb::OidResolveGenericType(ANYELEMENTOID, oidAnyArray, ANYARRAYOID);
+		IMDId *pmdid = (*pdrgpmdidTypes)[ul];
+		argTypes[ulArgIndex] = CMDIdGPDB::PmdidConvert(pmdid)->OidObjectId();
+		argModes[ulArgIndex++] = PROARGMODE_TABLE;
 	}
 
-	if (InvalidOid == oidAnyArray)
+	if(!gpdb::FResolvePolymorphicType(ulTotalArgs, argTypes, argModes, pfuncexpr))
 	{
-		oidAnyArray = gpdb::OidResolveGenericType(ANYARRAYOID, oidAnyElement, ANYELEMENTOID);
+		GPOS_RAISE
+				(
+				gpdxl::ExmaDXL,
+				gpdxl::ExmiDXLUnrecognizedType,
+				GPOS_WSZ_LIT("could not determine actual argument/return type for polymorphic function")
+				);
 	}
 
 	// generate a new array of mdids based on the resolved types
 	DrgPmdid *pdrgpmdidResolved = GPOS_NEW(pmp) DrgPmdid(pmp);
 
-	const ULONG ulLen = pdrgpmdidTypes->UlLength();
-	for (ULONG ul = 0; ul < ulLen; ul++)
+	// get the resolved return types
+	for (ULONG ul = ulNumArgs; ul < ulTotalArgs ; ul++)
 	{
-		IMDId *pmdid = (*pdrgpmdidTypes)[ul];
-		IMDId *pmdidResolved = NULL;
-		if (FAnyElement(pmdid))
-		{
-			pmdidResolved = GPOS_NEW(pmp) CMDIdGPDB(oidAnyElement);
-		}
-		else if (FAnyArray(pmdid))
-		{
-			pmdidResolved = GPOS_NEW(pmp) CMDIdGPDB(oidAnyArray);
-		}
-		else
-		{
-			pmdid->AddRef();
-			pmdidResolved = pmdid;
-		}
 
+		IMDId *pmdidResolved = NULL;
+		pmdidResolved = GPOS_NEW(pmp) CMDIdGPDB(argTypes[ul]);
 		pdrgpmdidResolved->Append(pmdidResolved);
 	}
 
@@ -589,7 +407,7 @@ CTranslatorUtils::PdrgpmdidResolvePolymorphicTypes
 //
 //	@doc:
 //		Check if the given mdid array contains any of the polymorphic
-//		types (ANYELEMENT, ANYARRAY)
+//		types (ANYELEMENT, ANYARRAY, ANYENUM, ANYNONARRAY)
 //
 //---------------------------------------------------------------------------
 BOOL
@@ -602,50 +420,14 @@ CTranslatorUtils::FContainsPolymorphicTypes
 	const ULONG ulLen = pdrgpmdidTypes->UlLength();
 	for (ULONG ul = 0; ul < ulLen; ul++)
 	{
-		IMDId *pmdid = (*pdrgpmdidTypes)[ul];
-		if (FAnyElement(pmdid) || FAnyArray(pmdid))
+		IMDId *pmdidType = (*pdrgpmdidTypes)[ul];
+		if (IsPolymorphicType(CMDIdGPDB::PmdidConvert(pmdidType)->OidObjectId()))
 		{
 			return true;
 		}
 	}
 
 	return false;
-}
-
-//---------------------------------------------------------------------------
-//	@function:
-//		CTranslatorUtils::FAnyElement
-//
-//	@doc:
-//		Check if the given type mdid is the "ANYELEMENT" type
-//
-//---------------------------------------------------------------------------
-BOOL
-CTranslatorUtils::FAnyElement
-	(
-	IMDId *pmdidType
-	)
-{
-	Oid oid = CMDIdGPDB::PmdidConvert(pmdidType)->OidObjectId();
-	return (ANYELEMENTOID == oid);
-}
-
-//---------------------------------------------------------------------------
-//	@function:
-//		CTranslatorUtils::FAnyArray
-//
-//	@doc:
-//		Check if the given type mdid is the "ANYARRAY" type
-//
-//---------------------------------------------------------------------------
-BOOL
-CTranslatorUtils::FAnyArray
-	(
-	IMDId *pmdidType
-	)
-{
-	Oid oid = CMDIdGPDB::PmdidConvert(pmdidType)->OidObjectId();
-	return (ANYARRAYOID == oid);
 }
 
 //---------------------------------------------------------------------------
@@ -811,7 +593,7 @@ CTranslatorUtils::PdrgdxlcdComposite
 
 	for (ULONG ul = 0; ul < pdrgPmdCol->UlLength(); ul++)
 	{
-		CMDColumn *pmdcol = (*pdrgPmdCol)[ul];
+		IMDColumn *pmdcol = (*pdrgPmdCol)[ul];
 
 		CMDName *pmdColName = GPOS_NEW(pmp) CMDName(pmp, pmdcol->Mdname().Pstr());
 		IMDId *pmdidColType = pmdcol->PmdidType();
@@ -1162,18 +944,14 @@ CTranslatorUtils::OidCmpOperator
 
 //---------------------------------------------------------------------------
 //	@function:
-//		CTranslatorUtils::OidCmpOperator
+//		CTranslatorUtils::OidIndexQualOpFamily
 //
 //	@doc:
-//		Extract comparison operator from an OpExpr, ScalarArrayOpExpr or RowCompareExpr
-//
-//	FIXME: This function comment is completely bogus.
-//	FIXME: This actually returns the operator family, not operator
-//	class!
+//		Extract comparison operator family for the given index column
 //
 //---------------------------------------------------------------------------
 OID
-CTranslatorUtils::OidIndexQualOpclass
+CTranslatorUtils::OidIndexQualOpFamily
 	(
 	INT iAttno,
 	OID oidIndex
@@ -1236,80 +1014,6 @@ CTranslatorUtils::Edxlsetop
 
 	GPOS_ASSERT(!"Unrecognized set operator type");
 	return EdxlsetopSentinel;
-}
-
-//---------------------------------------------------------------------------
-//	@function:
-//		CTranslatorUtils::Setoptype
-//
-//	@doc:
-//		Return set operator type
-//
-//---------------------------------------------------------------------------
-SetOperation
-CTranslatorUtils::Setoptype
-	(
-	EdxlSetOpType edxlsetop
-	)
-{
-	if (EdxlsetopUnionAll == edxlsetop || EdxlsetopUnion == edxlsetop)
-	{
-		return SETOP_UNION;
-	}
-
-	if (EdxlsetopIntersect == edxlsetop || EdxlsetopIntersectAll == edxlsetop)
-	{
-		return SETOP_INTERSECT;
-	}
-
-	if (EdxlsetopDifference == edxlsetop || EdxlsetopDifferenceAll == edxlsetop)
-	{
-		return SETOP_EXCEPT;
-	}
-
-	GPOS_ASSERT(!"Unrecognized set operator type");
-
-	return SETOP_NONE;
-}
-
-//---------------------------------------------------------------------------
-//	@function:
-//		CTranslatorUtils::PtemapCopy
-//
-//	@doc:
-//		Create a copy of the hash map
-//
-//---------------------------------------------------------------------------
-TEMap *
-CTranslatorUtils::PtemapCopy
-	(
-	IMemoryPool *pmp,
-	TEMap *ptemap
-	)
-{
-	TEMap *ptemapCopy = GPOS_NEW(pmp) TEMap(pmp);
-
-	// iterate over full map
-	TEMapIter temapiter(ptemap);
-	while (temapiter.FAdvance())
-	{
-		CMappingElementColIdTE *pmapelement =  const_cast<CMappingElementColIdTE *>(temapiter.Pt());
-
-		const ULONG ulColId = pmapelement->UlColId();
-		ULONG *pulKey1 = GPOS_NEW(pmp) ULONG(ulColId);
-		pmapelement->AddRef();
-
-#ifdef GPOS_DEBUG
-		BOOL fres =
-#endif
-		ptemapCopy->FInsert(pulKey1, pmapelement);
-
-#ifdef GPOS_DEBUG
-		GPOS_ASSERT(fres);
-#endif
-
-	}
-	return ptemapCopy;
 }
 
 //---------------------------------------------------------------------------
@@ -1978,7 +1682,6 @@ CTranslatorUtils::PdxlnDummyPrElem
 	CMDIdGPDB *pmdidCopy = GPOS_NEW(pmp) CMDIdGPDB(pmdidOriginal->OidObjectId(), pmdidOriginal->UlVersionMajor(), pmdidOriginal->UlVersionMinor());
 
 	// create a column reference for the scalar identifier to be casted
-	ULONG ulColId = pdxlcdOutput->UlID();
 	CMDName *pmdname = GPOS_NEW(pmp) CMDName(pmp, pdxlcdOutput->Pmdname()->Pstr());
 	CDXLColRef *pdxlcr = GPOS_NEW(pmp) CDXLColRef(pmp, pmdname, ulColIdInput);
 	CDXLScalarIdent *pdxlopIdent = GPOS_NEW(pmp) CDXLScalarIdent(pmp, pdxlcr, pmdidCopy);
@@ -2801,9 +2504,6 @@ CTranslatorUtils::UpdateGrpColMapping
 	if (!pbsGrpCols->FBit(ulSortGrpRef))
 	{
 		ULONG ulUniqueGrpCols = pbsGrpCols->CElements();
-#ifdef GPOS_DEBUG
-		BOOL fResult = 
-#endif
 		phmululGrpColPos->FInsert(GPOS_NEW(pmp) ULONG (ulUniqueGrpCols), GPOS_NEW(pmp) ULONG(ulSortGrpRef));
 		(void) pbsGrpCols->FExchangeSet(ulSortGrpRef);
 	}
@@ -3074,5 +2774,36 @@ CTranslatorUtils::PlAssertErrorMsgs
 	return plErrorMsgs;
 }
 
+//---------------------------------------------------------------------------
+//	@function:
+//		CTranslatorUtils::UlNonSystemColumns
+//
+//	@doc:
+//		Return the count of non-system columns in the relation
+//
+//---------------------------------------------------------------------------
+ULONG
+CTranslatorUtils::UlNonSystemColumns
+	(
+	const IMDRelation *pmdrel
+	)
+{
+	GPOS_ASSERT(NULL != pmdrel);
+
+	ULONG ulNonSystemCols = 0;
+
+	const ULONG ulCols = pmdrel->UlColumns();
+	for (ULONG ul = 0; ul < ulCols; ul++)
+	{
+		const IMDColumn *pmdcol  = pmdrel->Pmdcol(ul);
+
+		if (!pmdcol->FSystemColumn())
+		{
+			ulNonSystemCols++;
+		}
+	}
+
+	return ulNonSystemCols;
+}
 
 // EOF

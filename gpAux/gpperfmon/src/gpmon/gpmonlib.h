@@ -56,7 +56,7 @@ extern int verbose;
 /* Architecture specific limits for metrics */
 #if defined(osx104_x86) || defined(osx105_x86) || defined(rhel4_x86_32) || defined(rhel5_x86_32)
 	#define GPSMON_METRIC_MAX 0xffffffffUL
-#elif defined(rhel4_x86_64) || defined(rhel5_x86_64) || defined(rhel6_x86_64) || defined(sol10_x86_64) || defined(suse10_x86_64)
+#elif defined(rhel4_x86_64) || defined(rhel5_x86_64) || defined(rhel7_x86_64) || defined(rhel6_x86_64) || defined(sol10_x86_64) || defined(suse10_x86_64)
 	#define GPSMON_METRIC_MAX 0xffffffffffffffffULL
 #else
 	#define GPSMON_METRIC_MAX 0xffffffffUL
@@ -81,7 +81,7 @@ extern int gpsmon_fatalx(const char* fline, int e, const char* fmt, ...);
 extern apr_status_t gpmon_ntohpkt(apr_int32_t magic, apr_int16_t version, apr_int16_t pkttype);
 
 /* get the size of the union packet for smon_to_mon packets*/
-inline size_t get_size_by_pkttype_smon_to_mmon(apr_int16_t pkttype);
+extern size_t get_size_by_pkttype_smon_to_mmon(apr_int16_t pkttype);
 
 /* strings */
 extern char* gpmon_trim(char* s);
@@ -182,6 +182,14 @@ struct multi_interface_holder_t
 	unsigned int counter;
 };
 
+#define CONM_INTERVAL (16)
+#define CONM_LOOP_LAUNCH_FRAME (1)
+#define CONM_LOOP_BROKEN_FRAME (9)
+#define CONM_LOOP_HANG_FRAME   (12)
+
+#define GPSMON_TIMEOUT_NONE     (0)
+#define GPSMON_TIMEOUT_RESTART  (1)
+#define GPSMON_TIMEOUT_DETECTED (2)
 
 /* segment host */ 
 typedef struct host_t
@@ -211,6 +219,8 @@ typedef struct host_t
 	unsigned char is_hdc;
 	unsigned char is_etl; 
 	char ever_connected; /* set to non-zero after first connection attempt */
+	char connect_timeout;
+	apr_int32_t pid;
 } host_t;
 
 #define QEXEC_MAX_ROW_BUF_SIZE (2048)
@@ -276,7 +286,7 @@ double subtractTimeOfDay(struct timeval* begin, struct timeval* end);
 
 
 /* Set header*/
-inline void gp_smon_to_mmon_set_header(gp_smon_to_mmon_packet_t* pkt, apr_int16_t pkttype);
+extern void gp_smon_to_mmon_set_header(gp_smon_to_mmon_packet_t* pkt, apr_int16_t pkttype);
 
 unsigned int gpdb_getnode_number_metrics(PerfmonNodeType type);
 const char* gpdb_getnodename(PerfmonNodeType type);

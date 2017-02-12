@@ -17,9 +17,9 @@ test__aocs_begin_headerscan(void **state)
 {
 	AOCSHeaderScanDesc desc;
 	RelationData reldata;
-	AppendOnlyEntry aoentry;
-	aoentry.version = 1;
-	aoentry.checksum = true;
+	FormData_pg_appendonly pgappendonly;
+	pgappendonly.checksum = true;
+	reldata.rd_appendonly = &pgappendonly;
 	FormData_pg_class pgclass;
 	reldata.rd_rel = &pgclass;
 	StdRdOptions opt;
@@ -46,7 +46,7 @@ test__aocs_begin_headerscan(void **state)
 	 * desc.ao_read.
 	 */
 	will_be_called(AppendOnlyStorageRead_Init);
-	desc = aocs_begin_headerscan(&reldata, &aoentry, 0);
+	desc = aocs_begin_headerscan(&reldata, 0);
 	assert_false(desc->ao_read.storageAttributes.compress);
 	assert_int_equal(desc->colno, 0);
 }
@@ -57,7 +57,7 @@ test__aocs_addcol_init(void **state)
 {
 	AOCSAddColumnDesc desc;
 	RelationData reldata;
-	AppendOnlyEntry aoentry;
+	FormData_pg_appendonly pgappendonly;
 	int nattr = 5;
 	StdRdOptions **opts =
 			(StdRdOptions **) malloc(sizeof(StdRdOptions *) * nattr);
@@ -89,8 +89,6 @@ test__aocs_addcol_init(void **state)
 	expect_value(create_datumstreamwrite, safeFSWriteSize, 0);
 	expect_value(create_datumstreamwrite, maxsz, 8192);
 	expect_value(create_datumstreamwrite, maxsz, 8192*2);
-	expect_any(create_datumstreamwrite, version);
-	expect_any(create_datumstreamwrite, version);
 	expect_any(create_datumstreamwrite, attr);
 	expect_any(create_datumstreamwrite, attr);
 	expect_any(create_datumstreamwrite, relname);
@@ -99,15 +97,15 @@ test__aocs_addcol_init(void **state)
 	expect_any(create_datumstreamwrite, title);
 	will_return_count(create_datumstreamwrite, NULL, 2);
 
-	aoentry.version = 1;
-	aoentry.checksum = true;
+	pgappendonly.checksum = true;
+	reldata.rd_appendonly = &pgappendonly;
 	reldata.rd_att = (TupleDesc) malloc(sizeof(struct tupleDesc));
 	reldata.rd_att->attrs =
 			(Form_pg_attribute *) malloc(sizeof(Form_pg_attribute *) * nattr);
 	memset(reldata.rd_att->attrs, 0, sizeof(Form_pg_attribute *) * nattr);
 	reldata.rd_att->natts = 5;
 	/* 3 existing columns, 2 new columns */
-	desc = aocs_addcol_init(&reldata, &aoentry, 2);
+	desc = aocs_addcol_init(&reldata, 2);
 	assert_int_equal(desc->num_newcols, 2);
 	assert_int_equal(desc->cur_segno, -1);
 }

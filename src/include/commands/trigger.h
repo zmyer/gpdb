@@ -6,7 +6,7 @@
  * Portions Copyright (c) 1996-2008, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- * $PostgreSQL: pgsql/src/include/commands/trigger.h,v 1.61 2007/02/14 01:58:58 tgl Exp $
+ * $PostgreSQL: pgsql/src/include/commands/trigger.h,v 1.66.2.1 2008/09/19 14:43:47 mha Exp $
  *
  *-------------------------------------------------------------------------
  */
@@ -81,17 +81,30 @@ typedef struct TriggerData
 #define TRIGGER_FIRED_AFTER(event)				\
 		(!TRIGGER_FIRED_BEFORE (event))
 
+/*
+ * Definitions for the replication role based firing.
+ */
+#define SESSION_REPLICATION_ROLE_ORIGIN		0
+#define SESSION_REPLICATION_ROLE_REPLICA	1
+#define SESSION_REPLICATION_ROLE_LOCAL		2
+extern PGDLLIMPORT int	SessionReplicationRole;
+
+#define TRIGGER_FIRES_ON_ORIGIN				'O'
+#define TRIGGER_FIRES_ALWAYS				'A'
+#define TRIGGER_FIRES_ON_REPLICA			'R'
+#define TRIGGER_DISABLED					'D'
 
 extern Oid	CreateTrigger(CreateTrigStmt *stmt, Oid constraintOid);
 
 extern void DropTrigger(Oid relid, const char *trigname,
 			DropBehavior behavior, bool missing_ok);
 extern void RemoveTriggerById(Oid trigOid);
+extern Oid  get_trigger_oid(Oid relid, const char *name, bool missing_ok);
 
 extern void renametrig(Oid relid, const char *oldname, const char *newname);
 
 extern void EnableDisableTrigger(Relation rel, const char *tgname,
-					 bool enable, bool skip_system);
+					 char fires_when, bool skip_system);
 
 extern void RelationBuildTriggers(Relation relation);
 
@@ -115,8 +128,7 @@ extern void ExecASDeleteTriggers(EState *estate,
 					 ResultRelInfo *relinfo);
 extern bool ExecBRDeleteTriggers(EState *estate,
 					 ResultRelInfo *relinfo,
-					 ItemPointer tupleid,
-					 CommandId cid);
+					 ItemPointer tupleid);
 extern void ExecARDeleteTriggers(EState *estate,
 					 ResultRelInfo *relinfo,
 					 ItemPointer tupleid);
@@ -124,11 +136,10 @@ extern void ExecBSUpdateTriggers(EState *estate,
 					 ResultRelInfo *relinfo);
 extern void ExecASUpdateTriggers(EState *estate,
 					 ResultRelInfo *relinfo);
-extern HeapTuple ExecBRUpdateTriggers(EState *estate,
+extern TupleTableSlot *ExecBRUpdateTriggers(EState *estate,
 					 ResultRelInfo *relinfo,
 					 ItemPointer tupleid,
-					 HeapTuple newtuple,
-					 CommandId cid);
+					 TupleTableSlot *slot);
 extern void ExecARUpdateTriggers(EState *estate,
 					 ResultRelInfo *relinfo,
 					 ItemPointer tupleid,
@@ -153,7 +164,7 @@ extern bool RI_FKey_keyequal_upd_pk(Trigger *trigger, Relation pk_rel,
 extern bool RI_FKey_keyequal_upd_fk(Trigger *trigger, Relation fk_rel,
 						HeapTuple old_row, HeapTuple new_row);
 extern bool RI_Initial_Check(Trigger *trigger,
-							 Relation fk_rel, Relation pk_rel);
+				 Relation fk_rel, Relation pk_rel);
 
 /* result values for RI_FKey_trigger_type: */
 #define RI_TRIGGER_PK	1		/* is a trigger on the PK relation */
